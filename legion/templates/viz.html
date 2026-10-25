@@ -55,6 +55,7 @@
   .head img, .head .orb { width: 46px; height: 46px; border-radius: 50%; flex: none; }
   .head .name { font-size: 24px; line-height: 1.1; }
   .head .sub { font-style: italic; color: var(--ink2); font-size: 14px; }
+  .desc { white-space: pre-wrap; line-height: 1.45; margin: 4px 0 14px; color: var(--ink); }
   .nums { display: flex; gap: 26px; margin: 4px 0 8px; }
   .nums div { display: flex; flex-direction: column; }
   .nums b { font-weight: 400; font-size: 26px; line-height: 1.1; }
@@ -580,6 +581,7 @@ function viewGoal() {
   return [
     h("div", { class: "head" }, h("div", { class: "orb", style: "border:1px solid var(--ink)" }),
       h("div", {}, h("div", { class: "name" }, data.project || "Project"), h("div", { class: "sub" }, "the main goal"))),
+    data.description ? h("p", { class: "desc" }, data.description) : null,
     h("div", { class: "nums" },
       h("div", {}, h("b", {}, g.done), h("span", { class: "caps" }, "done")),
       h("div", {}, h("b", {}, g.total - g.done), h("span", { class: "caps" }, "to do")),

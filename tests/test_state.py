@@ -221,3 +221,15 @@ def test_only_integrator_creates_children():
     log.add(BOSS, "task.created", key="big/z", title="Z", zone=["src/other.py"], accept="x",
             parent=tid, sketch=k["id"])  # not even the integrator can move a subtask out of the zone
     assert log.state().children(tid) == []
+
+
+def test_only_an_integrator_describes_the_project_and_the_latest_wins():
+    log = Log()
+    log.add(BOSS, "project.init", project="p", integrators=[BOSS.author], description="first")
+    assert log.state().description == "first"
+    log.add(ANA, "project.described", description="hijacked")
+    log.add(BOSS, "project.described", description="second")
+    log.add(BOSS, "project.described", description="x" * (E.MAX_DESCRIPTION + 1))
+    st = log.state()
+    assert st.description == "second"
+    assert len(st.ignored) == 2

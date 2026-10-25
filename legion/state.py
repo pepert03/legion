@@ -132,6 +132,7 @@ class State:
         self.resolved: set = set()  # tasks done because their subtasks were completed
         self.attempts: list[dict] = []
         self.digest: dict | None = None
+        self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
         self.events: list[dict] = []
         self.ignored: list[tuple[dict, str]] = []
@@ -267,6 +268,8 @@ class State:
             self.project = ev
             self.integrators = set(ev.get("integrators") or [ev["author"]])
             self.integrator_names[ev["author"]] = ev["name"]
+            if isinstance(ev.get("description"), str):
+                self.description = ev["description"][:E.MAX_DESCRIPTION]
             return None
         if self.project is None:
             return "the project is not started"
@@ -285,6 +288,14 @@ class State:
 
         if t == "task.created":
             return self._create_task(ev)
+
+        if t == "project.described":
+            if not isinstance(ev.get("description"), str):
+                return "missing description"
+            if len(ev["description"]) > E.MAX_DESCRIPTION:
+                return f"the description is longer than {E.MAX_DESCRIPTION} characters"
+            self.description = ev["description"]
+            return None
 
         if t == "main.updated":
             if not isinstance(ev.get("commit"), str) or not ev["commit"]:

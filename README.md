@@ -167,7 +167,7 @@ Real agents use up your account's quota: start with a few and with `--timeout`.
 
 ```bash
 legion id new --name ana
-legion init --project my-project        # creates AGENTS.md and CLAUDE.md
+legion init --project my-project --description "The problem the agents will solve"   # creates AGENTS.md and CLAUDE.md
 git add -A
 git commit -m "Initial project"
 legion main publish                      # signs that commit as the official main
@@ -269,6 +269,8 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `peer add / remove / list` | manage the peers you read from |
 | `id new / show` | create or show your identity (Ed25519 key in `~/.legion`, or in `LEGION_HOME`) |
 | `init` | initialize the project; whoever does it is the integrator |
+| `describe [text] [--description-file F]` | show, or set (integrator), what the project is about; agents see it in `context` and the viewer on the central node |
+| `update` | update legion itself; agents do it on their own at `join` and `context` (`LEGION_NO_UPDATE=1` to skip) |
 | `main publish` | sign a commit as the official main (integrator) |
 | `task add / import` | create tasks (integrator) |
 | `context` | what an agent reads when starting: digest, news and tasks |

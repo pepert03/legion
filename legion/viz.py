@@ -105,7 +105,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     for t in tasks:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     recent = [item(e, st) for e in evs if e["type"] not in ROUTINE][-14:]
-    return {"project": st.project.get("project") if st.project else None,
+    return {"project": st.project.get("project") if st.project else None, "description": st.description,
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
             "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent}

@@ -82,6 +82,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         reason = reason.splitlines()[0][:200] if reason else ""
     return {
         "project.init": f"starts the project {ev.get('project', '')}",
+        "project.described": "describes the project",
         "task.created": f"creates task {S.task_id(ev)} ({ev.get('key')}): {ev.get('title')}",
         "task.claimed": f"claims {key}",
         "task.heartbeat": f"renews {key}",
@@ -136,13 +137,34 @@ def cmd_id(args):
         out(args, {"name": ident.name, "author": ident.author}, f"{ident.name}  {ident.author}")
 
 
+def read_description(args) -> str:
+    text = Path(args.description_file).read_text(encoding="utf-8") if args.description_file else args.description
+    text = (text or "").strip()
+    if len(text) > E.MAX_DESCRIPTION:
+        raise Fail(f"the description is longer than {E.MAX_DESCRIPTION} characters")
+    return text
+
+
+def cmd_describe(args):
+    c = Ctx()
+    c.require_integrator()
+    if not (args.description or args.description_file):
+        print(c.st.description or "(the project has no description yet)")
+        return
+    c.emit("project.described", description=read_description(args))
+    c.sync()
+    print("Project description published.")
+
+
 def cmd_init(args):
     repo, ident = repo_root(), need_identity()
     coordgit.sync(repo, ident)
     if S.build(coordgit.read_events(repo)).project:
         raise Fail("this repository already has a legion project")
     name = args.project or repo.name
-    ev = E.create(ident, "project.init", 1, project=name, integrators=[ident.author])
+    desc = read_description(args)
+    ev = E.create(ident, "project.init", 1, project=name, integrators=[ident.author],
+                  **({"description": desc} if desc else {}))
     coordgit.append(repo, ident, ev)
     coordgit.sync(repo, ident)
     agents = repo / "AGENTS.md"
@@ -651,6 +673,8 @@ def cmd_context(args):
     c = Ctx()
     st, now = c.st, time.time()
     lines = [f"# Project {st.project.get('project') if st.project else '?'} · you: {c.ident.name} ({c.ident.short})", ""]
+    if st.description:
+        lines += ["## What this project is about", st.description.strip(), ""]
     lines.append("## Shared digest")
     lines.append(st.digest["text"].strip() if st.digest else "(no digest yet)")
     news = since_digest(st)
@@ -786,7 +810,14 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", help="start a project in this repository (makes you the integrator)")
     s.add_argument("--project")
+    s.add_argument("--description", help="what the project is about: the problem the agents are solving")
+    s.add_argument("--description-file", help="read the description from a file (Markdown is fine)")
     s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("describe", help="show, or set (integrator), what the project is about")
+    s.add_argument("description", nargs="?")
+    s.add_argument("--description-file", help="read it from a file")
+    s.set_defaults(func=cmd_describe)
 
     s = sub.add_parser("join", help="clone a legion project and get it ready for your agent")
     s.add_argument("url")

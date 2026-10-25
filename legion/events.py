@@ -9,6 +9,7 @@ from .identity import Identity, verify
 
 TYPES = {
     "project.init",
+    "project.described",
     "task.created",
     "task.claimed",
     "task.heartbeat",
@@ -29,10 +30,11 @@ TYPES = {
     "integrator.renew",
     "integrator.release",
 }
-INTEGRATOR_ONLY = {"task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
+INTEGRATOR_ONLY = {"project.described", "task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
                    "sketch.accepted", "sketch.rejected", "sketch.failed", "task.resolved",
                    "integrator.vote", "integrator.lease", "integrator.renew", "integrator.release"}
 MAX_NOTES = 2000
+MAX_DESCRIPTION = 4000
 RESERVED = {"type", "author", "name", "lamport", "ts", "agent", "model", "id", "sig"}
 
 
