@@ -258,9 +258,14 @@ def join_radicle(args, ident: Identity, dest: Path) -> None:
 
 def free_port(start: int = 8765) -> int:
     for port in range(start, start + 50):
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", port)):  # nobody listening
+        with socket.socket() as s:  # try to take it: a hung server still holds a port without answering
+            if os.name == "nt":
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                s.bind(("127.0.0.1", port))
                 return port
+            except OSError:
+                continue
     return 0
 
 

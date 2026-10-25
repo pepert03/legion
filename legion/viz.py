@@ -5,6 +5,8 @@ stay open in the same repository an agent is working in.
 """
 
 import json
+import os
+import socket
 import threading
 import time
 import webbrowser
@@ -211,12 +213,23 @@ def make_handler(source: Source):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    # On Windows, SO_REUSEADDR (Python's default here) lets a second viewer bind a port that's already in use,
+    # and requests then land on either one. Ask for the port exclusively, so a busy one is detected.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def serve(repo: Path, port: int, interval: float, fetch: bool, open_browser: bool) -> int:
     source = Source(repo, interval, fetch)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(source))  # this machine only
+        server = Server(("127.0.0.1", port), make_handler(source))  # this machine only
     except OSError:  # the port is taken (another viewer, perhaps): any free one will do
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(source))
+        server = Server(("127.0.0.1", 0), make_handler(source))
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Viewer for {repo} at {url} (Ctrl+C to stop)", flush=True)
     if open_browser:
