@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legion"
+version = "0.1.0"
+description = "Coordinación de muchos agentes sobre un mismo repositorio git, sin servidor central"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41"]
+
+[project.scripts]
+legion = "legion.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["legion*"]
+
+[tool.setuptools.package-data]
+legion = ["templates/*.md", "templates/*.html", "static/logos/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

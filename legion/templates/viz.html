@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Legion</title>
+<style>
+  /* Latin Modern: LaTeX's typeface (distributed by the latex.css package). */
+  @font-face { font-family: "Latin Modern"; font-style: normal; font-weight: 400; font-display: swap;
+               src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-regular.woff2") format("woff2"); }
+  @font-face { font-family: "Latin Modern"; font-style: italic; font-weight: 400; font-display: swap;
+               src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-italic.woff2") format("woff2"); }
+  @font-face { font-family: "Latin Modern"; font-style: normal; font-weight: 700; font-display: swap;
+               src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-bold.woff2") format("woff2"); }
+  @font-face { font-family: "Latin Modern"; font-style: italic; font-weight: 700; font-display: swap;
+               src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-bold-italic.woff2") format("woff2"); }
+  :root {
+    --paper: #fbfaf6; --card: #fffefb; --ink: #1c1b19; --ink2: #5e5a53; --ink3: #9a958c; --hair: #dcd7cd;
+    --open: #1c1b19; --claimed: #c38a1f; --review: #7a5c9e; --sketched: #2d8a85;
+    --accepted: #3d7a4f; --blocked: #b9b3a8; --cancelled: #b04f3a;
+    --serif: "Latin Modern", "Latin Modern Roman", "CMU Serif", "Computer Modern", Georgia, serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { font: 15px/1.45 var(--serif); color: var(--ink); background: var(--paper);
+         background-image: radial-gradient(ellipse at 50% 46%, #ffffff 0%, var(--paper) 62%); }
+  #graph { position: fixed; inset: 128px 0 64px 0; }  /* below the title, so it never runs under it */
+  .caps { font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); }
+
+  .title { position: fixed; top: 30px; left: 40px; pointer-events: none; }
+  .title h1 { font-weight: 400; font-size: 34px; line-height: 1.05; margin: 4px 0 6px; letter-spacing: -0.005em; }
+  .title .meta { font-style: italic; color: var(--ink2); font-size: 15px; }
+  .title .meta b { font-style: normal; font-weight: 400; color: var(--ink); }
+  .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--claimed);
+              margin: 0 6px 1px 10px; animation: breathe 2s ease-in-out infinite; }
+  .replay-tag { font-style: normal; margin-left: 10px; }
+  @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+
+  .icon-btn { all: unset; position: fixed; top: 30px; right: 36px; width: 36px; height: 36px; display: grid;
+              place-items: center; cursor: pointer; border-radius: 50%; color: var(--ink2); transition: background .2s, color .2s; }
+  .icon-btn:hover, .icon-btn.on { background: rgba(28, 27, 25, 0.06); color: var(--ink); }
+  .icon-btn svg { width: 19px; height: 19px; }
+  .icon-btn:focus-visible { outline: 1px dotted var(--ink3); outline-offset: 2px; }
+
+  /* Info window: closed until asked for */
+  #pop { position: fixed; top: 76px; right: 40px; width: 370px; max-height: calc(100vh - 170px); overflow-y: auto;
+         background: var(--card); border: 1px solid var(--hair); border-radius: 4px; padding: 22px 24px 20px;
+         box-shadow: 0 18px 50px rgba(60, 50, 30, 0.12), 0 2px 6px rgba(60, 50, 30, 0.06);
+         opacity: 0; transform: translateY(-6px); pointer-events: none; transition: opacity .22s ease, transform .22s ease; }
+  #pop.open { opacity: 1; transform: none; pointer-events: auto; }
+  #pop .close { all: unset; cursor: pointer; position: absolute; top: 10px; right: 14px; font-size: 20px; line-height: 1; color: var(--ink3); }
+  #pop .close:hover { color: var(--ink); }
+  #pop h2 { margin: 22px 0 10px; } #pop h2:first-of-type { margin-top: 4px; }
+  .head { display: flex; gap: 14px; align-items: center; margin: 2px 0 14px; }
+  .head img, .head .orb { width: 46px; height: 46px; border-radius: 50%; flex: none; }
+  .head .name { font-size: 24px; line-height: 1.1; }
+  .head .sub { font-style: italic; color: var(--ink2); font-size: 14px; }
+  .nums { display: flex; gap: 26px; margin: 4px 0 8px; }
+  .nums div { display: flex; flex-direction: column; }
+  .nums b { font-weight: 400; font-size: 26px; line-height: 1.1; }
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; margin: 10px 0 0; font-size: 14px; }
+  .kv dt { font-style: italic; color: var(--ink3); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  code { font: 12px ui-monospace, "Latin Modern Mono", Consolas, monospace; color: var(--ink2); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 7px 0; cursor: pointer; border-bottom: 1px solid #efebe3; }
+  .row:last-child { border-bottom: 0; }
+  .row img { width: 28px; height: 28px; border-radius: 50%; flex: none; }
+  .row .who { flex: 1; min-width: 0; }
+  .row .who div { font-style: italic; color: var(--ink2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row:hover .who > span { text-decoration: underline; text-decoration-color: var(--ink3); text-underline-offset: 3px; }
+  .person { display: grid; grid-template-columns: 1fr auto; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #efebe3; }
+  .person:last-child { border-bottom: 0; }
+  .person .sub { font-style: italic; color: var(--ink3); font-size: 13px; }
+  .score { font-variant-numeric: oldstyle-nums; font-size: 19px; text-align: right; min-width: 34px; }
+  .score small { display: block; font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink3); }
+  .score.high { color: var(--accepted); } .score.low { color: var(--cancelled); } .score.new { color: var(--ink3); }
+  .trust { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; align-items: center; margin: 6px 0 4px; }
+  .trust .big { font-size: 40px; line-height: 1; }
+  .trust .bar { height: 2px; background: var(--hair); position: relative; margin-top: 6px; }
+  .trust .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: currentColor; }
+  .because { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13.5px; color: var(--ink2); }
+  .because li { padding: 1px 0; }
+  .because li::before { display: inline-block; width: 16px; font-style: normal; }
+  .because li.up::before { content: "+"; color: var(--accepted); }
+  .because li.down::before { content: "−"; color: var(--cancelled); }
+  .because li.none::before { content: "·"; color: var(--ink3); }
+  .events { list-style: none; margin: 0; padding: 0 0 0 16px; border-left: 1px solid var(--hair); }
+  .events li { position: relative; padding: 0 0 11px 10px; font-size: 14px; overflow-wrap: anywhere; }
+  .events li::before { content: ""; position: absolute; left: -17px; top: 8px; width: 9px; height: 1px; background: var(--c, var(--ink3)); }
+  .events li .when { display: block; font-style: italic; color: var(--ink3); font-size: 12.5px; }
+  .events li.new { animation: enter .5s ease both; }
+  @keyframes enter { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }
+  .legend { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 14px; font-style: italic; color: var(--ink2); }
+  .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px;
+                         border: 1px solid var(--c); background: var(--f, transparent); }
+  .empty { font-style: italic; color: var(--ink3); }
+
+  #time { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; }
+  #time svg { width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
+  #time text { font-family: var(--serif); }
+  #tip { position: fixed; pointer-events: none; background: var(--card); border: 1px solid var(--hair); border-radius: 3px;
+         padding: 6px 10px; font-size: 13.5px; max-width: 300px; display: none; z-index: 5;
+         box-shadow: 0 8px 24px rgba(60, 50, 30, 0.10); }
+  #tip i { color: var(--ink2); }
+  #notice { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%); font-style: italic; color: var(--ink2);
+            display: none; text-align: center; max-width: 440px; }
+  @media (max-width: 640px) {
+    .title { left: 20px; top: 20px; } .title h1 { font-size: 26px; }
+    #graph { top: 104px; }
+    .icon-btn { top: 20px; right: 16px; }
+    #pop { left: 12px; right: 12px; width: auto; top: auto; bottom: 74px; max-height: 55vh; }
+  }
+</style>
+</head>
+<body>
+<div id="graph"></div>
+<div class="title">
+  <div class="caps">Legion</div>
+  <h1 id="project">&nbsp;</h1>
+  <div class="meta" id="meta"></div>
+</div>
+<button class="icon-btn" id="openLog" title="Agents, people and activity" aria-label="Agents, people and activity">
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+    <path d="M4 5.5h12M4 10h12M4 14.5h7.5"/>
+  </svg>
+</button>
+<section id="pop" aria-live="polite"><button class="close" id="close" title="Close" aria-label="Close">×</button><div id="popBody"></div></section>
+<div id="time"><svg id="tl" aria-label="Timeline"></svg></div>
+<div id="tip"></div>
+<div id="notice"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/force-graph@1.43.5/dist/force-graph.min.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const h = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v; else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return e;
+};
+const SERIF = '"Latin Modern", "Latin Modern Roman", Georgia, serif';
+const STATUS = { open: "open", claimed: "in progress", review: "in review", sketched: "split",
+                 accepted: "done", blocked: "blocked", cancelled: "cancelled" };
+const ACTIVE = new Set(["claimed", "review"]);
+const P = {};
+for (const k of ["paper", "card", "ink", "ink2", "ink3", "hair", "open", "claimed", "review", "sketched", "accepted", "blocked", "cancelled"]) P[k] = css(`--${k}`);
+function rgba(hex, a) {
+  const n = parseInt(hex.replace("#", ""), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+function ago(ts) {
+  const ref = data && !data.live ? data.ts : Date.now() / 1000, s = Math.max(0, ref - ts);
+  if (s < 50) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  return new Date(ts * 1000).toLocaleString();
+}
+const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+// ---------------------------------------------------------------------------------------------
+// Agent names and logos
+// ---------------------------------------------------------------------------------------------
+// An agent is called person#number: shown as "ana" with the number as a subscript.
+function nameParts(a) { return { owner: a.owner || a.name, n: a.number }; }
+function nameNode(a) {
+  const { owner, n } = nameParts(a);
+  return h("span", {}, owner, n ? h("sub", { style: "font-size:.68em" }, n) : null);
+}
+const isIntegrator = (a) => a.role === "integrator";
+// Logos from Lobe Icons (lobehub/lobe-icons). A local file in .legion/logos/<kind>.svg wins, and
+// legion ships Muse and Instinct, which that collection lacks.
+const LOBE = "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.95.1/icons/";
+const KIND_LOGO = {
+  claude: "claude-color", codex: "codex-color", openai: "openai", deepseek: "deepseek-color", gemini: "gemini-color",
+  cursor: "cursor", opencode: "opencode", qwen: "qwen-color", kimi: "kimi-color", mistral: "mistral-color",
+  copilot: "githubcopilot", windsurf: "windsurf", cline: "cline", grok: "grok", ollama: "ollama", manus: "manus",
+  devin: "devin-color", trae: "trae-color", goose: "goose", meta: "meta-color", zai: "zai",
+};
+const KIND_LABEL = {
+  claude: "Claude", codex: "Codex", openai: "OpenAI", deepseek: "DeepSeek", gemini: "Gemini", cursor: "Cursor",
+  opencode: "OpenCode", qwen: "Qwen", kimi: "Kimi", mistral: "Mistral", copilot: "Copilot", windsurf: "Windsurf",
+  cline: "Cline", grok: "Grok", ollama: "Ollama", manus: "Manus", devin: "Devin", trae: "Trae", goose: "Goose",
+  meta: "Llama", zai: "Z.ai", muse: "Muse", instinct: "Instinct", fake: "test agent", human: "integrator",
+  standby: "standby integrator", other: "agent",
+};
+const KIND_ORDER = ["claude", "codex", "deepseek", "gemini", "cursor", "opencode", "qwen", "kimi", "mistral", "copilot",
+                    "windsurf", "cline", "grok", "ollama", "manus", "devin", "trae", "goose", "muse", "instinct", "zai", "openai", "meta"];
+function kindOf(a) {
+  const k = [...(a.kinds || []), ...(a.models || [])].join(" ").toLowerCase();
+  if (isIntegrator(a) || k.includes("human") || k.includes("humano")) return a.leader === false && isIntegrator(a) ? "standby" : "human";
+  if (k.includes("gpt")) return "codex";
+  for (const kind of KIND_ORDER) if (k.includes(kind)) return kind;
+  if (k.includes("llama")) return "meta";
+  if (k.includes("fake")) return "fake";
+  return "other";
+}
+const logos = {};             // kind -> Image | null (loading, or no logo)
+let localLogos = new Set();   // kinds the server has a logo file for
+function loadLogo(kind) {
+  if (kind in logos) return;
+  logos[kind] = null;
+  const tryUrl = (urls) => {
+    if (!urls.length) return;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => { logos[kind] = img; discs.clear(); renderPop(); };
+    img.onerror = () => tryUrl(urls.slice(1));
+    img.src = urls[0];
+  };
+  tryUrl([...(localLogos.has(kind) ? [`/logo/${kind}`] : []), ...(KIND_LOGO[kind] ? [`${LOBE}${KIND_LOGO[kind]}.svg`] : [])]);
+}
+// The agent's disc: paper, a hairline and the logo; without a logo, the initial in LaTeX italic.
+const discs = new Map();
+function disc(kind, owner, px = 96) {
+  const key = `${kind}|${owner}|${px}`;
+  if (discs.has(key)) return discs.get(key);
+  const c = document.createElement("canvas"); c.width = c.height = px;
+  const ctx = c.getContext("2d"), r = px / 2;
+  ctx.beginPath(); ctx.arc(r, r, r - 1, 0, Math.PI * 2);
+  ctx.fillStyle = kind === "human" ? "#1c1b19" : "#fffefb"; ctx.fill();
+  ctx.lineWidth = kind === "standby" ? px / 24 : px / 48;
+  ctx.strokeStyle = kind === "human" || kind === "standby" ? "#1c1b19" : "#cfc8bb"; ctx.stroke();
+  const img = logos[kind];
+  if (img) {
+    const s = px * 0.56;
+    ctx.save(); ctx.beginPath(); ctx.arc(r, r, r - 2, 0, Math.PI * 2); ctx.clip();
+    ctx.drawImage(img, r - s / 2, r - s / 2, s, s); ctx.restore();
+  } else {
+    ctx.fillStyle = kind === "human" ? "#fbfaf6" : "#1c1b19";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const letter = kind === "fake" ? "ƒ" : ["other", "human", "standby"].includes(kind) ? (owner || "?")[0].toUpperCase()
+                 : (KIND_LABEL[kind] || "?")[0];
+    ctx.font = `italic ${px * 0.5}px ${SERIF}`;
+    ctx.fillText(letter, r, r + px * 0.03);
+  }
+  discs.set(key, c);
+  return c;
+}
+function discImg(a, px = 28) {
+  const kind = kindOf(a), img = new Image();
+  try { img.src = disc(kind, nameParts(a).owner, px * 3).toDataURL(); } catch { /* logo without CORS: no thumbnail */ }
+  img.alt = KIND_LABEL[kind]; return img;
+}
+
+// ---------------------------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------------------------
+const GOAL = "__goal__";
+let data = null, live = true, playTimer = null, selected = null, popMode = null, hover = null, hoverAgent = null;
+const nodes = new Map(), agents = new Map(), neighbours = new Map();
+let structureSig = "", userMoved = false, refitTimer = null, marks = [], marksTotal = -1, fittedCount = 0;
+
+function radius(n) {
+  if (n.id === GOAL) return 17;
+  const base = { S: 6, M: 7.5, L: 9.5 }[n.size] || 7;
+  return Math.max(4, base - n.depth * 1.3 + Math.min(n.children, 6) * 0.5);
+}
+
+function applySnapshot(d) {
+  const now = performance.now();
+  const quiet = lastIndex >= 0 && Math.abs(d.index - lastIndex) > 3;  // a jump in history: no ripples everywhere
+  let structural = false;
+  if (!nodes.has(GOAL)) { nodes.set(GOAL, { id: GOAL, depth: -1, fx: 0, fy: 0, x: 0, y: 0, ripples: [] }); structural = true; }
+  const goal = nodes.get(GOAL);
+  const exclusive = d.tasks.filter((t) => t.mode === "exclusive" && t.status !== "cancelled");
+  Object.assign(goal, { label: d.project || "project", children: d.tasks.filter((t) => !t.parent).length,
+                        done: exclusive.filter((t) => t.status === "accepted").length, total: exclusive.length });
+  const want = new Set([GOAL]);
+  for (const t of d.tasks) {
+    want.add(t.id);
+    let n = nodes.get(t.id);
+    if (!n) {
+      const p = nodes.get(t.parent || GOAL) || goal;
+      n = { id: t.id, x: (p.x || 0) + (Math.random() - 0.5) * 16, y: (p.y || 0) + (Math.random() - 0.5) * 16, ripples: [] };
+      nodes.set(t.id, n); structural = true;
+      if (!quiet) n.ripples.push({ t0: now, color: P.ink3 });
+    } else if (!quiet && n.status && n.status !== t.status) {
+      n.ripples.push({ t0: now, color: P[t.status] || P.ink });
+    }
+    Object.assign(n, t, { label: t.key.split("/").pop() });
+  }
+  for (const id of [...nodes.keys()]) if (!want.has(id)) { nodes.delete(id); structural = true; }
+
+  const sig = d.tasks.map((t) => `${t.id}<${t.parent || ""}<${t.deps.join(",")}`).sort().join("|");
+  if (structural || sig !== structureSig) {
+    const links = [];
+    for (const t of d.tasks) {
+      links.push({ source: t.parent || GOAL, target: t.id, kind: "tree" });
+      for (const dep of t.deps) if (nodes.has(dep)) links.push({ source: dep, target: t.id, kind: "dep" });
+    }
+    neighbours.clear();
+    for (const l of links) for (const [a, b] of [[l.source, l.target], [l.target, l.source]]) {
+      if (!neighbours.has(a)) neighbours.set(a, new Set());
+      neighbours.get(a).add(b);
+    }
+    Graph.graphData({ nodes: [...nodes.values()], links });
+    structureSig = sig;
+    // Refit only when the graph grows; going back in history leaves the view where it is.
+    if (!userMoved && nodes.size > fittedCount) {
+      fittedCount = nodes.size;
+      clearTimeout(refitTimer); refitTimer = setTimeout(() => !userMoved && Graph.zoomToFit(900, 90), 1600);
+    }
+  }
+  const seen = new Set();
+  for (const a of d.agents) {
+    seen.add(a.id); loadLogo(kindOf(a));
+    const cur = agents.get(a.id);
+    if (cur) cur.a = a; else agents.set(a.id, { a, x: 0, y: 0, alpha: 0 });
+  }
+  for (const id of [...agents.keys()]) if (!seen.has(id)) agents.delete(id);
+}
+
+function agentTargets(t) {
+  const out = new Map(), byTask = new Map(), idle = [];
+  for (const [id, ag] of agents) {
+    const tid = isIntegrator(ag.a) ? null : ag.a.holds.find((x) => nodes.has(x));
+    if (tid) { if (!byTask.has(tid)) byTask.set(tid, []); byTask.get(tid).push(id); } else idle.push(id);
+  }
+  for (const [tid, ids] of byTask) {
+    const n = nodes.get(tid), r = radius(n) + 5.5;
+    ids.sort().forEach((id, i) => {
+      const ang = -Math.PI / 4 + i * 0.8;
+      out.set(id, { x: n.x + Math.cos(ang) * r, y: n.y + Math.sin(ang) * r, working: true });
+    });
+  }
+  idle.sort().forEach((id, i) => {
+    const integ = isIntegrator(agents.get(id).a);
+    const R = integ ? 27 : 38 + (i % 2) * 7;
+    const ang = (i / Math.max(idle.length, 1)) * Math.PI * 2 + t / (integ ? 26000 : 16000);
+    out.set(id, { x: Math.cos(ang) * R, y: Math.sin(ang) * R, working: false });
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Drawing (after a TikZ diagram: ink, hairlines and italics)
+// ---------------------------------------------------------------------------------------------
+function dimmed(id) { return hover && !(id === hover || (neighbours.get(hover) || new Set()).has(id)); }
+
+function drawNode(n, ctx, scale) {
+  const t = performance.now(), r = radius(n);
+  ctx.save();
+  ctx.globalAlpha = dimmed(n.id) ? 0.22 : n.status === "cancelled" ? 0.5 : 1;
+  for (const rp of n.ripples) {
+    const k = (t - rp.t0) / 1600;
+    if (k > 1) continue;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 2 + k * 18, 0, Math.PI * 2);
+    ctx.strokeStyle = rgba(rp.color, (1 - k) * 0.55); ctx.lineWidth = 0.8; ctx.stroke();
+  }
+  n.ripples = n.ripples.filter((rp) => t - rp.t0 < 1600);
+
+  if (n.id === GOAL) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fillStyle = P.card; ctx.fill();
+    ctx.lineWidth = 0.7; ctx.strokeStyle = P.ink; ctx.stroke();
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 3, 0, Math.PI * 2); ctx.strokeStyle = P.hair; ctx.lineWidth = 0.6; ctx.stroke();
+    const frac = n.total ? n.done / n.total : 0;
+    if (frac) {
+      ctx.beginPath(); ctx.arc(n.x, n.y, r + 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.strokeStyle = P.accepted; ctx.lineWidth = 1.6; ctx.lineCap = "round"; ctx.stroke();
+    }
+    ctx.fillStyle = P.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `400 9px ${SERIF}`;
+    ctx.fillText(`${Math.round(frac * 100)}%`, n.x, n.y + 0.5);
+    ctx.restore();
+    return;
+  }
+
+  const col = P[n.status] || P.ink, active = ACTIVE.has(n.status);
+  if (active) {
+    const p = 0.5 + 0.5 * Math.sin(t / 650 + n.x);
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.5 + p * 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = rgba(col, 0.09 + p * 0.06); ctx.fill();
+  }
+  ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+  if (n.status === "accepted") {
+    ctx.fillStyle = col; ctx.fill();
+  } else {
+    ctx.fillStyle = active ? rgba(col, 0.14) : n.status === "sketched" ? rgba(col, 0.08) : P.card;
+    ctx.fill();
+    ctx.lineWidth = active ? 1.2 : 0.8;
+    ctx.strokeStyle = n.status === "open" ? P.ink : col;
+    if (n.status === "blocked" || n.status === "cancelled") ctx.setLineDash([1.6, 1.6]);
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (n.status === "review") {  // a dot in the middle: waiting for a verdict
+    ctx.beginPath(); ctx.arc(n.x, n.y, r * 0.28, 0, Math.PI * 2); ctx.fillStyle = col; ctx.fill();
+  }
+  if (n.status === "sketched" && n.children) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.4, -Math.PI / 2, -Math.PI / 2 + (n.children_done / n.children) * Math.PI * 2);
+    ctx.strokeStyle = P.accepted; ctx.lineWidth = 1.2; ctx.lineCap = "round"; ctx.stroke();
+  }
+  if (n.status === "cancelled") {
+    ctx.beginPath(); ctx.moveTo(n.x - r * 0.7, n.y + r * 0.7); ctx.lineTo(n.x + r * 0.7, n.y - r * 0.7);
+    ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.stroke();
+  }
+  if (n.mode === "competitive") {
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.2, 0, Math.PI * 2); ctx.strokeStyle = rgba(P.ink, 0.35); ctx.lineWidth = 0.5; ctx.stroke();
+  }
+  if (n.id === selected) {
+    ctx.beginPath(); ctx.arc(n.x, n.y, r + 4.5, 0, Math.PI * 2); ctx.strokeStyle = P.ink; ctx.lineWidth = 0.6;
+    ctx.setLineDash([1, 1.6]); ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (scale > 0.75 || active || n.id === hover || n.depth === 0) {
+    ctx.font = `italic ${Math.max(3.2, 11.5 / scale)}px ${SERIF}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillStyle = n.status === "accepted" ? P.ink2 : P.ink;
+    ctx.fillText(n.label, n.x, n.y + r + 2.5);
+  }
+  ctx.restore();
+}
+
+function drawAgents(ctx, scale) {
+  const t = performance.now(), targets = agentTargets(t);
+  const R = Math.max(3.6, 8.5 / scale);
+  for (const [id, ag] of agents) {
+    const tg = targets.get(id);
+    if (!tg) continue;
+    if (!ag.placed) { ag.x = tg.x; ag.y = tg.y; ag.placed = true; }
+    ag.x += (tg.x - ag.x) * 0.05; ag.y += (tg.y - ag.y) * 0.05;
+    ag.alpha += ((ag.a.active ? 1 : 0.4) - ag.alpha) * 0.08;
+    ag.r = R;
+    const focus = id === selected || id === hoverAgent;
+    ctx.save();
+    ctx.globalAlpha = ag.alpha * (hover && !focus ? 0.45 : 1);
+    if (tg.working) {  // a slowly turning arc: it's working
+      const a0 = (t / 900) % (Math.PI * 2);
+      ctx.beginPath(); ctx.arc(ag.x, ag.y, R + 1.8, a0, a0 + Math.PI * 1.2);
+      ctx.strokeStyle = P.claimed; ctx.lineWidth = Math.max(0.6, 1.3 / scale); ctx.lineCap = "round"; ctx.stroke();
+    }
+    ctx.shadowColor = "rgba(60, 50, 30, 0.18)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
+    ctx.drawImage(disc(kindOf(ag.a), nameParts(ag.a).owner, 96), ag.x - R, ag.y - R, R * 2, R * 2);
+    ctx.shadowColor = "transparent";
+    if (focus) { ctx.beginPath(); ctx.arc(ag.x, ag.y, R + 0.4, 0, Math.PI * 2); ctx.strokeStyle = P.ink; ctx.lineWidth = 0.9 / scale + 0.4; ctx.stroke(); }
+    if (scale > 1.25 || focus) {  // name in italics, agent number as a subscript
+      const { owner, n } = nameParts(ag.a), fs = Math.max(3.2, 11 / scale);
+      ctx.fillStyle = P.ink; ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+      ctx.font = `italic ${fs}px ${SERIF}`;
+      const w = ctx.measureText(owner).width, x0 = ag.x + R + 2.5, y0 = ag.y + fs * 0.32;
+      ctx.fillText(owner, x0, y0);
+      if (n) { ctx.font = `${fs * 0.68}px ${SERIF}`; ctx.fillText(String(n), x0 + w + 0.6, y0 + fs * 0.25); }
+    }
+    ctx.restore();
+  }
+}
+
+function agentAt(x, y) {
+  let best = null, bd = Infinity;
+  for (const [id, ag] of agents) {
+    const d = Math.hypot(ag.x - x, ag.y - y);
+    if (d < (ag.r || 6) + 1.5 && d < bd) { best = id; bd = d; }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Info window
+// ---------------------------------------------------------------------------------------------
+const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "patch.accepted": "accepted",
+  "patch.rejected": "cancelled", "sketch.proposed": "sketched", "sketch.accepted": "sketched", "sketch.rejected": "cancelled",
+  "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
+  "task.created": "ink", "main.updated": "ink", "project.init": "ink" };
+const taskKey = (id) => (data.tasks.find((t) => t.id === id) || {}).key || id;
+const shownFeed = new Set();
+
+function scoreNode(t, label) {
+  if (!t) return null;
+  return h("span", { class: `score ${t.level}`, title: `trust ${t.score} · ${t.level}` },
+    t.level === "new" ? "—" : t.score, label ? h("small", {}, t.level === "new" ? "new" : "trust") : null);
+}
+
+function eventList(items, withName) {
+  if (!items.length) return h("p", { class: "empty" }, "Nothing yet.");
+  const fresh = shownFeed.size ? items.filter((e) => !shownFeed.has(e.id)).map((e) => e.id) : [];
+  for (const e of items) shownFeed.add(e.id);
+  return h("ul", { class: "events" }, ...items.slice().reverse().map((e) => {
+    const a = data.agents.find((x) => x.id === e.agent);
+    return h("li", { class: fresh.includes(e.id) ? "new" : null, style: `--c:${P[TYPE_COLOR[e.type]] || P.ink3}` },
+      withName && a ? [nameNode(a), " "] : null, h("span", { style: withName ? "color:var(--ink2)" : null }, e.text),
+      h("span", { class: "when" }, `${ago(e.ts)} · event ${e.lamport}`));
+  }));
+}
+
+function viewLog() {
+  const list = [...data.agents].sort((x, y) => (y.holds.length - x.holds.length) || (y.active - x.active) || x.name.localeCompare(y.name));
+  const people = Object.entries(data.people || {}).sort((x, y) => y[1].score - x[1].score);
+  const agentsOf = (p) => data.agents.filter((a) => !isIntegrator(a) && nameParts(a).owner === p).length;
+  return [
+    people.length ? [h("h2", { class: "caps" }, "People"),
+      ...people.map(([p, t]) => h("div", { class: "person" },
+        h("div", {}, p, h("span", { class: "sub" }, `  ${agentsOf(p)} agent${agentsOf(p) === 1 ? "" : "s"}`)), scoreNode(t)))] : null,
+    h("h2", { class: "caps" }, "Agents"),
+    ...list.map((a) => {
+      const doing = a.holds.length ? `working on ${taskKey(a.holds[0])}`
+        : isIntegrator(a) ? (a.leader ? "integrating: holds the lease" : "standing by to take over") : a.last || "no activity";
+      return h("div", { class: "row", onclick: () => openPop("item", a.id) }, discImg(a),
+        h("div", { class: "who" }, nameNode(a), h("div", {}, doing)), scoreNode(a.trust));
+    }),
+    h("h2", { class: "caps" }, "Activity"),
+    eventList(data.recent, true),
+    h("h2", { class: "caps" }, "Legend"),
+    h("div", { class: "legend" }, ...Object.entries(STATUS).map(([k, v]) =>
+      h("span", { style: `--c:${P[k]};--f:${k === "accepted" ? P[k] : ACTIVE.has(k) ? rgba(P[k], 0.18) : "transparent"}` }, v))),
+  ];
+}
+
+async function history(id) {
+  const q = data.live ? "" : `&upto=${data.index}`;
+  return (await fetch(`/history.json?node=${encodeURIComponent(id)}${q}`)).json();
+}
+
+function trustBlock(a) {
+  const t = a.trust;
+  if (!t) return null;
+  const person = (data.people || {})[nameParts(a).owner];
+  const color = t.level === "high" ? P.accepted : t.level === "low" ? P.cancelled : t.level === "new" ? P.ink3 : P.ink;
+  return [
+    h("h2", { class: "caps" }, "Trust"),
+    h("div", { class: "trust" },
+      h("div", { class: "big", style: `color:${color}` }, t.level === "new" ? "—" : t.score),
+      h("div", {},
+        h("div", { style: "font-style:italic;color:var(--ink2)" },
+          t.level === "new" ? "Not enough evidence yet." : { high: "Reliable so far.", fair: "Mixed record.", low: "Often rejected." }[t.level]),
+        h("div", { class: "bar", style: `color:${color}` }, h("i", { style: `width:${t.score}%` })),
+        person && person !== t ? h("div", { class: "sub", style: "font-style:italic;color:var(--ink3);font-size:13px;margin-top:6px" },
+          `${nameParts(a).owner}, across all their agents: ${person.score}`) : null)),
+    t.breakdown.length ? h("ul", { class: "because" }, ...t.breakdown.map((b) =>
+      h("li", { class: b.effect }, `${b.label}${b.count > 1 ? ` ×${b.count}` : ""}`))) : null,
+  ];
+}
+
+async function viewAgent(a) {
+  const kind = kindOf(a), s = a.stats;
+  const items = await history(a.id);
+  return [
+    h("div", { class: "head" }, discImg(a, 46),
+      h("div", {}, h("div", { class: "name" }, nameNode(a)),
+        h("div", { class: "sub" }, [KIND_LABEL[kind], ...a.models].filter(Boolean).join(", "),
+          a.number ? ` · ${a.owner}'s agent ${a.number}` : ""))),
+    h("div", { style: "font-style:italic;color:var(--ink2);margin-bottom:12px" },
+      a.holds.length ? `Working on ${taskKey(a.holds[0])}.` : a.active ? "Waiting for a task." : "Inactive."),
+    h("div", { class: "nums" },
+      h("div", {}, h("b", {}, s.accepted), h("span", { class: "caps" }, "accepted")),
+      h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
+      h("div", {}, h("b", {}, s.claims), h("span", { class: "caps" }, "claims"))),
+    trustBlock(a),
+    a.done.length ? h("dl", { class: "kv" }, h("dt", {}, "finished"), h("dd", {}, a.done.map(taskKey).join(", "))) : null,
+    h("h2", { class: "caps" }, "What it has done"),
+    eventList(items, false),
+  ];
+}
+
+async function viewTask(n) {
+  const col = P[n.status] || P.ink, items = await history(n.id);
+  const workers = data.agents.filter((a) => a.holds.includes(n.id));
+  return [
+    h("div", { class: "head" },
+      h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
+      h("div", {}, h("div", { class: "name", style: "font-style:italic" }, n.key), h("div", { class: "sub" }, n.title))),
+    h("dl", { class: "kv" },
+      h("dt", {}, "status"), h("dd", { style: `color:${col}` }, STATUS[n.status] + (n.status === "sketched" ? `, ${n.children_done} of ${n.children} subtasks` : "")),
+      workers.length ? [h("dt", {}, "working"), h("dd", {}, ...workers.flatMap((a, i) => [i ? ", " : "", nameNode(a)]))] : null,
+      n.parent ? [h("dt", {}, "part of"), h("dd", { style: "font-style:italic" }, taskKey(n.parent))] : null,
+      h("dt", {}, "zone"), h("dd", {}, h("code", {}, n.zone.join(", "))),
+      h("dt", {}, "acceptance"), h("dd", {}, h("code", {}, n.accept)),
+      n.best != null ? [h("dt", {}, "best"), h("dd", {}, String(n.best))] : null,
+      n.body ? [h("dt", {}, "what"), h("dd", {}, n.body)] : null),
+    h("h2", { class: "caps" }, "History"),
+    eventList(items, true),
+  ];
+}
+
+function viewGoal() {
+  const g = nodes.get(GOAL);
+  return [
+    h("div", { class: "head" }, h("div", { class: "orb", style: "border:1px solid var(--ink)" }),
+      h("div", {}, h("div", { class: "name" }, data.project || "Project"), h("div", { class: "sub" }, "the main goal"))),
+    h("div", { class: "nums" },
+      h("div", {}, h("b", {}, g.done), h("span", { class: "caps" }, "done")),
+      h("div", {}, h("b", {}, g.total - g.done), h("span", { class: "caps" }, "to do")),
+      h("div", {}, h("b", {}, data.agents.filter((a) => !isIntegrator(a)).length), h("span", { class: "caps" }, "agents"))),
+  ];
+}
+
+let popTimer = null;
+function renderPop() {
+  clearTimeout(popTimer);
+  popTimer = setTimeout(async () => {
+    if (!data || !popMode) return;
+    let kids;
+    if (popMode === "log") kids = viewLog();
+    else if (selected === GOAL) kids = viewGoal();
+    else {
+      const a = data.agents.find((x) => x.id === selected), n = nodes.get(selected);
+      if (a) kids = await viewAgent(a); else if (n) kids = await viewTask(n); else return closePop();
+    }
+    const body = $("popBody"), pop = $("pop"), top = pop.scrollTop;
+    body.replaceChildren(...kids.flat(2).filter(Boolean));
+    pop.scrollTop = top;
+  }, 30);
+}
+function openPop(mode, id = null) {
+  popMode = mode; selected = id; $("pop").classList.add("open"); $("pop").scrollTop = 0;
+  $("openLog").classList.toggle("on", mode === "log"); renderPop();
+}
+function closePop() { popMode = null; selected = null; $("pop").classList.remove("open"); $("openLog").classList.remove("on"); }
+
+// ---------------------------------------------------------------------------------------------
+// Title and timeline
+// ---------------------------------------------------------------------------------------------
+function renderTitle(d) {
+  $("project").textContent = d.project || "Legion";
+  const g = nodes.get(GOAL), working = d.agents.filter((a) => a.holds.length).length;
+  $("meta").replaceChildren(...[h("b", {}, g ? g.done : 0), ` of ${g ? g.total : 0} tasks done`,
+    working ? [", ", h("b", {}, working), working === 1 ? " agent working" : " agents working"] : "",
+    d.live ? h("span", { class: "live-dot", title: "live" }) : h("span", { class: "replay-tag caps" }, `· ${clock(d.ts)}`)].flat());
+}
+
+const NS = "http://www.w3.org/2000/svg";
+const svg = (tag, attrs = {}) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+// The timeline is a sequence of milestones, evenly spaced: quiet stretches leave no gaps. When there
+// are more than fit, it shows a window of them (the latest by default) and arrows to page through.
+const TL = { m: 72, gap: 9, start: 0, pinned: false, playing: false };
+// Long ticks for what changes the outcome (verdicts, splits, resolutions); short ticks for the rest.
+const MAJOR = new Set(["patch.accepted", "patch.rejected", "task.resolved", "sketch.accepted", "sketch.failed", "project.init"]);
+function tlWidth() { return $("tl").clientWidth - TL.m * 2; }
+function tlCapacity() { return Math.max(4, Math.floor(tlWidth() / TL.gap)); }
+function tlWindow() {
+  const cap = tlCapacity();
+  if (!TL.pinned) TL.start = Math.max(0, marks.length - cap);  // follow the end unless paging
+  TL.start = Math.max(0, Math.min(TL.start, Math.max(0, marks.length - cap)));
+  return { cap, from: TL.start, to: Math.min(marks.length, TL.start + cap) };
+}
+function tlX(k, win) { const n = Math.max(1, win.to - win.from); return TL.m + ((k - win.from) + 0.5) * (tlWidth() / n); }
+// The mark the current moment sits on: the last milestone at or before the current event.
+function currentMark() {
+  let k = -1;
+  for (let j = 0; j < marks.length; j++) if (marks[j].i <= data.index) k = j; else break;
+  return k;
+}
+function tlMarkAt(x, win, slack = Infinity) {
+  let best = -1, bd = slack;
+  for (let k = win.from; k < win.to; k++) { const d = Math.abs(tlX(k, win) - x); if (d < bd) { best = k; bd = d; } }
+  return best;
+}
+function page(dir) {
+  const cap = tlCapacity();
+  TL.start = Math.max(0, TL.start + dir * cap);
+  TL.pinned = TL.start + cap < marks.length;  // back at the end: follow it again
+  renderTimeline();
+}
+
+function renderTimeline() {
+  const el = $("tl"); if (!data) return;
+  const W = el.clientWidth, y = 30;
+  el.replaceChildren();
+  const cur = currentMark();
+  if (TL.playing && cur >= 0 && (cur < TL.start || cur >= TL.start + tlCapacity())) {  // replay pages along
+    TL.start = cur; TL.pinned = true;
+  }
+  const win = tlWindow();
+  el.append(svg("line", { x1: TL.m, x2: W - TL.m, y1: y, y2: y, stroke: P.hair, "stroke-width": 1 }));
+  const curVisible = cur >= win.from && cur < win.to;
+  const curX = curVisible ? tlX(cur, win) : cur >= win.to ? W - TL.m : TL.m;
+  if (cur >= win.from || cur >= win.to) el.append(svg("line", { x1: TL.m, x2: curX, y1: y, y2: y, stroke: P.ink3, "stroke-width": 1 }));
+  for (let k = win.from; k < win.to; k++) {
+    const m = marks[k], x = tlX(k, win), past = k <= cur, major = MAJOR.has(m.type);
+    const c = P[TYPE_COLOR[m.type]] || P.ink3;
+    el.append(svg("line", { x1: x, x2: x, y1: major ? y - 11 : y - 4, y2: major ? y + 3 : y,
+                            stroke: c, "stroke-width": major ? 1.1 : 0.8, opacity: past ? (major ? 0.95 : 0.7) : 0.28 }));
+  }
+  if (curVisible) {
+    el.append(svg("line", { x1: curX, x2: curX, y1: y - 17, y2: y + 7, stroke: data.live ? P.claimed : P.ink,
+                            "stroke-width": 1.6, "stroke-linecap": "round" }));
+  }
+  const text = (x, str, anchor, attrs = {}) => {
+    const t = svg("text", { x, y: y + 22, "text-anchor": anchor, "font-size": 12.5, fill: P.ink2, "font-style": "italic", ...attrs });
+    t.textContent = str; el.append(t); return t;
+  };
+  const button = (x, str, anchor, act, attrs = {}) => { const t = text(x, str, anchor, { "data-act": act, ...attrs }); t.style.cursor = "pointer"; return t; };
+  // Play on the left end and "now" on the right, mirroring each other under the line.
+  button(TL.m, TL.playing ? "❚❚ pause" : "▸ replay", "start", "play");
+  button(W - TL.m, data.live ? "now" : "back to now", "end", "live", { fill: data.live ? P.ink : P.ink2 });
+  if (win.from > 0) button(TL.m - 16, "‹", "middle", "prev", { y: y + 5, "font-size": 18, "font-style": "normal", fill: P.ink });
+  if (win.to < marks.length) button(W - TL.m + 16, "›", "middle", "next", { y: y + 5, "font-size": 18, "font-style": "normal", fill: P.ink });
+  if (!data.live && curVisible) {
+    text(Math.min(Math.max(curX, TL.m + 70), W - TL.m - 70), `event ${data.index} · ${clock(data.ts)}`, "middle",
+         { y: y - 22, fill: P.ink, "font-style": "normal", "font-size": 11.5 });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data and controls
+// ---------------------------------------------------------------------------------------------
+let lastIndex = -1, lastLive = null;
+async function load(upto) {
+  const res = await fetch(`/state.json${upto == null ? "" : `?upto=${upto}`}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  data = await res.json();
+  $("notice").style.display = data.project ? "none" : "block";
+  $("notice").textContent = "This repository has no legion project yet.";
+  applySnapshot(data);
+  renderTitle(data);
+  if (data.total !== marksTotal) { marksTotal = data.total; marks = await (await fetch("/timeline.json")).json(); }
+  renderTimeline();
+  if (data.index !== lastIndex || data.live !== lastLive) renderPop();
+  lastIndex = data.index; lastLive = data.live;
+}
+function stopPlay() { if (playTimer) { clearInterval(playTimer); playTimer = null; } TL.playing = false; }
+function goLive() { stopPlay(); live = true; load(null).catch(() => {}); }
+function seek(i) { stopPlay(); live = false; if (i >= data.total) return goLive(); load(Math.max(0, i)).catch(() => {}); }
+function play() {
+  if (TL.playing) { stopPlay(); renderTimeline(); return; }
+  live = false; TL.playing = true;
+  let i = data && !data.live ? data.index : 0;
+  playTimer = setInterval(() => { i += 1; if (!data || i >= data.total) return goLive(); load(i).catch(() => {}); }, 380);
+  renderTimeline();
+}
+
+let Graph;
+async function init() {
+  if (typeof ForceGraph === "undefined" || typeof d3 === "undefined") {
+    $("notice").style.display = "block";
+    $("notice").textContent = "Couldn't load the graph libraries (force-graph and d3, from jsdelivr). Check your connection.";
+    return;
+  }
+  try { await Promise.all([document.fonts.load(`12px ${SERIF}`), document.fonts.load(`italic 12px ${SERIF}`)]); } catch {}
+  try { localLogos = new Set(await (await fetch("/logos.json")).json()); } catch {}
+  const el = $("graph"), tip = $("tip");
+  Graph = ForceGraph()(el)
+    .backgroundColor("rgba(0,0,0,0)")
+    .nodeId("id")
+    .nodeCanvasObject(drawNode)
+    .nodePointerAreaPaint((n, color, ctx) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(n.x, n.y, radius(n) + 3, 0, Math.PI * 2); ctx.fill(); })
+    .nodeLabel(() => "")
+    .linkColor((l) => {
+      const hot = hover && (l.source.id === hover || l.target.id === hover);
+      return hot ? rgba(P.ink, 0.6) : rgba(P.ink, hover ? 0.06 : l.kind === "dep" ? 0.22 : 0.2);
+    })
+    .linkWidth((l) => (l.kind === "tree" ? 0.7 : 0.5))
+    .linkLineDash((l) => (l.kind === "dep" ? [1.5, 2.5] : null))
+    .linkDirectionalParticles((l) => (l.kind === "tree" && ACTIVE.has(l.target.status) ? 2 : 0))
+    .linkDirectionalParticleWidth(1.6)
+    .linkDirectionalParticleSpeed(0.004)
+    .linkDirectionalParticleColor((l) => P[l.target.status] || P.claimed)
+    .linkDirectionalArrowLength((l) => (l.kind === "dep" ? 2.5 : 0))
+    .linkDirectionalArrowRelPos(0.9)
+    .linkDirectionalArrowColor(() => rgba(P.ink, 0.35))
+    .onRenderFramePost(drawAgents)
+    .autoPauseRedraw(false)
+    .cooldownTime(Infinity)
+    .d3VelocityDecay(0.3)
+    .d3AlphaDecay(0.012)
+    .maxZoom(4).minZoom(0.3)
+    .onNodeHover((n) => { hover = n ? n.id : null; el.style.cursor = n ? "pointer" : null; })
+    .onNodeClick((n, ev) => { const ag = pickAgent(ev); openPop("item", ag || n.id); })
+    .onBackgroundClick((ev) => { const ag = pickAgent(ev); ag ? openPop("item", ag) : closePop(); });
+  Graph.d3Force("charge").strength((n) => (n.id === GOAL ? -380 : -85 - (n.children || 0) * 22)).distanceMax(400);
+  Graph.d3Force("link").distance((l) => (l.kind === "dep" ? 60 : l.source.id === GOAL ? 64 : 30)).strength((l) => (l.kind === "dep" ? 0.04 : 0.6));
+  Graph.d3Force("radial", d3.forceRadial((n) => (n.id === GOAL ? 0 : 70 + n.depth * 44), 0, 0).strength(0.18));
+  Graph.d3Force("collide", d3.forceCollide((n) => radius(n) + 7));
+  Graph.d3Force("center", null);
+  const fitSize = () => { Graph.width(el.clientWidth).height(el.clientHeight); renderTimeline(); };
+  fitSize(); new ResizeObserver(fitSize).observe(el);
+
+  el.addEventListener("mousemove", (ev) => {
+    const p = Graph.screen2GraphCoords(ev.offsetX, ev.offsetY);
+    hoverAgent = agentAt(p.x, p.y);
+    let content = null;
+    if (hoverAgent) {
+      const a = agents.get(hoverAgent).a;
+      content = [nameNode(a), h("i", {}, ` · ${KIND_LABEL[kindOf(a)]}`),
+                 a.trust && a.trust.level !== "new" ? h("i", {}, ` · trust ${a.trust.score}`) : null, h("br"),
+                 h("i", {}, a.holds.length ? `working on ${taskKey(a.holds[0])}` : a.last || "")];
+    } else if (hover) {
+      const n = nodes.get(hover);
+      content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`)]
+                              : [h("i", {}, n.key), h("br"), `${STATUS[n.status]} · ${n.title}`];
+    }
+    if (hoverAgent) el.style.cursor = "pointer";
+    if (content) { tip.replaceChildren(...content.flat().filter(Boolean)); tip.style.display = "block"; tip.style.left = `${ev.clientX + 14}px`; tip.style.top = `${ev.clientY + 16}px`; }
+    else tip.style.display = "none";
+  });
+  el.addEventListener("mouseleave", () => { tip.style.display = "none"; hoverAgent = null; });
+  for (const ev of ["wheel", "pointerdown"]) el.addEventListener(ev, () => { userMoved = true; }, { passive: true });
+  el.addEventListener("dblclick", () => { userMoved = false; Graph.zoomToFit(700, 90); });  // double click: fit again
+
+  // Timeline: click or drag to jump to a milestone; hovering shows it; the arrows page through.
+  const tl = $("tl");
+  let dragging = false, seekTimer = null;
+  const seekAt = (x) => {
+    clearTimeout(seekTimer);
+    const k = tlMarkAt(x, tlWindow());
+    if (k >= 0) seekTimer = setTimeout(() => (k === marks.length - 1 ? goLive() : seek(marks[k].i)), 40);
+  };
+  tl.addEventListener("pointerdown", (ev) => {
+    const act = ev.target.getAttribute && ev.target.getAttribute("data-act");
+    if (act === "live") { TL.pinned = false; return goLive(); }
+    if (act === "play") return play();
+    if (act === "prev") return page(-1);
+    if (act === "next") return page(1);
+    if (ev.offsetX < TL.m - 4 || ev.offsetX > tl.clientWidth - TL.m + 4) return;
+    dragging = true; TL.pinned = true; tl.setPointerCapture(ev.pointerId); seekAt(ev.offsetX);
+  });
+  tl.addEventListener("pointermove", (ev) => {
+    if (dragging) seekAt(ev.offsetX);
+    const k = tlMarkAt(ev.offsetX, tlWindow(), TL.gap);
+    const m = k >= 0 ? marks[k] : null;
+    if (m && !dragging) {
+      const a = data.agents.find((x) => x.id === m.agent);
+      tip.replaceChildren(...[a ? nameNode(a) : m.name, " ", h("i", {}, m.text), h("br"), h("i", {}, `event ${m.i} · ${clock(m.ts)}`)]);
+      tip.style.display = "block"; tip.style.left = `${Math.min(ev.clientX - 20, innerWidth - 320)}px`; tip.style.top = `${ev.clientY - 70}px`;
+    } else tip.style.display = "none";
+  });
+  tl.addEventListener("pointerup", () => { dragging = false; });
+  tl.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+
+  $("openLog").addEventListener("click", () => (popMode === "log" ? closePop() : openPop("log")));
+  $("close").addEventListener("click", closePop);
+  addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closePop();
+    if (ev.key === " " && ev.target === document.body) { ev.preventDefault(); play(); }
+    if (data && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) seek((data.live ? data.total : data.index) + (ev.key === "ArrowLeft" ? -1 : 1));
+  });
+
+  try {
+    await load(null);
+    for (const [ms, anim] of [[300, 0], [1500, 600], [3500, 800]]) setTimeout(() => !userMoved && Graph.zoomToFit(anim, 90), ms);
+  } catch (e) {
+    $("notice").style.display = "block"; $("notice").textContent = `Couldn't read the state: ${e.message}`;
+  }
+  setInterval(() => { if (live) load(null).catch(() => {}); }, 2500);
+}
+function pickAgent(ev) {
+  if (!ev) return null;
+  const rect = $("graph").getBoundingClientRect();
+  const p = Graph.screen2GraphCoords(ev.clientX - rect.left, ev.clientY - rect.top);
+  return agentAt(p.x, p.y);
+}
+init();
+</script>
+</body>
+</html>

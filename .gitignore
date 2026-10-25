@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Prepared answers for the fake agents: kept local so real agents can't copy them
+examples/*/solutions/
