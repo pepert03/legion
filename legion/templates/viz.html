@@ -193,7 +193,8 @@ const KIND_LABEL = {
 const KIND_ORDER = ["claude", "codex", "deepseek", "gemini", "cursor", "opencode", "qwen", "kimi", "mistral", "copilot",
                     "windsurf", "cline", "grok", "ollama", "manus", "devin", "trae", "goose", "muse", "instinct", "zai", "openai", "meta"];
 function kindOf(a) {
-  const k = [...(a.kinds || []), ...(a.models || [])].join(" ").toLowerCase();
+  // What the agent said it is; failing that, its name (an agent called "codex-ana" is most likely Codex).
+  const k = ([...(a.kinds || []), ...(a.models || [])].join(" ") || a.name || "").toLowerCase();
   if (isIntegrator(a) || k.includes("human") || k.includes("humano")) return a.leader === false && isIntegrator(a) ? "standby" : "human";
   if (k.includes("gpt")) return "codex";
   for (const kind of KIND_ORDER) if (k.includes(kind)) return kind;

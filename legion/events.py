@@ -47,11 +47,26 @@ def _body(ev: dict) -> dict:
     return {k: v for k, v in ev.items() if k not in ("id", "sig")}
 
 
+def detect_agent() -> str | None:
+    """Which coding agent is running legion, from the variables it sets in its shells (when LEGION_AGENT isn't
+    set: agents forget it)."""
+    env = os.environ
+    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    for prefix, kind in (("CODEX_", "codex"), ("OPENCODE", "opencode"), ("GEMINI_CLI", "gemini"),
+                         ("CURSOR_", "cursor"), ("CLINE_", "cline"), ("GOOSE_", "goose")):
+        if any(k.startswith(prefix) for k in env):
+            return kind
+    return None
+
+
 def create(ident: Identity, type: str, lamport: int, **payload) -> dict:
     ev = {"type": type, "author": ident.author, "name": ident.name, "lamport": lamport, "ts": round(time.time(), 3)}
     for env, field in (("LEGION_AGENT", "agent"), ("LEGION_MODEL", "model")):
         if os.environ.get(env):
             ev[field] = os.environ[env]
+    if "agent" not in ev and (kind := detect_agent()):
+        ev["agent"] = kind
     clash = RESERVED & set(payload)
     if clash:  # a payload field must never overwrite who signed or when
         raise ValueError(f"payload fields clash with the event header: {', '.join(sorted(clash))}")

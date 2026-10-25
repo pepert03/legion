@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -25,7 +26,12 @@ def tail(text: str, n: int = 15) -> str:
     return "\n".join(text.strip().splitlines()[-n:])
 
 
+PYTHON = re.compile(r"^(python3?|py)(?=\s|$)")
+
+
 def run_cmd(cmd: str, cwd, timeout: int) -> tuple[int | None, str]:
+    # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
+    cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', cmd.strip(), count=1)
     try:
         p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, timeout=timeout,
                            encoding="utf-8", errors="replace")
