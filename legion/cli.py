@@ -205,12 +205,23 @@ def radicle_ready(alias: str, home: str | None) -> str:
             raise Fail(f"couldn't install Radicle: {e}.{hint}")
     nid = radicle.ensure_identity(alias, home)
     try:
+        before = radicle.bridge_connections()
         note = radicle.route_through_proxy(home)
+        if note:
+            print(f"Note: {note}.", flush=True)
+        radicle.ensure_node(home=home)
+        if radicle.node_proxy(home) == f"{radicle.BRIDGE[0]}:{radicle.BRIDGE[1]}":
+            print("Checking that the node really goes out through the proxy…", flush=True)
+            try:
+                radicle.check_proxy_in_use(home, before)
+            except radicle.RadError:  # a node left running from before may not have read the setting
+                radicle.restart_node(home)
+                before = radicle.bridge_connections()
+                radicle.ensure_node(home=home)
+                radicle.check_proxy_in_use(home, before)
+            print("It does.", flush=True)
     except radicle.RadError as e:
         raise Fail(str(e))
-    if note:
-        print(f"Note: {note}.", flush=True)
-    radicle.ensure_node(home=home)
     return nid
 
 

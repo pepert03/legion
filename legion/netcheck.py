@@ -77,6 +77,31 @@ def issuer(proxy: Proxy) -> str:
     return ", ".join(f"{k}={v}" for part in cert.get("issuer", ()) for k, v in part) or "unknown"
 
 
+def node_report() -> list[str]:
+    """What this machine's Radicle node is actually doing: an open TCP port says nothing about that."""
+    from . import radicle
+    try:
+        if not radicle.available():
+            return ["This machine's Radicle node: Radicle isn't installed"]
+        version = radicle.clean(radicle.run("rad", "--version", check=False, timeout=30).stdout).strip()
+        lines = [f"This machine's Radicle node ({version}):",
+                 f"  running: {'yes' if radicle.node_running() else 'no'}",
+                 f"  config: {radicle._config_path(None)}, node.proxy = {radicle.node_proxy()!r}",
+                 f"  legion's bridge: {'running' if radicle.bridge_running() else 'not running'}, "
+                 f"{radicle.bridge_connections()} connection(s) through it so far"]
+        status = radicle.rad(None, "node", "status", check=False)
+        seeds = [l for l in status.splitlines() if "✓" in l and "↗" in l]
+        lines.append(f"  connected peers: {len(seeds)}")
+        log = radicle.node_log()
+        for label, needle in (("name lookups that failed", "lookup address"), ("SOCKS5 errors", "socks5")):
+            hits = [l for l in log if needle in l]
+            if hits:
+                lines.append(f"  {label}: {len(hits)}, the last: {hits[-1].strip()[-160:]}")
+        return lines
+    except (radicle.RadError, OSError) as e:
+        return [f"This machine's Radicle node: couldn't inspect it ({e})"]
+
+
 def doctor() -> list[str]:
     url = proxy_from_env()
     lines = [f"HTTP proxy in the environment: {url.split('@')[-1] if url else 'none'}",
@@ -94,6 +119,7 @@ def doctor() -> list[str]:
             ok_proxy |= res == "ok"
             lines.append(f"  {host}:{port}  {res}")
         lines.append(f"github.com's certificate through the proxy is issued by: {issuer(proxy)}")
+    lines += node_report()
     lines.append("")
     if ok_direct:
         lines.append("Verdict: the seeds are reachable directly; Radicle works as is.")

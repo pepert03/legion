@@ -183,6 +183,10 @@ def configure_node(home: str, listen: str | None = None, network: str | None = N
 # --- networks that only let HTTP(S) out ---------------------------------------------------------
 
 BRIDGE = ("127.0.0.1", 1080)
+# Radicle's public seeds. Behind a proxy the node is told to always connect to them: one that has been
+# failing to reach its bootstrap nodes (before the proxy was set) otherwise waits a long while to retry.
+PUBLIC_SEEDS = ["z6Mkmqogy2qEM2ummccUthFEaaHvyYmYBYh3dbe9W4ebScxo@rosa.radicle.network:8776",
+                "z6MkrLMMsiPWUcNPHcRajuMi9mDfYckSoJyPwwnknocNYPm7@iris.radicle.network:8776"]
 
 
 def _config_path(home: str | None) -> str:
@@ -200,6 +204,9 @@ def set_node_proxy(home: str | None, address: str | None) -> None:
     path = _config_path(home)
     c = json.loads(run("cat", path, home=home, timeout=30).stdout)
     c["node"]["proxy"] = address
+    if address and c["node"].get("network", "main") == "main":
+        connect = c["node"].get("connect") or []
+        c["node"]["connect"] = connect + [s for s in PUBLIC_SEEDS if s not in connect]
     Path(path).write_text(json.dumps(c, indent=2), encoding="utf-8")
 
 
@@ -227,8 +234,51 @@ def keep_bridge(repo) -> None:
     """Behind an HTTP proxy, restart the bridge if it died (a reboot, say). Cheap when there's no proxy."""
     from .bridge import proxy_from_env
     url = proxy_from_env()
-    if url and not IS_WINDOWS and not bridge_running() and node_proxy(_cfg(repo, "legion.radhome")) ==             f"{BRIDGE[0]}:{BRIDGE[1]}":
+    if url and not IS_WINDOWS and not bridge_running() and \
+            node_proxy(_cfg(repo, "legion.radhome")) == f"{BRIDGE[0]}:{BRIDGE[1]}":
         start_bridge(url)
+
+
+def restart_node(home: str | None = None) -> None:
+    """Stop the node and make sure it's gone, so the next start reads the config again."""
+    run("rad", "node", "stop", home=home, check=False, timeout=60)
+    for _ in range(30):
+        if not node_running(home=home):
+            return
+        time.sleep(0.5)
+    raise RadError("the Radicle node didn't stop, so it can't pick up the proxy setting; stop it "
+                   "(`rad node stop`, or kill radicle-node) and run this again")
+
+
+def node_log(home: str | None = None, lines: int = 400) -> list[str]:
+    path = f"{home or rad(None, 'path', timeout=30).splitlines()[-1].strip()}/node/node.log"
+    return clean(run("tail", "-n", str(lines), path, home=home, check=False, timeout=30).stdout).splitlines()
+
+
+def bridge_connections() -> int:
+    from .identity import home as legion_home
+    try:
+        return (legion_home() / "bridge.log").read_text(errors="replace").count(": connected")
+    except OSError:
+        return 0
+
+
+def check_proxy_in_use(home: str | None, before: int, wait: float = 60) -> None:
+    """After routing the node through the bridge: did it really go out through it? If not, say why."""
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if bridge_connections() > before:
+            return
+        time.sleep(2)
+    log = node_log(home)
+    lookups = [l for l in log if "lookup address" in l]
+    version = clean(run("rad", "--version", home=home, check=False, timeout=30).stdout).strip()
+    why = ("its log shows it resolving names itself (" + lookups[-1].strip()[-160:] + "), so it isn't using "
+           "the proxy" if lookups else "nothing in its log says why")
+    raise RadError(f"the Radicle node was set to go out through legion's bridge ({BRIDGE[0]}:{BRIDGE[1]}) but "
+                   f"made no connection through it in {wait:.0f} s: {why}. Radicle {version}, config "
+                   f"{_config_path(home)} with node.proxy = {node_proxy(home)!r}. "
+                   "`python -m legion radicle doctor` shows more")
 
 
 def route_through_proxy(home: str | None = None) -> str | None:
@@ -254,8 +304,8 @@ def route_through_proxy(home: str | None = None) -> str | None:
     if not bridge_running():
         start_bridge(url)
     set_node_proxy(home, bridge)
-    if node_running(home=home):  # restart, so it picks the proxy up
-        run("rad", "node", "stop", home=home, check=False, timeout=60)
+    if node_running(home=home):  # a node started earlier never read the setting: restart it
+        restart_node(home)
     return f"the seeds are only reachable through the HTTP proxy: Radicle now goes out through it ({bridge})"
 
 
@@ -292,16 +342,32 @@ def init_repo(repo, name: str, description: str) -> str:
 
 def clone(rid_: str, dest: Path, home: str | None = None) -> None:
     run("git", "config", "--global", "--add", "safe.directory", "*", home=home, timeout=30)
-    # A node that has just started knows no seeds for a while ("no candidate seeds"): keep trying.
+    # A node that has just started knows no seeds for a while ("no candidate seeds"), and one whose routing
+    # table never filled (it was offline, or behind a proxy, when it connected) may not learn of any: keep
+    # trying, and from the second try on also ask the public seeds directly.
     deadline = time.time() + 180
+    tries = 0
     while True:
-        p = run("rad", "clone", rid_, host_path(dest), "--scope", "all", home=home, timeout=300, check=False)
+        extra = seed_args(home) if tries else []
+        p = run("rad", "clone", rid_, host_path(dest), "--scope", "all", *extra, home=home, timeout=300, check=False)
         if p.returncode == 0:
             return
         err = clean(p.stderr or p.stdout).strip()
-        if "no candidate seeds" not in err or time.time() > deadline:
+        if not ("no candidate seeds" in err or "no seeds found" in err) or time.time() > deadline:
             raise RadError(f"`rad clone {rid_}` failed: {err[-600:]}")
+        tries += 1
         time.sleep(15)
+
+
+def seed_args(home: str | None) -> list[str]:
+    """`--seed` options for Radicle's public seeds, if this node is on the public network."""
+    try:
+        network = json.loads(run("cat", _config_path(home), home=home, timeout=30).stdout)["node"].get("network")
+    except (RadError, ValueError, KeyError):
+        network = None
+    if network not in (None, "main"):
+        return []
+    return [arg for s in PUBLIC_SEEDS for arg in ("--seed", s.split("@")[0])]
 
 
 def storage(repo) -> str:
@@ -341,7 +407,11 @@ def network_sync(repo, force: bool = False) -> bool:
     every = float(os.environ.get("LEGION_RAD_SYNC_EVERY", NETWORK_SYNC_EVERY))
     if not force and time.time() - last < every:
         return True
-    ok = run("rad", "sync", "--fetch", rid(repo), repo=repo, check=False, timeout=45).returncode == 0
+    p = run("rad", "sync", "--fetch", rid(repo), repo=repo, check=False, timeout=45)
+    if p.returncode and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
+        p = run("rad", "sync", "--fetch", rid(repo), *seed_args(_cfg(repo, "legion.radhome")), repo=repo,
+                check=False, timeout=45)
+    ok = p.returncode == 0
     subprocess.run(["git", "config", "legion.radsynced", str(time.time())], cwd=repo, capture_output=True)
     return ok
 
