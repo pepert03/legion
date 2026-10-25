@@ -203,14 +203,17 @@ def make_handler(source: Source):
                             return self.send(200, f.read_bytes(), ctype)
                 self.send(404, b"", "text/plain")
             else:
-                self.send(404, b"no encontrado", "text/plain; charset=utf-8")
+                self.send(404, b"not found", "text/plain; charset=utf-8")
 
     return Handler
 
 
 def serve(repo: Path, port: int, interval: float, fetch: bool, open_browser: bool) -> int:
     source = Source(repo, interval, fetch)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(source))  # this machine only
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(source))  # this machine only
+    except OSError:  # the port is taken (another viewer, perhaps): any free one will do
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(source))
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Viewer for {repo} at {url} (Ctrl+C to stop)", flush=True)
     if open_browser:

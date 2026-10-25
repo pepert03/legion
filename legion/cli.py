@@ -228,6 +228,36 @@ def join_radicle(args, ident: Identity, dest: Path) -> None:
         raise Fail(str(e))
 
 
+def free_port(start: int = 8765) -> int:
+    for port in range(start, start + 50):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)):  # nobody listening
+                return port
+    return 0
+
+
+def open_viewer(repo: Path) -> str | None:
+    """Start `legion viz` for the repository in the background, outliving this command, and open the browser."""
+    port = free_port()
+    log = open(repo / ".git" / "legion-viz.log", "ab")
+    cmd = [sys.executable, "-m", "legion", "viz", "--repo", str(repo), "--port", str(port)]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(Path(__file__).parent.parent),
+                                                                    os.environ.get("PYTHONPATH")]))}
+    kw = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=repo, env=env)
+    try:
+        if os.name == "nt":  # detached, and out of the caller's job so closing the agent's shell doesn't kill it
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            try:
+                subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+            except OSError:  # the job doesn't allow breaking away
+                subprocess.Popen(cmd, creationflags=flags, **kw)
+        else:
+            subprocess.Popen(cmd, start_new_session=True, **kw)
+    except OSError:
+        return None
+    return f"http://127.0.0.1:{port}/" if port else "a local address (see .git/legion-viz.log)"
+
+
 def cmd_join(args):
     url = args.url
     default = "legion-project" if url.startswith("rad:") else url.rstrip("/").split("/")[-1].removesuffix(".git")
@@ -259,6 +289,11 @@ def cmd_join(args):
     free = len(st.claimable(time.time()))
     print(f"You joined {st.project.get('project')} in {dest}")
     print(f"Integrator: {integ} · tasks: {len(st.tasks)} ({free} open now)")
+    if not args.no_viz:
+        url = open_viewer(dest)
+        if url:
+            print(f"The project's live graph is opening in your browser: {url}\n"
+                  f"(it keeps running in the background; later, `legion viz` inside the project opens it again)")
     print(f"\nOpen your agent in that folder and tell it:\n\n  {AGENT_PROMPT}\n")
     if args.p2p:
         print("P2P mode: your patches reach the integrator once some peer reads from you. Share your\n"
@@ -734,6 +769,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--p2p", action="store_true", help="join without a central server: the URL becomes your first peer")
     s.add_argument("--peer-name", default="seed", help="name for that first peer (default: seed)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")
+    s.add_argument("--no-viz", action="store_true", help="don't open the project's live graph when done")
     s.set_defaults(func=cmd_join)
 
     s = sub.add_parser("radicle", help="Radicle as the transport: across networks, no server, no open ports")
