@@ -254,6 +254,19 @@ function discImg(a, px = 28) {
 // State
 // ---------------------------------------------------------------------------------------------
 const GOAL = "__goal__";
+const FIT_PAD = 100;  // room for the title above and the timeline below
+const MAX_ZOOM = 2.2;  // a small graph stays small instead of filling the screen
+// Fit the whole graph in view, without zooming in past MAX_ZOOM.
+function fit(ms) {
+  if (!Graph) return;
+  const k0 = Graph.zoom(), c0 = Graph.centerAt();
+  Graph.zoomToFit(0, FIT_PAD);  // measure where a plain fit would land…
+  const k = Math.min(Graph.zoom(), MAX_ZOOM), c = Graph.centerAt();
+  Graph.zoom(k0, 0);  // …then go back and glide there, capped
+  Graph.centerAt(c0.x, c0.y, 0);
+  Graph.zoom(k, ms);
+  Graph.centerAt(c.x, c.y, ms);
+}
 let data = null, live = true, playTimer = null, selected = null, popMode = null, hover = null, hoverAgent = null;
 const nodes = new Map(), agents = new Map(), neighbours = new Map();
 let structureSig = "", userMoved = false, refitTimer = null, marks = [], marksTotal = -1, fittedCount = 0;
@@ -306,7 +319,7 @@ function applySnapshot(d) {
     // Refit only when the graph grows; going back in history leaves the view where it is.
     if (!userMoved && nodes.size > fittedCount) {
       fittedCount = nodes.size;
-      clearTimeout(refitTimer); refitTimer = setTimeout(() => !userMoved && Graph.zoomToFit(900, 90), 1600);
+      clearTimeout(refitTimer); refitTimer = setTimeout(() => !userMoved && fit(900), 1600);
     }
   }
   const seen = new Set();
@@ -791,7 +804,7 @@ async function init() {
   });
   el.addEventListener("mouseleave", () => { tip.style.display = "none"; hoverAgent = null; });
   for (const ev of ["wheel", "pointerdown"]) el.addEventListener(ev, () => { userMoved = true; }, { passive: true });
-  el.addEventListener("dblclick", () => { userMoved = false; Graph.zoomToFit(700, 90); });  // double click: fit again
+  el.addEventListener("dblclick", () => { userMoved = false; fit(700); });  // double click: fit again
 
   // Timeline: click or drag to jump to a milestone; hovering shows it; the arrows page through.
   const tl = $("tl");
@@ -833,7 +846,7 @@ async function init() {
 
   try {
     await load(null);
-    for (const [ms, anim] of [[300, 0], [1500, 600], [3500, 800]]) setTimeout(() => !userMoved && Graph.zoomToFit(anim, 90), ms);
+    for (const [ms, anim] of [[300, 0], [1500, 600], [3500, 800]]) setTimeout(() => !userMoved && fit(anim), ms);
   } catch (e) {
     $("notice").style.display = "block"; $("notice").textContent = `Couldn't read the state: ${e.message}`;
   }
