@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import coordgit
+from . import update
 from . import events as E
 from . import integrator
 from . import state as S
@@ -264,6 +265,7 @@ def open_viewer(repo: Path) -> str | None:
 
 
 def cmd_join(args):
+    update.check()
     url = args.url
     default = "legion-project" if url.startswith("rad:") else url.rstrip("/").split("/")[-1].removesuffix(".git")
     dest = Path(args.dir or default).resolve()
@@ -644,6 +646,8 @@ def since_digest(st: S.State) -> list[dict]:
 
 
 def cmd_context(args):
+    if not args.no_update:
+        update.check()  # agents run this first whenever they (re)connect: a good moment to pick up fixes
     c = Ctx()
     st, now = c.st, time.time()
     lines = [f"# Project {st.project.get('project') if st.project else '?'} · you: {c.ident.name} ({c.ident.short})", ""]
@@ -725,18 +729,24 @@ def cmd_integrate(args):
     log = lambda m: print(m, flush=True)  # noqa: E731
     try:
         while True:
-            leading, who = integrator.hold_lease(c, args.lease)
-            role = "lead" if leading else f"standby:{who}"
-            if role != last_role:  # say it once when the role changes, not on every pass
-                log("Holding the integration lease: integrating." if leading
-                    else f"{who} holds the integration lease; standing by to take over if it goes quiet.")
-                last_role = role
-            if leading:
-                integrator.integrate_once(c, args.cmd_timeout, log=log, keep_branches=args.keep_branches)
-                if not args.no_status:
-                    text = integrator.status_markdown(c.st, time.time())
-                    if text != last_status and integrator.publish_status(c, text):
-                        last_status = text
+            try:
+                leading, who = integrator.hold_lease(c, args.lease)
+                role = "lead" if leading else f"standby:{who}"
+                if role != last_role:  # say it once when the role changes, not on every pass
+                    log("Holding the integration lease: integrating." if leading
+                        else f"{who} holds the integration lease; standing by to take over if it goes quiet.")
+                    last_role = role
+                if leading:
+                    integrator.integrate_once(c, args.cmd_timeout, log=log, keep_branches=args.keep_branches)
+                    if not args.no_status:
+                        text = integrator.status_markdown(c.st, time.time())
+                        if text != last_status and integrator.publish_status(c, text):
+                            last_status = text
+            except (coordgit.GitError, Fail) as e:
+                if not args.loop:
+                    raise
+                # e.g. the network is down, or a viewer was fetching into the same refs: try on the next pass
+                log(f"This pass failed ({str(e).strip()[-300:]}); trying again in {args.loop:g} s.")
             pending = any(p.verdict is None for p in c.st.patches.values())
             if args.until_done and c.st.exclusive_done() and not pending:
                 print("Every exclusive task is accepted.")
@@ -749,6 +759,17 @@ def cmd_integrate(args):
 
 
 # --- arguments -----------------------------------------------------------------------------
+
+
+def cmd_update(args):
+    src = update.installed()
+    if not src:
+        print("This legion isn't installed from a git URL (it's a working copy?): update it with git pull.")
+        return 0
+    if not update.check(quiet=True):
+        print(f"legion is up to date ({src[1][:8]}, {src[0]}).")
+    else:
+        print("legion updated.")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -808,7 +829,11 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("context", help="what an agent should read when it starts")
     s.add_argument("--limit", type=int, default=40)
+    s.add_argument("--no-update", action="store_true", help="don't check for a newer legion first")
     s.set_defaults(func=cmd_context)
+
+    s = sub.add_parser("update", help="update legion itself if a newer version is published")
+    s.set_defaults(func=cmd_update)
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")

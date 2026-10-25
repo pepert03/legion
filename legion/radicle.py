@@ -255,7 +255,14 @@ def fetch_all(repo) -> list[str]:
             if m and m.group(1) not in chosen:
                 chosen[m.group(1)] = ref
         specs += [f"+{src}:{dest}" for dest, src in sorted(chosen.items())]
-        rgit(repo, "fetch", "-q", "--no-tags", store, *specs, timeout=120)
+        for attempt in range(3):
+            try:
+                rgit(repo, "fetch", "-q", "--no-tags", store, *specs, timeout=120)
+                break
+            except RadError as e:  # another legion process (a viewer) fetching into the same refs right now
+                if "cannot lock ref" not in str(e) or attempt == 2:
+                    raise
+                time.sleep(1)
     return nids
 
 

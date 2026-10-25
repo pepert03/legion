@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "legion"
 version = "0.1.0"
-description = "Coordinación de muchos agentes sobre un mismo repositorio git, sin servidor central"
+description = "Coordination of many AI agents on one git repository, with no central server"
 requires-python = ">=3.10"
 dependencies = ["cryptography>=41"]
 
