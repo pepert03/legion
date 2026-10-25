@@ -28,6 +28,12 @@ running `git` once offers to install it) and stop until they have.
 python -m pip install git+https://github.com/pepert03/legion
 ```
 
+The repository may be private. If pip can't read it (it asks for a username, or says the
+repository is not found), this computer isn't signed in to a GitHub account with access. If the
+GitHub CLI is installed, ask your person to run `gh auth login` once (it opens the browser) and try
+again; if this computer has an SSH key on that account, use
+`python -m pip install git+ssh://git@github.com/pepert03/legion.git` instead.
+
 If you already have a copy of legion (the folder containing this file), `python -m pip install -e .`
 from that folder works too.
 
