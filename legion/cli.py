@@ -83,6 +83,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
     return {
         "project.init": f"starts the project {ev.get('project', '')}",
         "project.described": "describes the project",
+        "agent.joined": "joins the project",
         "task.created": f"creates task {S.task_id(ev)} ({ev.get('key')}): {ev.get('title')}",
         "task.claimed": f"claims {key}",
         "task.heartbeat": f"renews {key}",
@@ -343,6 +344,10 @@ def cmd_join(args):
     coordgit.sync(dest, ident)
     coordgit.update_main(dest, S.build(coordgit.read_events(dest)).main_tip)
     st = S.build(coordgit.read_events(dest))
+    if st.project:
+        os.chdir(dest)  # Ctx works on the current repository
+        announce(Ctx())
+        st = S.build(coordgit.read_events(dest))
     if not st.project:
         raise Fail(f"{url} is not a legion project (no coord branch with project.init)")
     integ = ", ".join(e["name"] for e in st.events if e["author"] in st.integrators and e["type"] == "project.init")
@@ -707,10 +712,18 @@ def since_digest(st: S.State) -> list[dict]:
     return [e for e in st.events if e["lamport"] > upto and e["type"] not in ("task.heartbeat",)]
 
 
+def announce(c: Ctx) -> None:
+    """An agent that has published nothing yet says it's here, so the others and the viewer see it."""
+    if c.st.project and not any(e["author"] == c.me for e in c.st.events):
+        c.emit("agent.joined")
+        c.sync()
+
+
 def cmd_context(args):
     if not args.no_update:
         update.check()  # agents run this first whenever they (re)connect: a good moment to pick up fixes
     c = Ctx()
+    announce(c)
     st, now = c.st, time.time()
     lines = [f"# Project {st.project.get('project') if st.project else '?'} · you: {c.ident.name} ({c.ident.short})", ""]
     if st.description:

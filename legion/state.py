@@ -289,6 +289,9 @@ class State:
         if t == "task.created":
             return self._create_task(ev)
 
+        if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
+            return None
+
         if t == "project.described":
             if not isinstance(ev.get("description"), str):
                 return "missing description"

@@ -465,7 +465,7 @@ function agentAt(x, y) {
 const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "patch.accepted": "accepted",
   "patch.rejected": "cancelled", "sketch.proposed": "sketched", "sketch.accepted": "sketched", "sketch.rejected": "cancelled",
   "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
-  "task.created": "ink", "main.updated": "ink", "project.init": "ink" };
+  "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink" };
 const taskKey = (id) => (data.tasks.find((t) => t.id === id) || {}).key || id;
 const shownFeed = new Set();
 

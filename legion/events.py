@@ -10,6 +10,7 @@ from .identity import Identity, verify
 TYPES = {
     "project.init",
     "project.described",
+    "agent.joined",
     "task.created",
     "task.claimed",
     "task.heartbeat",

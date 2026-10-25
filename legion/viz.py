@@ -124,7 +124,7 @@ def split_name(name: str) -> tuple[str, int | None]:
 
 
 TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.rejected", "sketch.proposed",
-                  "sketch.accepted", "sketch.failed", "task.resolved", "task.created", "project.init"}
+                  "sketch.accepted", "sketch.failed", "task.resolved", "task.created", "project.init", "agent.joined"}
 
 
 ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed

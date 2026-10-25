@@ -106,3 +106,12 @@ def test_every_event_type_has_a_description():
     st = S.build([])
     for t in E.TYPES:
         assert event_text({"type": t, "id": "x" * 16, "lamport": 1}, st) != t, t
+
+
+def test_an_agent_that_only_joined_shows_up():
+    from legion import state as S
+    boss, muse = Identity.generate("boss"), Identity.generate("jose#1")
+    evs = [E.create(boss, "project.init", 1, project="p", integrators=[boss.author]),
+           E.create(muse, "agent.joined", 2)]
+    assert not S.build(evs).ignored
+    assert any(a["name"] == "jose#1" for a in viz.snapshot(evs, len(evs))["agents"])
