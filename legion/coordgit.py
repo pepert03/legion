@@ -124,7 +124,7 @@ def is_radicle(repo) -> bool:
 
 
 def peers(repo) -> list[str]:
-    if is_radicle(repo):  # with Radicle, the peers are the namespaces already copied from its storage
+    if is_radicle(repo):  # with Radicle, the peers are the publishers already copied from its storage
         out = run(repo, "for-each-ref", "--format=%(refname)", PEERS).stdout.decode()
         return sorted({line[len(PEERS):].split("/", 1)[0] for line in out.splitlines() if line.endswith("/coord")})
     p = run(repo, "config", "--get-all", "legion.peer")
@@ -186,6 +186,11 @@ def merge_coords(repo, ident: Identity, names: list[str]) -> None:
         git(repo, "update-ref", PUB + "coord", cur)
 
 
+def radicle_who(ident: Identity) -> str:
+    """This identity's prefix among the legion refs in a Radicle namespace."""
+    return ident.author.split(":", 1)[1][:16]
+
+
 def sync_radicle(repo, ident: Identity) -> list[str]:
     """Fetch from the Radicle network, copy every node's legion refs, merge the coords, publish ours."""
     from . import radicle
@@ -198,7 +203,7 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
     try:
         radicle.fetch_all(repo)
         merge_coords(repo, ident, peers(repo))
-        radicle.publish(repo)
+        radicle.publish(repo, radicle_who(ident))
     except radicle.RadError as e:
         raise GitError(str(e))
     return failed

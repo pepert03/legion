@@ -236,9 +236,10 @@ def cmd_radicle(args):
             rid = radicle.rid(repo)
             if not rid:
                 raise Fail("this repository doesn't use Radicle (`legion radicle init` or `legion join rad:…`)")
-            nids = radicle.namespaces(repo)
+            pubs = radicle.publishers(repo)
             print(f"Repository {rid} · this node {radicle.node_id(repo)}")
-            print(f"Nodes that have published legion state: {len(nids)}")
+            print(f"Agents' repositories that have published legion state: {len(pubs)}, "
+                  f"from {len(radicle.namespaces(repo))} node(s)")
             print(radicle.rad(repo, "node", "status", check=False))
     except radicle.RadError as e:
         raise Fail(str(e))

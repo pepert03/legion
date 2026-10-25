@@ -61,7 +61,9 @@ Events live on a **separate branch, `coord`**, so they don't clutter the code hi
 
 With Radicle, each node pushes its own legion refs (`refs/legion/pub/*`: its coord and the main it
 follows; `refs/legion/patches/*`) to its node, and Radicle stores them in that node's namespace
-(`refs/namespaces/<NID>/…`) and replicates them through the seeds. Nodes behind NAT or on different
+(`refs/namespaces/<NID>/…`) and replicates them through the seeds. Inside the namespace, each legion identity
+publishes under its own prefix (`refs/legion/pub/<identity>/…`), so several agents on one computer share
+its node without overwriting each other. Nodes behind NAT or on different
 networks reach each other without opening ports, and nobody can write to anyone else's namespace.
 
 To sync, legion asks the node for the latest (`rad sync --fetch`, rate-limited), copies every

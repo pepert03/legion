@@ -1,9 +1,11 @@
 """Radicle as legion's transport.
 
-Every node pushes its own legion refs (refs/legion/pub/*, refs/legion/patches/*) to Radicle, which keeps
-each node's refs in its own namespace and replicates them through seeds, so nodes behind NAT or on
-different networks reach each other without opening ports. To sync, legion reads every namespace from
-the local Radicle storage and merges the coord branches, as in plain p2p.
+Every repository pushes its legion refs to its Radicle node, which keeps them in the node's namespace and
+replicates them through seeds, so nodes behind NAT or on different networks reach each other without
+opening ports. Inside the namespace, each legion identity publishes under its own prefix
+(refs/legion/pub/<identity>/coord), so several agents on one computer can share one node without
+overwriting each other. To sync, legion reads every publisher from the local Radicle storage and merges
+the coord branches, as in plain p2p.
 
 Radicle only ships for Linux and macOS. On Windows it runs inside WSL, and legion calls it through
 `wsl.exe`; the repository and the agents stay on Windows.
@@ -221,11 +223,30 @@ def storage(repo) -> str:
     return f"{home}/storage/{rid(repo)[4:]}"
 
 
+def _storage_refs(repo) -> list[str]:
+    return run("git", "--git-dir", storage(repo), "for-each-ref", "--format=%(refname)", "refs/namespaces/",
+               repo=repo, timeout=60).stdout.splitlines()
+
+
+PUB_RE = re.compile(r"refs/namespaces/([^/]+)/refs/legion/pub/(?:([0-9a-f]{16})/)?coord$")
+
+
+def publishers(repo, refs: list[str] | None = None) -> dict[str, str]:
+    """Every legion repository that has published state, as seen by the local storage:
+    {local peer name: its prefix in the storage}. The name is <identity>-<end of node id>; repositories that
+    published before identities had their own prefix (one per node) are named after the node."""
+    out = {}
+    for ref in refs if refs is not None else _storage_refs(repo):
+        m = PUB_RE.match(ref)
+        if m:
+            nid, who = m.groups()
+            name = f"{who}-{nid[-6:]}" if who else nid
+            out[name] = ref[:-len("coord")]
+    return dict(sorted(out.items()))
+
+
 def namespaces(repo) -> list[str]:
-    """Every node that has published legion refs for this repository, as seen by the local storage."""
-    out = run("git", "--git-dir", storage(repo), "for-each-ref", "--format=%(refname)", "refs/namespaces/",
-              repo=repo, timeout=60).stdout
-    return sorted({m.group(1) for m in re.finditer(r"refs/namespaces/([^/]+)/refs/legion/pub/coord", out)})
+    return sorted({prefix.split("/")[2] for prefix in publishers(repo).values()})
 
 
 def network_sync(repo, force: bool = False) -> bool:
@@ -240,39 +261,51 @@ def network_sync(repo, force: bool = False) -> bool:
 
 
 def fetch_all(repo) -> list[str]:
-    """Copy every node's published legion refs from the Radicle storage into this repository."""
-    nids = namespaces(repo)
-    if nids:
-        store = storage(repo)
-        specs = [f"+refs/namespaces/{n}/refs/legion/pub/*:refs/legion/peers/{n}/*" for n in nids]
+    """Copy every publisher's legion refs from the Radicle storage into this repository."""
+    refs = _storage_refs(repo)
+    pubs = publishers(repo, refs)
+    if pubs:
+        specs = [f"+{prefix}*:refs/legion/peers/{name}/*" for name, prefix in pubs.items()]
         # Every node re-publishes the patches it has seen (that's the gossip), so one patch can sit in
         # several namespaces. Patches are immutable, so take each one from the first namespace that has it.
-        out = run("git", "--git-dir", store, "for-each-ref", "--format=%(refname)", "refs/namespaces/",
-                  repo=repo, timeout=60).stdout
         chosen = {}
-        for ref in out.splitlines():
+        for ref in refs:
             m = re.match(r"refs/namespaces/[^/]+/(refs/legion/patches/.+)$", ref)
             if m and m.group(1) not in chosen:
                 chosen[m.group(1)] = ref
         specs += [f"+{src}:{dest}" for dest, src in sorted(chosen.items())]
         for attempt in range(3):
             try:
-                rgit(repo, "fetch", "-q", "--no-tags", store, *specs, timeout=120)
+                rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *specs, timeout=120)
                 break
             except RadError as e:  # another legion process (a viewer) fetching into the same refs right now
                 if "cannot lock ref" not in str(e) or attempt == 2:
                     raise
                 time.sleep(1)
-    return nids
+    # Peers that aren't published any more (a repository that moved to per-identity refs): forget them.
+    local = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/legion/peers/"], cwd=repo,
+                           capture_output=True, text=True).stdout.splitlines()
+    for ref in local:
+        if ref.split("/")[3] not in pubs:
+            subprocess.run(["git", "update-ref", "-d", ref], cwd=repo, capture_output=True)
+    return list(pubs)
 
 
-def publish(repo) -> None:
-    """Push this node's legion refs to its Radicle namespace; the node announces them to the network."""
+def publish_specs(repo, who: str) -> list[str]:
+    """The refspecs that push this repository's legion refs under its identity's own prefix."""
     specs = []
-    for prefix in ("refs/legion/pub/", "refs/legion/patches/"):
+    for prefix, dest in (("refs/legion/pub/", f"refs/legion/pub/{who}/"),
+                         ("refs/legion/patches/", "refs/legion/patches/")):
         has = subprocess.run(["git", "for-each-ref", "--count=1", "--format=x", prefix], cwd=repo,
                              capture_output=True, text=True).stdout.strip()
         if has:  # a pattern that matches nothing makes the whole push fail
-            specs.append(f"{prefix}*:{prefix}*")
+            specs.append(f"{prefix}*:{dest}*")
+    return specs
+
+
+def publish(repo, who: str) -> None:
+    """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
+    the node announces them to the network."""
+    specs = publish_specs(repo, who)
     if specs:
         rgit(repo, "push", "-q", "--force", "rad", *specs, timeout=120)

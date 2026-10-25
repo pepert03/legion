@@ -20,14 +20,14 @@ def network(tmp_path, monkeypatch):
     store = tmp_path / "storage"
     git(tmp_path, "init", "-q", "--bare", str(store))
     nodes = {}
-    for nid in ("z6MkAlice", "z6MkBob"):
-        r = tmp_path / nid
+    for name, nid in (("z6MkAlice", "z6MkAlice"), ("z6MkBob", "z6MkBob"), ("bob-2", "z6MkBob")):
+        r = tmp_path / name
         git(tmp_path, "init", "-q", "-b", "main", str(r))
         git(r, "config", "user.name", nid)
         git(r, "config", "user.email", f"{nid}@x")
         radicle.enable(r, "rad:zTest")
         git(r, "config", "legion.nid", nid)
-        nodes[nid] = r
+        nodes[name] = r
 
     def run(*args, repo=None, home=None, timeout=60, check=True, cwd=None):
         p = subprocess.run(list(args), cwd=cwd, capture_output=True, encoding="utf-8", timeout=timeout)
@@ -35,11 +35,11 @@ def network(tmp_path, monkeypatch):
             raise radicle.RadError(p.stderr)
         return p
 
-    def publish(repo):  # what the rad remote does: the node's refs land in its own namespace
+    def publish(repo, who):  # what the rad remote does: the pushed refs land in the node's namespace
         nid = git(repo, "config", "legion.nid")
-        for prefix in ("refs/legion/pub/", "refs/legion/patches/"):
-            if git(repo, "for-each-ref", "--count=1", prefix):
-                git(repo, "push", "-q", "--force", str(store), f"{prefix}*:refs/namespaces/{nid}/{prefix}*")
+        for spec in radicle.publish_specs(repo, who):
+            src, dest = spec.split(":")
+            git(repo, "push", "-q", "--force", str(store), f"{src}:refs/namespaces/{nid}/{dest}")
 
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     monkeypatch.setattr(radicle, "run", run)
@@ -55,7 +55,7 @@ def test_events_travel_through_the_storage(network):
     coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
     coordgit.sync(alice, boss)
     coordgit.sync(bob, boss)
-    assert coordgit.peers(bob) == ["z6MkAlice"]
+    assert [p.split("-")[1] for p in coordgit.peers(bob)] == ["kAlice"]  # <identity>-<end of node id>
     assert [e["type"] for e in coordgit.read_events(bob)] == ["project.init"]
 
 
@@ -81,3 +81,20 @@ def test_host_path_is_unchanged_off_windows(monkeypatch):
 def test_a_converted_radicle_home_is_refused():
     with pytest.raises(radicle.RadError, match="MSYS_NO_PATHCONV"):
         radicle.run("true", home="C:/Program Files/Git/home/legion/.radicle")
+
+
+def test_two_repositories_on_one_node_dont_overwrite_each_other(network):
+    """Two agents on one computer share its Radicle node, but each publishes under its own identity."""
+    bob, bob2, alice = network["z6MkBob"], network["bob-2"], network["z6MkAlice"]
+    boss, b1, b2 = Identity.generate("boss"), Identity.generate("bob#1"), Identity.generate("bob#2")
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
+    coordgit.sync(alice, boss)
+    coordgit.sync(bob, b1)
+    coordgit.sync(bob2, b2)
+    coordgit.append(bob, b1, E.create(b1, "task.heartbeat", 2, task="x"))
+    coordgit.append(bob2, b2, E.create(b2, "task.heartbeat", 2, task="y"))
+    coordgit.sync(bob, b1)
+    coordgit.sync(bob2, b2)  # with one prefix per node, this push would hide bob's event
+    coordgit.sync(alice, boss)
+    assert {e.get("task") for e in coordgit.read_events(alice)} == {None, "x", "y"}
+    assert len(radicle.publishers(alice)) == 3
