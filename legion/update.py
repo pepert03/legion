@@ -47,11 +47,11 @@ def check(quiet: bool = False) -> bool:
     if not new or new == have:
         return False
     print(f"legion: updating legion ({have[:8]} → {new[:8]}) from {url}…", file=sys.stderr, flush=True)
-    p = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", "--no-deps",
+    p = subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--force-reinstall", "--no-deps",
                         f"git+{url}@{new}"], capture_output=True, text=True, timeout=600)
     if p.returncode:
         print(f"legion: couldn't update ({p.stderr.strip()[-300:]}); update by hand with:\n"
-              f"  {sys.executable} -m pip install --upgrade git+{url}", file=sys.stderr)
+              f"  {sys.executable} -m pip install --force-reinstall --no-deps git+{url}", file=sys.stderr)
         return False
     if not quiet:
         print("legion: updated; the new version runs from your next command.", file=sys.stderr)
