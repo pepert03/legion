@@ -201,6 +201,12 @@ def radicle_ready(alias: str, home: str | None) -> str:
                     "approve it), then run this again." if radicle.IS_WINDOWS else "")
             raise Fail(f"couldn't install Radicle: {e}.{hint}")
     nid = radicle.ensure_identity(alias, home)
+    try:
+        note = radicle.route_through_proxy(home)
+    except radicle.RadError as e:
+        raise Fail(str(e))
+    if note:
+        print(f"Note: {note}.", flush=True)
     radicle.ensure_node(home=home)
     return nid
 
@@ -209,6 +215,11 @@ def cmd_radicle(args):
     from . import radicle
     home = args.rad_home
     try:
+        if args.action == "doctor":
+            from . import netcheck
+            for line in netcheck.doctor():
+                print(line)
+            return
         if args.action == "setup":
             ident = Identity.load()
             nid = radicle_ready(args.alias or (ident.name if ident else socket.gethostname()), home)
@@ -836,8 +847,9 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_join)
 
     s = sub.add_parser("radicle", help="Radicle as the transport: across networks, no server, no open ports")
-    s.add_argument("action", choices=["setup", "init", "status"],
-                   help="setup: install Radicle and start the node; init: publish this project; status")
+    s.add_argument("action", choices=["setup", "init", "status", "doctor"],
+                   help="setup: install Radicle and start the node; init: publish this project; status; "
+                        "doctor: can this machine reach the seeds, directly or through its HTTP proxy?")
     s.add_argument("--alias", help="node alias (default: your legion name)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")
     s.set_defaults(func=cmd_radicle)

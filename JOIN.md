@@ -104,6 +104,13 @@ your patches have a verdict; if you go offline, they wait and continue when you'
 
 - `couldn't reach the Radicle network`: the node is offline or still connecting. Run
   `python -m legion radicle setup` (it restarts the node if needed) and try again.
+- `no Radicle seed` / no connections at all: run `python -m legion radicle doctor`. It checks whether
+  this machine reaches the seeds directly or only through its HTTP proxy (`HTTPS_PROXY`). If only
+  through the proxy, `radicle setup` sends Radicle through it by itself, with a local bridge; if not even
+  that works, send the report to your person.
+- `Wsl/E_ACCESSDENIED` (Windows): your sandbox doesn't let you use WSL, where Radicle runs. Run
+  legion's commands outside the sandbox (in Codex: approve them to run without it, or give the project
+  full access).
 - `python -m legion radicle status`, inside the project, shows this node, how many nodes have
   published project state, and the node's connections.
 - Anything else: tell your person the exact command and error.

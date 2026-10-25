@@ -14,7 +14,9 @@ Radicle only ships for Linux and macOS. On Windows it runs inside WSL, and legio
 import json
 import os
 import re
+import socket
 import subprocess
+import sys
 import time
 from pathlib import Path, PureWindowsPath
 
@@ -65,6 +67,11 @@ def run(*args: str, repo=None, home: str | None = None, timeout: float = 60, che
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RadError(f"`{' '.join(args[:3])}` timed out after {timeout:.0f}s")
+    if IS_WINDOWS and p.returncode and "E_ACCESSDENIED" in (p.stdout + p.stderr).replace("\x00", ""):
+        # wsl.exe refuses processes running with a restricted token, which is how agent sandboxes run them.
+        raise RadError("WSL refused access to this process (Wsl/E_ACCESSDENIED): the agent's sandbox doesn't let "
+                       "it use WSL, where Radicle runs on Windows. Run legion's commands outside the sandbox: in "
+                       "Codex, approve them to run without the sandbox, or use full access for this project")
     if check and p.returncode:
         raise RadError(f"`{' '.join(args[:3])}` failed: {clean(p.stderr or p.stdout).strip()[-600:]}")
     return p
@@ -171,6 +178,85 @@ def configure_node(home: str, listen: str | None = None, network: str | None = N
                        capture_output=True, text=True, timeout=30)
     if p.returncode:
         raise RadError(f"couldn't write the node config: {p.stderr.strip()}")
+
+
+# --- networks that only let HTTP(S) out ---------------------------------------------------------
+
+BRIDGE = ("127.0.0.1", 1080)
+
+
+def _config_path(home: str | None) -> str:
+    return f"{home or rad(None, 'path', timeout=30).splitlines()[-1].strip()}/config.json"
+
+
+def node_proxy(home: str | None = None) -> str | None:
+    try:
+        return json.loads(run("cat", _config_path(home), home=home, timeout=30).stdout)["node"].get("proxy")
+    except (RadError, ValueError, KeyError):
+        return None
+
+
+def set_node_proxy(home: str | None, address: str | None) -> None:
+    path = _config_path(home)
+    c = json.loads(run("cat", path, home=home, timeout=30).stdout)
+    c["node"]["proxy"] = address
+    Path(path).write_text(json.dumps(c, indent=2), encoding="utf-8")
+
+
+def bridge_running() -> bool:
+    with socket.socket() as s:
+        s.settimeout(2)
+        return s.connect_ex(BRIDGE) == 0
+
+
+def start_bridge(proxy_url: str) -> None:
+    """Run legion's SOCKS5-to-HTTP-proxy bridge in the background, outliving this command."""
+    from .identity import home as legion_home
+    log = open(legion_home() / "bridge.log", "ab")
+    subprocess.Popen([sys.executable, "-m", "legion.bridge", "--proxy", proxy_url,
+                      "--listen", f"{BRIDGE[0]}:{BRIDGE[1]}"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                     start_new_session=True, env={**os.environ, "PYTHONPATH": str(Path(__file__).parent.parent)})
+    for _ in range(20):
+        if bridge_running():
+            return
+        time.sleep(0.25)
+    raise RadError(f"the proxy bridge didn't start; see {legion_home() / 'bridge.log'}")
+
+
+def keep_bridge(repo) -> None:
+    """Behind an HTTP proxy, restart the bridge if it died (a reboot, say). Cheap when there's no proxy."""
+    from .bridge import proxy_from_env
+    url = proxy_from_env()
+    if url and not IS_WINDOWS and not bridge_running() and node_proxy(_cfg(repo, "legion.radhome")) ==             f"{BRIDGE[0]}:{BRIDGE[1]}":
+        start_bridge(url)
+
+
+def route_through_proxy(home: str | None = None) -> str | None:
+    """If the seeds are only reachable through an HTTP proxy, send the node through it. Returns what it did."""
+    from . import netcheck
+    from .bridge import Proxy, proxy_from_env
+    bridge = f"{BRIDGE[0]}:{BRIDGE[1]}"
+    url = proxy_from_env()
+    if node_proxy(home) == bridge:  # set up before: keep the bridge alive (after a reboot, say)
+        if not bridge_running():
+            if not url:
+                raise RadError("Radicle is set to go out through legion's proxy bridge, but there's no HTTPS_PROXY now")
+            start_bridge(url)
+        return None
+    if IS_WINDOWS or not url:
+        return None
+    seeds = netcheck.SEEDS[:2]
+    if any(netcheck.direct(h, p) == "ok" for h, p in seeds):
+        return None
+    if not any(netcheck.through(Proxy(url), h, p) == "ok" for h, p in seeds):
+        raise RadError("this machine reaches no Radicle seed, directly or through its HTTP proxy. "
+                       "`python -m legion radicle doctor` shows the details")
+    if not bridge_running():
+        start_bridge(url)
+    set_node_proxy(home, bridge)
+    if node_running(home=home):  # restart, so it picks the proxy up
+        run("rad", "node", "stop", home=home, check=False, timeout=60)
+    return f"the seeds are only reachable through the HTTP proxy: Radicle now goes out through it ({bridge})"
 
 
 # --- the repository ----------------------------------------------------------------------------

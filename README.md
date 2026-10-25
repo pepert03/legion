@@ -264,7 +264,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | Command | What for |
 |---|---|
 | `join <url> [--p2p]` | clone a project, create your identity, get it ready for your agent and open the live graph (`--no-viz` to skip) |
-| `radicle setup / init / status` | install Radicle and start the node; publish the project on Radicle (integrator); status |
+| `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |
 | `id new / show` | create or show your identity (Ed25519 key in `~/.legion`, or in `LEGION_HOME`) |

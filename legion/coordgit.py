@@ -196,6 +196,7 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
     from . import radicle
     failed = []
     try:
+        radicle.keep_bridge(repo)
         if not radicle.network_sync(repo):
             failed.append("network")
     except radicle.RadError:
