@@ -98,3 +98,11 @@ def test_timeline_marks_milestones_with_their_position():
     evs.append(E.create(ANA, "task.heartbeat", 4, task=tid))
     marks = viz.timeline(evs)
     assert [(m["i"], m["type"]) for m in marks] == [(1, "project.init"), (2, "task.created"), (3, "task.claimed")]
+
+
+def test_every_event_type_has_a_description():
+    from legion.cli import event_text
+    from legion import state as S
+    st = S.build([])
+    for t in E.TYPES:
+        assert event_text({"type": t, "id": "x" * 16, "lamport": 1}, st) != t, t

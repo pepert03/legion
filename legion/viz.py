@@ -74,7 +74,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
             "stats": {"claims": 0, "patches": 0, "accepted": 0, "rejected": 0, "reports": 0, "sketches": 0}})
         a["name"] = ev["name"]
         a["last_ts"] = max(a["last_ts"], ev["ts"])
-        if ev["type"] != "task.heartbeat":
+        if ev["type"] not in ROUTINE:
             a["last"] = event_text(ev, st)
         for field, bucket in (("agent", "kinds"), ("model", "models")):
             if ev.get(field) and ev[field] not in a[bucket]:
@@ -104,7 +104,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     counts = {}
     for t in tasks:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
-    recent = [item(e, st) for e in evs if e["type"] != "task.heartbeat"][-14:]
+    recent = [item(e, st) for e in evs if e["type"] not in ROUTINE][-14:]
     return {"project": st.project.get("project") if st.project else None,
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
@@ -125,6 +125,9 @@ TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.re
                   "sketch.accepted", "sketch.failed", "task.resolved", "task.created", "project.init"}
 
 
+ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed
+
+
 def timeline(events: list[dict]) -> list[dict]:
     """The events that deserve a mark on the timeline (position = their index)."""
     st = S.build(events)
@@ -143,7 +146,7 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
     evs = events if upto is None else events[:max(upto, 0)]
     st = S.build(evs)
     if node.startswith("a-"):
-        mine = [e for e in evs if agent_id(e["author"]) == node and e["type"] != "task.heartbeat"]
+        mine = [e for e in evs if agent_id(e["author"]) == node and e["type"] not in ROUTINE]
     else:
         patches = {p.id for p in st.patches.values() if p.task == node}
         mine = [e for e in evs if e.get("task") == node or e.get("patch") in patches]

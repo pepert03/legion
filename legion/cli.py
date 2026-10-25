@@ -98,7 +98,11 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "sketch.rejected": f"rejects sketch {str(ev.get('sketch', ''))[:8]}: {reason}",
         "sketch.failed": f"sketch {str(ev.get('sketch', ''))[:8]} fails: {reason}",
         "task.resolved": f"marks {key} done: its subtasks are finished and it passes its own test",
-    }[t]
+        "integrator.vote": f"votes to {ev.get('action')} {ev.get('member') or str(ev.get('key', ''))[:16]} as integrator",
+        "integrator.lease": "takes the integration lease",
+        "integrator.renew": "renews the integration lease",
+        "integrator.release": "hands over the integration lease",
+    }.get(t, t)  # an event type from a newer legion still shows up
 
 
 def status_table(st: S.State, now: float) -> str:
@@ -245,8 +249,9 @@ def open_viewer(repo: Path) -> str | None:
                                                                     os.environ.get("PYTHONPATH")]))}
     kw = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=repo, env=env)
     try:
-        if os.name == "nt":  # detached, and out of the caller's job so closing the agent's shell doesn't kill it
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        if os.name == "nt":  # its own hidden console, out of the caller's job so closing the agent's shell doesn't kill it
+            # Not DETACHED_PROCESS: without a console, every git or wsl it runs would open a visible window.
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             try:
                 subprocess.Popen(cmd, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
             except OSError:  # the job doesn't allow breaking away

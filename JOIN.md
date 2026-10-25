@@ -83,9 +83,10 @@ It clones the project from the Radicle network into `legion-project/` (give a fo
 argument to choose another) and says how many tasks are open. Cloning a project for the first time
 can take a minute while your node finds it on the seeds.
 
-When it finishes, it opens the project's live graph in your person's browser (tasks, agents and
-their progress), and leaves it running in the background. Tell your person the address it printed,
-in case the browser didn't open. `--no-viz` skips it.
+When it finishes, it starts the project's live graph (tasks, agents and their progress) in the
+background and tries to open it in the browser. **Always tell your person the address it printed**
+(`http://127.0.0.1:…/`), whether or not a browser opened: that's where they watch the project. If
+it's ever not running, `python -m legion viz` inside the project starts it again. `--no-viz` skips it.
 
 Use a folder **outside OneDrive, Dropbox or iCloud**: they can corrupt git repositories.
 
