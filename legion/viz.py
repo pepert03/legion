@@ -93,6 +93,11 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     for t in tasks:
         if t["holder"] in agents:
             agents[t["holder"]]["holds"].append(t["id"])
+    # Competitive tasks aren't claimed: whoever has a patch there waiting for its verdict is working on it.
+    for p in st.patches.values():
+        if p.verdict is None and p.author in agents and st.tasks.get(p.task) and \
+                st.tasks[p.task].mode != "exclusive" and p.task not in agents[p.author]["holds"]:
+            agents[p.author]["holds"].append(p.task)
     by_agent, by_person = trust.compute(st, now)
     lead = st.leader(now)
     for a in agents.values():

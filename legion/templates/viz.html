@@ -254,18 +254,26 @@ function discImg(a, px = 28) {
 // State
 // ---------------------------------------------------------------------------------------------
 const GOAL = "__goal__";
-const FIT_PAD = 100;  // room for the title above and the timeline below
-const MAX_ZOOM = 2.2;  // a small graph stays small instead of filling the screen
-// Fit the whole graph in view, without zooming in past MAX_ZOOM.
+const FIT_PAD = 28;    // screen pixels kept free around the graph
+const MAX_ZOOM = 3.5;  // so one or two tasks don't fill the whole screen
+// Fit the graph in its area as big as it goes without cutting anything: node discs, their rings and the
+// labels under them count (force-graph's own zoomToFit only looks at node centres).
 function fit(ms) {
   if (!Graph) return;
-  const k0 = Graph.zoom(), c0 = Graph.centerAt();
-  Graph.zoomToFit(0, FIT_PAD);  // measure where a plain fit would land…
-  const k = Math.min(Graph.zoom(), MAX_ZOOM), c = Graph.centerAt();
-  Graph.zoom(k0, 0);  // …then go back and glide there, capped
-  Graph.centerAt(c0.x, c0.y, 0);
+  const ns = Graph.graphData().nodes.filter((n) => Number.isFinite(n.x));
+  if (!ns.length) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of ns) {
+    const r = (n.r || radius(n)) * 1.6;  // with room for the ripples and the progress arc
+    x0 = Math.min(x0, n.x - r); x1 = Math.max(x1, n.x + r);
+    y0 = Math.min(y0, n.y - r); y1 = Math.max(y1, n.y + r);
+  }
+  const el = document.getElementById("graph");
+  const LABEL_W = 110, LABEL_H = 22;  // a label is drawn at a fixed screen size: half its width can stick out
+  const k = Math.min((el.clientWidth - 2 * FIT_PAD - LABEL_W) / Math.max(x1 - x0, 1),
+                     (el.clientHeight - 2 * FIT_PAD - LABEL_H) / Math.max(y1 - y0, 1), MAX_ZOOM);
   Graph.zoom(k, ms);
-  Graph.centerAt(c.x, c.y, ms);
+  Graph.centerAt((x0 + x1) / 2, (y0 + y1) / 2 + LABEL_H / 2 / k, ms);
 }
 let data = null, live = true, playTimer = null, selected = null, popMode = null, hover = null, hoverAgent = null;
 const nodes = new Map(), agents = new Map(), neighbours = new Map();
@@ -734,7 +742,13 @@ function play() {
   if (TL.playing) { stopPlay(); renderTimeline(); return; }
   live = false; TL.playing = true;
   let i = data && !data.live ? data.index : 0;
-  playTimer = setInterval(() => { i += 1; if (!data || i >= data.total) return goLive(); load(i).catch(() => {}); }, 380);
+  // From one timeline mark to the next: the events in between (heartbeats, lease renewals) show nothing new.
+  playTimer = setInterval(() => {
+    const next = marks.find((m) => m.i > i);
+    i = next ? next.i : (data ? data.total : 0);
+    if (!data || i >= data.total) return goLive();
+    load(i).catch(() => {});
+  }, 900);
   renderTimeline();
 }
 
