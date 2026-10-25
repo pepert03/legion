@@ -180,6 +180,9 @@ def cmd_init(args):
 
 
 AGENT_PROMPT = "Read AGENTS.md and follow its protocol until it says you are done."
+# What every step that ends a piece of work reminds the agent: it's a loop, and stopping early is the usual mistake.
+KEEP_GOING = ("go straight back to `python -m legion context` and then `python -m legion claim --wait`, without "
+              "stopping or asking: you're done only when claim exits with code 4.")
 
 
 def radicle_ready(alias: str, home: str | None) -> str:
@@ -423,6 +426,12 @@ def cmd_claim(args):
             t = held[0]
         else:
             free = c.st.claimable(now)
+            deadline = now + (args.wait or 0) * 60
+            while not free and not c.st.exclusive_done() and time.time() < deadline:
+                time.sleep(min(30, max(1, deadline - time.time())))  # someone may release, or a dependency land
+                c.sync()
+                now = time.time()
+                free = c.st.claimable(now)
             if not free:
                 if c.st.exclusive_done():
                     out(args, {"won": False, "task": None, "done": True}, "Every exclusive task is done.")
@@ -431,7 +440,7 @@ def cmd_claim(args):
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled]
                 out(args, {"won": False, "task": None, "done": False},
                     f"Nothing is open right now, but these are unfinished: {', '.join(waiting)} "
-                    "(claimed, in review or blocked). Wait a minute and run claim again.")
+                    "(claimed, in review or blocked). Run `python -m legion claim --wait` again.")
                 return 5
             # Deterministic spread: each agent prefers a different order, so they collide less.
             t = min(free, key=lambda t: hashlib.sha256((c.me + t.id).encode()).hexdigest())
@@ -601,6 +610,7 @@ def cmd_report(args):
     c.emit("attempt.reported", task=t.id, outcome=args.outcome, notes=args.notes)
     c.sync()
     print(f"Report published on {t.key}.")
+    print(f"Next: {KEEP_GOING}")
 
 
 def cmd_submit(args):
@@ -635,7 +645,9 @@ def cmd_submit(args):
     ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch)
     c.sync()
     out(args, {"patch": ev["id"], "branch": branch},
-        f"Patch {ev['id'][:8]} submitted for {t.key} (branch {branch}). Wait for the verdict with `status`.")
+        f"Patch {ev['id'][:8]} submitted for {t.key} (branch {branch}). "
+        f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
+        f"for the verdict: `context` will show it to you. {KEEP_GOING}")
 
 
 def cmd_sketch(args):
@@ -700,6 +712,17 @@ def cmd_context(args):
     lines += ["", "## Tasks", status_table(st, now)]
     held = st.held_by(c.me, now)
     lines += ["", "## Your claims", ", ".join(f"{t.id} ({t.key})" for t in held) if held else "(none)"]
+    mine = sorted((p for p in st.patches.values() if p.author == c.me), key=lambda p: p.lamport)
+    lines += ["", "## Your patches"]
+    for p in mine[-10:]:
+        key = st.tasks[p.task].key if p.task in st.tasks else p.task
+        reason = f": {p.reason.splitlines()[0][:200]}" if p.verdict == "rejected" and p.reason else ""
+        fix = (f" -> its task is open: claim it (`claim {p.task}`) and fix it"
+               if p.verdict == "rejected" and st.status(p.task, now) == "open" else "")
+        lines.append(f"- {p.id[:8]} {key}: {p.verdict or 'waiting for the integrator'}{reason}{fix}")
+    if not mine:
+        lines.append("(none yet)")
+    lines += ["", f"Next: {KEEP_GOING[0].upper()}{KEEP_GOING[1:]}"]
     print("\n".join(lines))
 
 
@@ -888,6 +911,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("task", nargs="?")
     s.add_argument("--ttl", type=int, default=int(os.environ.get("LEGION_TTL", "7200")),
                    help="seconds until it expires (default 2 h, or LEGION_TTL)")
+    s.add_argument("--wait", type=float, nargs="?", const=8, default=0, metavar="MINUTES",
+                   help="if nothing is open, wait for a task to free up (default 8 min) before exiting with 5")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_claim)
 

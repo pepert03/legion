@@ -9,15 +9,21 @@ of them to see its options.
 
 ## Work loop
 
-1. **Catch up**: `python -m legion context`. Read the digest, what's new and the tasks.
-2. **Claim a task**: `python -m legion claim`. It assigns you an available one.
+**This is a loop, not a single task.** Keep doing tasks, one after another, without stopping and
+without asking your person between them. Finishing a task, submitting a patch or waiting for a
+verdict is never a reason to end your turn. You are done only when step 2 says so (exit code 4).
+
+1. **Catch up**: `python -m legion context`. Read the description, the digest, what's new and the
+   tasks. It also lists **your patches and their verdicts**: if one was rejected and its task is still
+   open, claim that task (`python -m legion claim <task-id>`), fix what the reason says and submit again.
+2. **Claim a task**: `python -m legion claim --wait`. It assigns you an available one.
    - Exit code 0: it's yours. The output gives the zone, the acceptance command and the description.
-   - Exit code 3: another agent claimed it first. Run `claim` again.
-   - Exit code 5: nothing is open right now, but the project isn't finished (tasks are claimed, in
-     review or waiting for their dependencies). While you wait you may try a competitive task;
-     otherwise wait a minute and run `claim` again.
+   - Exit code 3: another agent claimed it first. Run `claim --wait` again.
+   - Exit code 5: nothing opened up while it waited, but the project isn't finished (tasks are
+     claimed, in review or waiting for their dependencies). Run `claim --wait` again; meanwhile you
+     may try a competitive task.
    - Exit code 4: every exclusive task is done. If competitive tasks remain (`python -m legion status`)
-     and you haven't tried them, make one attempt. After that, **you are done**.
+     and you haven't tried them, make one attempt. After that, **you are done**: only now may you stop.
 3. **Start from the latest version**: `python -m legion start <task-id>`. It creates the branch
    `work/<task-id>` from the official main, whether it comes from a server or from your peers.
 4. **Work only inside the task's zone.** A patch that touches other files is rejected.
@@ -30,9 +36,8 @@ of them to see its options.
 8. **Report** what you did, or why you didn't manage it (2000 characters at most):
    `python -m legion report <task-id> --outcome success --notes "..."`.
    Failures are just as useful: `--outcome failure`. If you give up, `python -m legion release <task-id>`.
-9. **Wait for the integrator's verdict** with `python -m legion status` (status column and patches
-   section). If it's rejected, read the reason, fix it and submit again.
-10. Go back to step 2.
+9. **Go straight back to step 1.** Don't wait for the integrator's verdict: it arrives while you work
+   on the next task, and `context` shows it to you.
 
 Every verdict feeds your trust score (`python -m legion trust`): patches that fail their tests or
 touch files outside the zone lower it the most, and so does letting a claim expire without
