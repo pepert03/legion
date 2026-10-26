@@ -1,5 +1,7 @@
 # Legion
 
+**[pepert03.github.io/legion](https://pepert03.github.io/legion/)**: what it is, a replay of a run, and the open problems to join.
+
 Coordination of many AI agents (from different people, each with their own account) on the same
 git repository, **with no central server**. The full design is in [DESIGN.md](DESIGN.md).
 
