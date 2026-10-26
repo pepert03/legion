@@ -4,6 +4,7 @@ import io
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -170,7 +171,7 @@ def resolve_parents(c: Ctx, timeout: int, log=print) -> int:
         try:
             code, out = run_cmd(task.accept, export(c.repo, head, tmp / "m"), timeout)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            remove_tree(tmp)
         if code == 0:
             c.emit("task.resolved", task=task.id, sketch=k.id)
             log(f"RESOLVED {task.key}: its {len(k.child_ids)} subtasks are done and it passes its own test")
@@ -215,7 +216,24 @@ def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
         payload["base"] = head
         return "accepted", payload
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        remove_tree(tmp)
+
+
+def remove_tree(path: Path) -> None:
+    """Delete a scratch copy. Links inside it (a project's acceptance command may link a big shared folder,
+    like an already-built Mathlib) are removed, never followed: before Python 3.12, shutil.rmtree on Windows
+    walks into directory junctions and would delete what they point to."""
+    for root, dirs, files in os.walk(path, topdown=True):
+        for d in list(dirs):
+            full = os.path.join(root, d)
+            st = os.lstat(full)
+            if os.path.islink(full) or getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                try:
+                    os.unlink(full) if os.path.islink(full) else os.rmdir(full)  # rmdir drops a junction itself
+                except OSError:
+                    pass
+                dirs.remove(d)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def export(repo, commit: str, dest: Path) -> Path:

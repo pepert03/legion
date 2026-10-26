@@ -4,10 +4,12 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from . import coordgit
@@ -264,7 +266,11 @@ def cmd_radicle(args):
             radicle_ready(ident.name, home)
             if home:  # the Radicle commands below read it from the repository's config
                 coordgit.git(repo, "config", "legion.radhome", home)
-            rid = radicle.init_repo(repo, st.project.get("project"), f"legion project {st.project.get('project')}")
+            title = st.project.get("project")
+            # Radicle wants a plain name: "Erdős #902: Schütte tournaments" -> "erdos-902-schutte-tournaments".
+            plain = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode()
+            name = re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-") or "legion-project"
+            rid = radicle.init_repo(repo, name, f"legion project: {title}")
             radicle.enable(repo, rid, home)
             coordgit.sync(repo, ident)
             print(f"Published on Radicle as {rid}. Public: Radicle's public seeds will carry it.")

@@ -107,3 +107,23 @@ def test_payload_cannot_overwrite_the_header():
     import pytest
     with pytest.raises(ValueError):
         E.create(A, "integrator.vote", 1, action="add", key=B.author, name="someone else")
+
+
+def test_scratch_copies_are_removed_without_following_links(tmp_path):
+    import os
+    import subprocess
+    from legion.integrator import remove_tree
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "precious.txt").write_text("keep me")
+    scratch = tmp_path / "scratch"
+    (scratch / ".lake").mkdir(parents=True)
+    link = scratch / ".lake" / "packages"
+    if os.name == "nt":  # a junction, as check.py makes
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(shared)], check=True, capture_output=True)
+    else:
+        link.symlink_to(shared, target_is_directory=True)
+    assert (link / "precious.txt").exists()
+    remove_tree(scratch)
+    assert not scratch.exists()
+    assert (shared / "precious.txt").read_text() == "keep me"

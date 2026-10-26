@@ -11,6 +11,7 @@ every declaration the module defines rests on nothing more than those three.
 Exits with 0 when everything holds; otherwise prints why and exits with 1.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -28,6 +29,34 @@ TASKS = {
     "szekeres_lower": ("Erdos902.SzekeresLower", "SzekeresLower"),
 }
 STANDARD = {"propext", "Classical.choice", "Quot.sound"}
+
+
+SHARED = Path(os.environ.get("LEGION_LEAN_PACKAGES", Path.home() / ".legion" / "lean-packages" / "erdos902"))
+
+
+def ensure_packages():
+    """Mathlib, already built, for this copy of the project. The integrator checks patches in fresh copies,
+    which have no .lake/: link it to a shared one instead of downloading gigabytes for every review."""
+    packages = ROOT / ".lake" / "packages"
+    if (packages / "mathlib").exists():
+        if not SHARED.exists():  # the first copy on this machine that has it shares it with the rest
+            SHARED.parent.mkdir(parents=True, exist_ok=True)
+            link(SHARED, packages)
+        return
+    if (SHARED / "mathlib").exists():
+        packages.parent.mkdir(parents=True, exist_ok=True)
+        link(packages, SHARED)
+        if (packages / "mathlib").exists():
+            return
+    print("Downloading Mathlib, already built (the first time on this machine: a few GB)...", flush=True)
+    lake("exe", "cache", "get")
+
+
+def link(path, target):
+    if os.name == "nt":  # a junction: no administrator needed, unlike a symlink
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(path), str(target)], capture_output=True)
+    else:
+        path.symlink_to(target, target_is_directory=True)
 
 
 def lake(*args, timeout=3600):
@@ -70,6 +99,7 @@ def check_axioms(output, what):
 
 
 def check_theorem(name):
+    ensure_packages()
     if name not in TASKS:
         fail(f"unknown theorem {name}; the tasks are: {', '.join(TASKS)}")
     module, prop = TASKS[name]
@@ -87,6 +117,7 @@ example : Erdos902.Statements.{prop} := Erdos902.{name}
 
 
 def check_module(module):
+    ensure_packages()
     if not re.fullmatch(r"Erdos902(\.[A-Za-z0-9_]+)+", module):
         fail("a module is like Erdos902.LowerBound.Induction")
     build(module)
