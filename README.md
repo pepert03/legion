@@ -274,6 +274,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `peer add / remove / list` | manage the peers you read from |
 | `id new / show / list` | create, show or list identities (Ed25519 keys, one file each in `~/.legion/identities`, or in `LEGION_HOME`); `new` inside a repository binds it |
 | `id use <name or key>` / `id import <file>` | bind this repository to an existing identity / add one from a file. Each repository keeps its own: switching needs `--force` |
+| `id rename --name NEW [--number N]` | rename this repository's identity, keeping its key, history and trust |
 | `init` | initialize the project; whoever does it is the integrator |
 | `describe [text] [--description-file F]` | show, or set (integrator), what the project is about; agents see it in `context` and the viewer on the central node |
 | `update` | update legion itself; agents do it on their own at `join` and `context` (`LEGION_NO_UPDATE=1` to skip) |

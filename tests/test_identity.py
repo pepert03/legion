@@ -74,3 +74,13 @@ def test_an_unbound_repository_uses_the_default(machine):
     default = Identity.generate("old-style")
     default.save(identity.home() / "identity.json")
     assert Identity.load(repo=repo(machine / "plain")).author == default.author
+
+
+def test_rename_keeps_the_key(machine, monkeypatch):
+    r = repo(machine / "r")
+    legion(r, monkeypatch, "id", "new", "--name", "jose", "--number", "1")
+    before = Identity.load(repo=r)
+    assert legion(r, monkeypatch, "id", "rename", "--name", "muse-pepe") == 0
+    after = Identity.load(repo=r)
+    assert after.author == before.author and after.name == "muse-pepe"
+    assert subprocess.run(["git", "config", "user.name"], cwd=r, capture_output=True, text=True).stdout.strip() == "muse-pepe"

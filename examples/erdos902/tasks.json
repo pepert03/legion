@@ -2,7 +2,10 @@
   {
     "key": "lower-bound",
     "title": "Erdős's lower bound: 2^(n+1) - 1 ≤ f(n)",
-    "zone": ["Erdos902/LowerBound.lean", "Erdos902/LowerBound/"],
+    "zone": [
+      "Erdos902/LowerBound.lean",
+      "Erdos902/LowerBound/"
+    ],
     "accept": "python check.py lower_bound",
     "size": "L",
     "body": "Prove Statements.LowerBound in Erdos902/LowerBound.lean. Erdős's argument (1963): take a tournament with property S_n and any vertex x; the vertices that beat x form a tournament with property S_{n-1} (a set E of n-1 of them, together with x, is dominated by some y, and y must beat x, so y is one of them too), so f(n) ≥ 2 f(n-1) + 1, and f(0) ≥ 1. The hard part in Lean is the bookkeeping: restricting a tournament on Fin m to a subset, and the induction on n through sInf. Good to split: (1) the restriction lemma, (2) the recurrence, (3) the base case and induction."
@@ -10,16 +13,23 @@
   {
     "key": "f-two",
     "title": "f(2) = 7",
-    "zone": ["Erdos902/FTwo.lean"],
+    "zone": [
+      "Erdos902/FTwo.lean"
+    ],
     "accept": "python check.py f_two",
-    "deps": ["lower-bound"],
+    "deps": [
+      "lower-bound"
+    ],
     "size": "S",
     "body": "f_two_le (in Basic) gives f(2) ≤ 7; the lower bound at n = 2 gives 7 ≤ f(2). A few lines once lower-bound is accepted."
   },
   {
     "key": "f-three-upper",
     "title": "f(3) ≤ 19: a tournament on 19 vertices with property S_3",
-    "zone": ["Erdos902/FThreeUpper.lean", "Erdos902/FThreeUpper/"],
+    "zone": [
+      "Erdos902/FThreeUpper.lean",
+      "Erdos902/FThreeUpper/"
+    ],
     "accept": "python check.py f_three_upper",
     "size": "M",
     "body": "Szekeres and Szekeres' tournament: on Z_19, a → b when b - a is a nonzero square mod 19 (the quadratic residue, or Paley, tournament). Show it's a tournament (19 ≡ 3 mod 4, so exactly one of d and -d is a square) and that every 3 vertices are dominated. Plain `decide` over all triples may be too slow for the kernel: use the symmetry (translations and multiplication by squares) to cut the cases down."
@@ -27,16 +37,24 @@
   {
     "key": "f-three",
     "title": "f(3) = 19",
-    "zone": ["Erdos902/FThree.lean", "Erdos902/FThree/"],
+    "zone": [
+      "Erdos902/FThree.lean",
+      "Erdos902/FThree/"
+    ],
     "accept": "python check.py f_three",
-    "deps": ["f-three-upper"],
+    "deps": [
+      "f-three-upper"
+    ],
     "size": "L",
     "body": "The hard half: no tournament on 18 or fewer vertices has property S_3. The lower bound only gives 15. Szekeres and Szekeres (1965) argue by hand; a computer search over tournaments up to isomorphism is another route, if its result can be checked in Lean."
   },
   {
     "key": "upper-bound",
     "title": "Erdős's upper bound: f(n) ≤ (log 2 + ε) n² 2ⁿ",
-    "zone": ["Erdos902/UpperBound.lean", "Erdos902/UpperBound/"],
+    "zone": [
+      "Erdos902/UpperBound.lean",
+      "Erdos902/UpperBound/"
+    ],
     "accept": "python check.py upper_bound",
     "size": "L",
     "body": "The probabilistic method: a random tournament on m vertices fails property S_n with probability at most C(m,n)(1 - 2^-n)^(m-n), which is below 1 for m ≈ (log 2 + ε) n² 2ⁿ. In Lean: count the tournaments that fail it instead of using probability."
@@ -44,9 +62,81 @@
   {
     "key": "szekeres-lower",
     "title": "Szekeres's lower bound: n 2ⁿ ≪ f(n)",
-    "zone": ["Erdos902/SzekeresLower.lean", "Erdos902/SzekeresLower/"],
+    "zone": [
+      "Erdos902/SzekeresLower.lean",
+      "Erdos902/SzekeresLower/"
+    ],
     "accept": "python check.py szekeres_lower",
     "size": "L",
     "body": "Szekeres and Szekeres (1965) improve Erdős's 2^(n+1) - 1 to c n 2ⁿ. Read their paper (Math. Gaz. 49, 290-293) and formalise it."
+  },
+  {
+    "key": "s-four",
+    "title": "A tournament with property S_4 on fewer than 67 vertices",
+    "zone": [
+      "solutions/S4.txt",
+      "work/s-four/"
+    ],
+    "accept": "python check.py --tournament 4 solutions/S4.txt",
+    "mode": "competitive",
+    "metric": "python check.py --tournament 4 solutions/S4.txt",
+    "goal": "min",
+    "size": "L",
+    "body": "Open, and checkable by computer. The smallest known tournament with property S_4 (every 4 vertices beaten by one other vertex) is the Paley tournament on 67 vertices, in solutions/S4.txt now (OEIS A362137); nobody knows one with fewer, and Szekeres and Szekeres' bound gives f(4) ≥ 47. Any valid tournament on 66 vertices or fewer is a new result. Write the tournament to solutions/S4.txt (format in check.py: the number of vertices, then one 0/1 row per vertex, 1 where it beats that column) and your search in work/s-four/. Routes: circulant tournaments on Z_m (vertex-transitive, so only sets containing 0 need checking), Cayley tournaments on other groups, removing or rewiring vertices of P67 and repairing with local search, or a SAT solver on a fixed m with symmetry. Post what you've ruled out with `legion note`, so nobody searches the same space twice."
+  },
+  {
+    "key": "f-four-upper",
+    "title": "f(4) ≤ 67 in Lean: the Paley tournament on 67 vertices has property S_4",
+    "zone": [
+      "Erdos902/FFourUpper.lean",
+      "Erdos902/FFourUpper/"
+    ],
+    "accept": "python check.py f_four_upper",
+    "size": "L",
+    "body": "Known by computer (Fisher; Bozóki 2014), never formalised. On Z_67, a → b when b - a is a nonzero square mod 67. As in f-three-upper, the tournament part is easy (67 ≡ 3 mod 4); `decide` over all 766,480 sets of 4 is too much for the kernel. Use the symmetry: translations and multiplication by squares act transitively, so it's enough to check sets containing 0 and 1, about C(65,2) cases, each with an explicit dominator."
+  },
+  {
+    "key": "lower-constant",
+    "title": "Beat Szekeres' constant: f(n) ≥ c n 2ⁿ for some c > 1/2",
+    "zone": [
+      "Erdos902/LowerConstant.lean",
+      "Erdos902/LowerConstant/"
+    ],
+    "accept": "python check.py lower_constant",
+    "size": "L",
+    "body": "Open since 1965. Szekeres and Szekeres show f(n) ≥ (n+2) 2^(n-1) - 1, about (1/2) n 2ⁿ; the accepted proof of szekeres-lower (Erdos902/SzekeresLower/) does the same counting. Any constant above 1/2, eventually, is new. Start from where that argument is lossy: the in-neighbourhood of a vertex has property S_(n-1), and the count of S(k,d) sets ignores how in-neighbourhoods of different vertices overlap. A paper argument first, posted as a note or a path, then its Lean proof."
+  },
+  {
+    "key": "upper-constant",
+    "title": "Beat Erdős's constant: f(n) ≤ C n² 2ⁿ for some C < log 2",
+    "zone": [
+      "Erdos902/UpperConstant.lean",
+      "Erdos902/UpperConstant/"
+    ],
+    "accept": "python check.py upper_constant",
+    "size": "L",
+    "body": "Open since 1963. Erdős's random tournament gives (log 2 + o(1)) n² 2ⁿ (accepted as upper-bound, in Erdos902/UpperBound/). Lowering the constant needs a better construction than a uniformly random tournament: alterations (delete or rewire the few vertices that fail), the Lovász local lemma, or structured random tournaments (random Cayley tournaments, random blow-ups of small S_k tournaments). A paper argument first, then the Lean proof."
+  },
+  {
+    "key": "order-upper",
+    "title": "f(n) = O(n 2ⁿ): the lower bound is the truth",
+    "zone": [
+      "Erdos902/OrderUpper.lean",
+      "Erdos902/OrderUpper/"
+    ],
+    "accept": "python check.py order_upper",
+    "size": "L",
+    "body": "This is Erdős #902 itself, one way: together with szekeres-lower it would settle the order of f(n) as n 2ⁿ. Nobody knows whether it's true. It needs constructions far better than random ones, which give n² 2ⁿ; explicit ones (Paley, Graham and Spencer) are worse still, about n² 4ⁿ. If you find evidence it's false (search data on small n, a heuristic), post it as a note on this task and on order-lower."
+  },
+  {
+    "key": "order-lower",
+    "title": "f(n) / (n 2ⁿ) → ∞: the lower bound is not the truth",
+    "zone": [
+      "Erdos902/OrderLower.lean",
+      "Erdos902/OrderLower/"
+    ],
+    "accept": "python check.py order_lower",
+    "size": "L",
+    "body": "This is Erdős #902 itself, the other way: it would show that n 2ⁿ isn't the order of f(n). Nobody knows whether it's true. It needs a counting argument that captures more than one vertex's in-neighbourhood at a time (see lower-constant, a first step). If you find evidence it's false, post it as a note on this task and on order-upper."
   }
 ]

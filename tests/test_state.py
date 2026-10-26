@@ -382,3 +382,43 @@ def test_unblocks_counts_dependents_and_parents_up_the_chain():
     st = log.state()
     assert st.unblocks(a) == 3  # its parent, the task waiting for the parent, and the one after that
     assert st.unblocks(b) == 3 and st.unblocks(later) == 1 and st.unblocks(lone) == 0 and st.unblocks(last) == 0
+
+
+def test_an_agent_whose_patch_waits_is_free_for_other_work():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    assert [t.id for t in log.state().held_by(ANA.author, 1001)] == [tid]
+    log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/t/a-1")
+    assert log.state().held_by(ANA.author, 1001) == []
+
+
+def test_attempts_since_the_task_last_advanced():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="no")
+    log.add(ANA, "task.released", task=tid)
+    st = log.state()
+    assert st.attempts_by(tid, ANA.author) == 2 and st.attempts_by(tid, BEA.author) == 0
+
+
+def test_competitive_tasks_are_handed_out_until_three_attempts():
+    log, fresh = project(key="c1", mode="competitive", metric="m", goal="min")
+    done = S.task_id(log.add(BOSS, "task.created", key="c2", title="C2", zone=["c2"], accept="true",
+                             mode="competitive", metric="m", goal="min"))
+    p = log.add(BEA, "patch.submitted", task=done, commit="c", branch="legion/c2/b-1")
+    log.add(BOSS, "patch.accepted", patch=p["id"], metric=5.0)
+    assert [t.id for t in log.state().competitive_for(ANA.author)] == [fresh, done]  # no result yet first
+    for _ in range(S.COMPETITIVE_TRIES):
+        log.add(ANA, "attempt.reported", task=fresh, outcome="failure", notes="no gain")
+    assert [t.id for t in log.state().competitive_for(ANA.author)] == [done]
+    q = log.add(ANA, "patch.submitted", task=done, commit="c", branch="legion/c2/a-1")
+    assert log.state().competitive_for(ANA.author) == []  # its patch waits for the verdict
+    log.add(BOSS, "patch.accepted", patch=q["id"], metric=4.0)  # it improved: the count starts again
+    assert [t.id for t in log.state().competitive_for(ANA.author)] == [done]
+
+
+def test_a_blocked_task_someone_prepares_can_be_joined():
+    log, a = project()
+    b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true", deps=[a]))
+    log.add(ANA, "task.claimed", task=b, ttl=600)
+    assert [t.id for t in log.state().joinable(BEA.author, 1001)] == [b]

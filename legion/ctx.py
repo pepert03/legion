@@ -1,5 +1,6 @@
 """Shared context for the commands: repository, identity and state."""
 
+import os
 import subprocess
 import sys
 import time
@@ -31,10 +32,26 @@ def need_identity(repo=None) -> Identity:
     return ident
 
 
+AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
+
+
+def remember_agent(repo) -> None:
+    """Which agent and model work in this repository: kept in its git config, so the agent only has to say it
+    once (at join), not in every shell. A variable set in the shell wins, and is remembered for next time."""
+    for var, key in AGENT_VARS:
+        saved = subprocess.run(["git", "config", "--get", key], cwd=repo, capture_output=True, text=True).stdout.strip()
+        value = os.environ.get(var) or (E.detect_agent() if var == "LEGION_AGENT" else None)
+        if value and value != saved:
+            subprocess.run(["git", "config", key, value], cwd=repo, capture_output=True)
+        elif saved and not os.environ.get(var):
+            os.environ[var] = saved
+
+
 class Ctx:
     def __init__(self, sync: bool = True):
         self.repo = repo_root()
         self.ident = need_identity(self.repo)
+        remember_agent(self.repo)
         self.unreachable: list[str] = []
         if sync:
             self.sync()
@@ -48,8 +65,18 @@ class Ctx:
     def reload(self) -> None:
         self.st = coordgit.state(self.repo)
 
+    strict = False  # the integrator sets it: a pass with a failed sync is retried, not run on stale state
+
     def sync(self) -> None:
-        self.unreachable = coordgit.sync(self.repo, self.ident)
+        try:
+            self.unreachable = coordgit.sync(self.repo, self.ident)
+        except coordgit.GitError as e:
+            if self.strict:
+                raise
+            # A slow network, or another process on the same Radicle node: carry on with the local state, and
+            # what this command records goes out with the next sync. An agent mustn't stop over it.
+            print(f"legion: warning: couldn't sync ({str(e).strip()[-200:]}); working with the local state, "
+                  "and your events go out on the next command", file=sys.stderr)
         self.reload()
         if coordgit.is_p2p(self.repo):
             coordgit.update_main(self.repo, self.st.main_tip)

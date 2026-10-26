@@ -210,6 +210,10 @@ class FakeAgent:
             p = legion("claim", "--json")
             if p.returncode == 0:
                 task = json.loads(p.stdout)["task"]
+                if task["mode"] == "competitive":  # handed out once the exclusive tasks are done
+                    tried.add(task["id"])
+                    self.compete(task)
+                    continue
                 try:
                     self.work(task)
                 except Exception as e:  # an agent that fails must let go of the task, not hold it

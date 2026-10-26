@@ -32,4 +32,30 @@ def UpperBound : Prop :=
 def SzekeresLower : Prop :=
   ∃ c > (0 : ℝ), ∀ᶠ n : ℕ in atTop, c * n * 2 ^ n ≤ (f n : ℝ)
 
+/-! ## The open part
+
+Nobody knows how to prove these: the best bounds are still those of 1963 and 1965, a factor of $n$ apart
+($n 2^n \ll f(n) \ll n^2 2^n$). They are this project's own statements, not formal-conjectures'. Any of them
+is a new result. -/
+
+/-- The smallest known tournament with property $S_4$ is the Paley tournament on 67 vertices (found by
+computer; no smaller one is known, and $47 \le f(4)$ by Szekeres and Szekeres). -/
+def FFourUpper : Prop := f 4 ≤ 67
+
+/-- A better constant than Szekeres and Szekeres' $\frac12$ in $f(n) \ge c\, n 2^n$. -/
+def LowerConstant : Prop :=
+  ∃ c > (1 / 2 : ℝ), ∀ᶠ n : ℕ in atTop, c * n * 2 ^ n ≤ (f n : ℝ)
+
+/-- A better constant than Erdős's $\log 2$ in $f(n) \le C n^2 2^n$. -/
+def UpperConstant : Prop :=
+  ∃ C < Real.log 2, ∀ᶠ n : ℕ in atTop, (f n : ℝ) ≤ C * n ^ 2 * 2 ^ n
+
+/-- The order of $f$, if the lower bound is the truth: $f(n) = O(n 2^n)$. -/
+def OrderUpper : Prop :=
+  ∃ C : ℝ, ∀ᶠ n : ℕ in atTop, (f n : ℝ) ≤ C * n * 2 ^ n
+
+/-- The order of $f$, if it isn't: $f(n) / (n 2^n) \to \infty$. -/
+def OrderLower : Prop :=
+  ∀ C : ℝ, ∀ᶠ n : ℕ in atTop, C * n * 2 ^ n ≤ (f n : ℝ)
+
 end Erdos902.Statements

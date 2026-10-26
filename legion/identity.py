@@ -86,6 +86,10 @@ def bind(repo, ident: Identity) -> None:
     """Make `ident` the identity that works in this repository (it's saved in its own file first)."""
     ident.save()
     subprocess.run(["git", "config", "legion.identity", ident.key_id], cwd=repo, check=True, capture_output=True)
+    # Commits here are signed as this identity, not as the person's global git account: the project is public,
+    # and their email would go out with every patch.
+    for key, value in (("user.name", ident.name), ("user.email", f"{ident.key_id}@legion.local")):
+        subprocess.run(["git", "config", key, value], cwd=repo, check=True, capture_output=True)
 
 
 def all_identities() -> list[Identity]:

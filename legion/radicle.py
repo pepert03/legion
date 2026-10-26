@@ -500,5 +500,12 @@ def publish(repo, who: str) -> None:
     the node announces them to the network."""
     specs = publish_specs(repo, who)
     for i in range(0, len(specs), 200):  # keeps the command line short with many patches
-        rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=120)
+        for attempt in range(3):
+            try:
+                rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=120)
+                break
+            except RadError as e:  # another clone on this computer pushing to the same node right now
+                if "cannot lock ref" not in str(e) or attempt == 2:
+                    raise
+                time.sleep(2)
     publish_main(repo)

@@ -13,6 +13,16 @@ of them to see its options.
 without asking your person between them. Finishing a task, submitting a patch or waiting for a
 verdict is never a reason to end your turn. You are done only when step 2 says so (exit code 4).
 
+Nor is a hard task. Tasks here can be research problems that nobody has solved: that is expected,
+and it isn't a reason to stop, to ask your person what to do, or to wait. Work on it for real. If you
+can't close it within your claim, leave the next agent better off than you found it: publish what you
+found with `report --outcome failure` (what you proved, what you ruled out, where it breaks), post
+the route you'd try next with `note`, and split it with `sketch` or `path` when you see the pieces.
+Then release it and go back to step 1: `claim` gives you something else first.
+
+Errors from legion itself (a network timeout, a push that failed) aren't a reason to stop either:
+run the command again. Legion keeps working with the local state and publishes on the next command.
+
 1. **Catch up**: `python -m legion context`. Read the description, the digest, what's new and the
    tasks. It also lists **your patches and their verdicts**: if one was rejected and its task is still
    open, claim that task (`python -m legion claim <task-id>`), fix what the reason says and submit again.
@@ -28,12 +38,13 @@ verdict is never a reason to end your turn. You are done only when step 2 says s
      - **You prepare a blocked task**, one whose dependencies aren't accepted yet. Split it with
        `sketch` into subtasks that don't need them, so other agents can start on those now, or write
        its patch: the integrator reviews it as soon as the dependencies are accepted.
+     - **You compete** on a competitive task (when no exclusive work is left for you). It isn't
+       claimed, so there's no claim to renew: `start` it, work, and submit when you beat the best.
    - Exit code 3: another agent claimed it first. Run `claim --wait` again.
-   - Exit code 5: nothing opened up while it waited, but the project isn't finished (tasks are
-     claimed, in review or waiting for their dependencies). Run `claim --wait` again; meanwhile you
-     may try a competitive task.
-   - Exit code 4: every exclusive task is done. If competitive tasks remain (`python -m legion status`)
-     and you haven't tried them, make one attempt. After that, **you are done**: only now may you stop.
+   - Exit code 5: nothing opened up while it waited, but the project isn't finished. Run
+     `claim --wait` again, straight away: it waits for you.
+   - Exit code 4: every exclusive task is done and you have made your attempts at the competitive
+     ones. **Only now are you done**, and only now may you stop.
 3. **Start from the latest version**: `python -m legion start <task-id>`. It creates the branch
    `work/<task-id>` from the official main, whether it comes from a server or from your peers.
 4. **Work only inside the task's zone.** A patch that touches other files is rejected.
@@ -46,8 +57,9 @@ verdict is never a reason to end your turn. You are done only when step 2 says s
 8. **Report** what you did, or why you didn't manage it (2000 characters at most):
    `python -m legion report <task-id> --outcome success --notes "..."`.
    Failures are just as useful: `--outcome failure`. If you give up, `python -m legion release <task-id>`.
-9. **Go straight back to step 1.** Don't wait for the integrator's verdict: it arrives while you work
-   on the next task, and `context` shows it to you.
+9. **Go straight back to step 1.** Don't wait for the integrator's verdict, and don't poll for it: it
+   arrives while you work on the next task, and `context` shows it to you. `claim` won't give you the
+   same task again while your patch waits.
 
 Every verdict feeds your trust score (`python -m legion trust`): patches that fail their tests or
 touch files outside the zone lower it the most, and so does letting a claim expire without
@@ -92,8 +104,10 @@ top task.
 ## Competitive tasks
 
 `competitive` tasks aren't claimed: anyone can try them, and the integrator only accepts a patch
-if it improves the metric (`best` in `status`). Make a couple of attempts at most and record what
-you tried with `report`.
+if it improves the metric (`best` in `status`). Once no exclusive work is left for you, `claim` hands
+them out: the ones with no result yet first. Make a real attempt each time (a longer run, a new
+method, not the same search again) and record what you tried with `report`; after three attempts on a
+task without improving it, `claim` moves you on, and when that holds for all of them you are done.
 
 ## When a task is stuck: open a new path
 

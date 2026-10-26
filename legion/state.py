@@ -30,6 +30,9 @@ MAX_SHARED = 3
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
 # working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
 MAX_TASK_NOTES = 30
+# Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
+# made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
+COMPETITIVE_TRIES = 3
 SIZES = {"L": 0, "M": 1, "S": 2}
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
 SHELL_META = set(";&|`$<>\n\r")
@@ -206,6 +209,25 @@ class State:
         return [k for k in self.paths_for(tid) if k.verdict is None or k.verdict == "accepted" and not
                 all(self.done(c) or self.tasks[c].cancelled for c in k.child_ids)]
 
+    def last_progress(self, tid: str) -> int:
+        task = self.tasks[tid]
+        return max([task.lamport] + [p.lamport for p in self.patches_for(tid, "accepted")]
+                   + [k.lamport for k in self.sketches.values() if k.task == tid and k.verdict == "accepted"])
+
+    def attempts_by(self, tid: str, author: str) -> int:
+        """How many times this agent tried the task since it last advanced: reports, patches, released claims."""
+        since = self.last_progress(tid)
+        return (sum(1 for a in self.attempts if a.get("task") == tid and a["author"] == author and a["lamport"] > since)
+                + sum(1 for p in self.patches_for(tid) if p.author == author and p.lamport > since)
+                + sum(1 for c in self.claims[tid] if c.author == author and c.released and c.lamport > since))
+
+    def competitive_for(self, author: str) -> list[Task]:
+        """Competitive tasks this agent hasn't exhausted, the ones with no result yet first."""
+        ts = [t for t in self.tasks.values() if t.mode == "competitive" and not t.cancelled
+              and self.deps_ok(t) and self.attempts_by(t.id, author) < COMPETITIVE_TRIES
+              and not any(p.author == author and p.verdict is None for p in self.patches_for(t.id))]
+        return sorted(ts, key=lambda t: (self.best(t.id) is not None, self.attempts_by(t.id, author), t.lamport))
+
     def failures_since_progress(self, tid: str) -> int:
         """How stuck a task is: failures since it last advanced (created, improved or accepted, a sketch or a
         path accepted). Only from events, so every node counts the same."""
@@ -291,12 +313,14 @@ class State:
         return [t for t in self.tasks.values()
                 if t.mode == "exclusive" and (s := self.status(t.id, now)) in ("claimed", "review", "blocked")
                 and self.works_on(t.id, author, now)
-                and not (s == "blocked" and any(p.author == author for p in self.patches_for(t.id, None)))]
+                and not any(p.author == author for p in self.patches_for(t.id, None))]
 
     def joinable(self, author: str, now: float) -> list[Task]:
         """Tasks held by others with room for one more, the hardest first: stuck, then the most failures, then
         the biggest, then the one held longest."""
-        ts = [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "claimed"
+        # A blocked task someone is preparing can be joined too: they may be splitting it, or writing it ahead.
+        ts = [t for t in self.tasks.values() if t.mode == "exclusive"
+              and self.status(t.id, now) in ("claimed", "blocked") and self.holder(t.id, now)
               and len(cl := self.claimants(t.id, now)) < MAX_SHARED and all(c.author != author for c in cl)]
         return sorted(ts, key=lambda t: (not self.stalled(t.id), -self.failures_since_progress(t.id),
                                          SIZES.get(t.size, 1), self.holder(t.id, now).ts, t.id))

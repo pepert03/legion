@@ -22,11 +22,27 @@ These results are known on paper, but most have **no formal proof**. Google Deep
 | upper-bound | f(n) ≤ (log 2 + ε) n² 2ⁿ | Erdős 1963, probabilistic |
 | szekeres-lower | n 2ⁿ ≪ f(n) | Szekeres and Szekeres 1965 |
 
+### The open part
+
+The six results above are formalisations of known mathematics. These are not known: each one is a new
+result, and `order-upper` or `order-lower` settles Erdős #902 itself.
+
+| Task | Goal | What's known |
+|---|---|---|
+| s-four | an S₄ tournament on fewer than 67 vertices (search, checked by `check.py --tournament`) | 47 ≤ f(4) ≤ 67; the Paley tournament P₆₇ is the smallest known |
+| f-four-upper | f(4) ≤ 67, in Lean | found by computer, never formalised |
+| lower-constant | f(n) ≥ c n 2ⁿ with c > ½ | ½, Szekeres and Szekeres 1965 |
+| upper-constant | f(n) ≤ C n² 2ⁿ with C < log 2 | log 2, Erdős 1963 |
+| order-upper | f(n) = O(n 2ⁿ) | open |
+| order-lower | f(n) / (n 2ⁿ) → ∞ | open |
+
 ```
 Erdos902/Basic.lean        the definitions, copied from formal-conjectures (fixed)
 Erdos902/Statements.lean   what each task must prove (fixed)
 Erdos902/<Task>.lean       one file per task: replace the sorry
 check.py                   python check.py lower_bound   -> PROVED, or why not
+                           python check.py --tournament 4 solutions/S4.txt   (the search task)
+solutions/S4.txt           the best S₄ tournament so far (P₆₇ to start with)
 ```
 
 A proof counts when `check.py` says so: it compiles, has exactly the type in `Statements.lean`, and uses
@@ -38,10 +54,18 @@ Lean 4 (v4.33.1, set in `lean-toolchain`) and Mathlib. Once per machine:
 
 ```sh
 # Windows (PowerShell): install elan, Lean's version manager
-curl.exe -O --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.ps1
-powershell -ExecutionPolicy Bypass -f elan-init.ps1 -NoPrompt 1 -DefaultToolchain none
+curl.exe -o "$env:TEMP\elan-init.ps1" --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.ps1
+Set-ExecutionPolicy -Scope Process Bypass -Force
+& "$env:TEMP\elan-init.ps1" -NoPrompt $true -DefaultToolchain none
 # Mac or Linux
 curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
 ```
 
-Then, in this folder: `lake exe cache get` (downloads Mathlib already built, a few GB) and `lake build`.
+On Alpine or another musl Linux, elan's Lean doesn't run: use a glibc container (Debian, say) for the
+Lean commands.
+
+Then, in this folder, **once per clone**: `python check.py --setup`. It gives the clone Mathlib already
+built, shared by every clone of this project on the computer: the first one downloads it (a few GB,
+with `lake exe cache get`), the others link to it in a second. Don't run `lake exe cache get` yourself:
+a second copy is gigabytes for nothing, and one left halfway makes Lean build Mathlib from source,
+which takes hours.
