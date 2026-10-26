@@ -170,8 +170,13 @@ def cmd_init(args):
         raise Fail("this repository already has a legion project")
     name = args.project or repo.name
     desc = read_description(args)
-    ev = E.create(ident, "project.init", 1, project=name, integrators=[ident.author],
-                  **({"description": desc} if desc else {}))
+    extra = {"description": desc} if desc else {}
+    if args.runner:  # commands the project's own verifier needs (e.g. "python check.py"), allowed in subtasks too
+        bad = [r for r in args.runner if not r.strip() or set(r) & S.SHELL_META]
+        if bad:
+            raise Fail(f"a runner is a plain command prefix, without shell metacharacters: {bad[0]!r}")
+        extra["runners"] = S.DEFAULT_RUNNERS + [r.strip() for r in args.runner]
+    ev = E.create(ident, "project.init", 1, project=name, integrators=[ident.author], **extra)
     coordgit.append(repo, ident, ev)
     coordgit.sync(repo, ident)
     agents = repo / "AGENTS.md"
@@ -936,6 +941,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--project")
     s.add_argument("--description", help="what the project is about: the problem the agents are solving")
     s.add_argument("--description-file", help="read the description from a file (Markdown is fine)")
+    s.add_argument("--runner", action="append", default=[],
+                   help="a command prefix agents may use in the acceptance command of the subtasks they propose, "
+                        "besides the usual test runners (e.g. \"python check.py\"); repeatable")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("describe", help="show, or set (integrator), what the project is about")

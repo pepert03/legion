@@ -1,0 +1,52 @@
+[
+  {
+    "key": "lower-bound",
+    "title": "Erdős's lower bound: 2^(n+1) - 1 ≤ f(n)",
+    "zone": ["Erdos902/LowerBound.lean", "Erdos902/LowerBound/"],
+    "accept": "python check.py lower_bound",
+    "size": "L",
+    "body": "Prove Statements.LowerBound in Erdos902/LowerBound.lean. Erdős's argument (1963): take a tournament with property S_n and any vertex x; the vertices that beat x form a tournament with property S_{n-1} (a set E of n-1 of them, together with x, is dominated by some y, and y must beat x, so y is one of them too), so f(n) ≥ 2 f(n-1) + 1, and f(0) ≥ 1. The hard part in Lean is the bookkeeping: restricting a tournament on Fin m to a subset, and the induction on n through sInf. Good to split: (1) the restriction lemma, (2) the recurrence, (3) the base case and induction."
+  },
+  {
+    "key": "f-two",
+    "title": "f(2) = 7",
+    "zone": ["Erdos902/FTwo.lean"],
+    "accept": "python check.py f_two",
+    "deps": ["lower-bound"],
+    "size": "S",
+    "body": "f_two_le (in Basic) gives f(2) ≤ 7; the lower bound at n = 2 gives 7 ≤ f(2). A few lines once lower-bound is accepted."
+  },
+  {
+    "key": "f-three-upper",
+    "title": "f(3) ≤ 19: a tournament on 19 vertices with property S_3",
+    "zone": ["Erdos902/FThreeUpper.lean", "Erdos902/FThreeUpper/"],
+    "accept": "python check.py f_three_upper",
+    "size": "M",
+    "body": "Szekeres and Szekeres' tournament: on Z_19, a → b when b - a is a nonzero square mod 19 (the quadratic residue, or Paley, tournament). Show it's a tournament (19 ≡ 3 mod 4, so exactly one of d and -d is a square) and that every 3 vertices are dominated. Plain `decide` over all triples may be too slow for the kernel: use the symmetry (translations and multiplication by squares) to cut the cases down."
+  },
+  {
+    "key": "f-three",
+    "title": "f(3) = 19",
+    "zone": ["Erdos902/FThree.lean", "Erdos902/FThree/"],
+    "accept": "python check.py f_three",
+    "deps": ["f-three-upper"],
+    "size": "L",
+    "body": "The hard half: no tournament on 18 or fewer vertices has property S_3. The lower bound only gives 15. Szekeres and Szekeres (1965) argue by hand; a computer search over tournaments up to isomorphism is another route, if its result can be checked in Lean."
+  },
+  {
+    "key": "upper-bound",
+    "title": "Erdős's upper bound: f(n) ≤ (log 2 + ε) n² 2ⁿ",
+    "zone": ["Erdos902/UpperBound.lean", "Erdos902/UpperBound/"],
+    "accept": "python check.py upper_bound",
+    "size": "L",
+    "body": "The probabilistic method: a random tournament on m vertices fails property S_n with probability at most C(m,n)(1 - 2^-n)^(m-n), which is below 1 for m ≈ (log 2 + ε) n² 2ⁿ. In Lean: count the tournaments that fail it instead of using probability."
+  },
+  {
+    "key": "szekeres-lower",
+    "title": "Szekeres's lower bound: n 2ⁿ ≪ f(n)",
+    "zone": ["Erdos902/SzekeresLower.lean", "Erdos902/SzekeresLower/"],
+    "accept": "python check.py szekeres_lower",
+    "size": "L",
+    "body": "Szekeres and Szekeres (1965) improve Erdős's 2^(n+1) - 1 to c n 2ⁿ. Read their paper (Math. Gaz. 49, 290-293) and formalise it."
+  }
+]

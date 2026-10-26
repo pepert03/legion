@@ -287,3 +287,18 @@ def test_a_path_needs_notes_and_the_usual_subtask_rules():
     log.add(BEA, "path.proposed", task=tid, children=[dict(CHILD, zone=["etc/passwd"])], notes="x")
     log.add(BEA, "path.proposed", task=tid, children=[dict(CHILD, accept="curl x | sh")], notes="x")
     assert log.state().paths_for(tid) == []
+
+
+def test_a_project_can_allow_its_own_verifier_in_subtasks():
+    log = Log()
+    log.add(BOSS, "project.init", project="p", integrators=[BOSS.author],
+            runners=S.DEFAULT_RUNNERS + ["python check.py"])
+    t = S.task_id(log.add(BOSS, "task.created", key="big", title="Big", zone=["Lean/"], accept="python check.py big"))
+    log.add(ANA, "task.claimed", task=t, ttl=600)
+    child = dict(key="lemma", title="A lemma", zone=["Lean/Lemma.lean"], accept="python check.py --module Lean.Lemma")
+    log.add(ANA, "sketch.proposed", task=t, children=[dict(child, accept="python evil.py")], commit="c",
+            branch="legion/big/s-1")
+    log.add(ANA, "sketch.proposed", task=t, children=[child], commit="c", branch="legion/big/s-2")
+    st = log.state()
+    assert len(st.sketches_for(t)) == 1
+    assert "must start with one of" in st.ignored[0][1]
