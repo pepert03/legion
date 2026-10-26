@@ -101,6 +101,10 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "sketch.rejected": f"rejects sketch {str(ev.get('sketch', ''))[:8]}: {reason}",
         "sketch.failed": f"sketch {str(ev.get('sketch', ''))[:8]} fails: {reason}",
         "task.resolved": f"marks {key} done: its subtasks are finished and it passes its own test",
+        "path.proposed": f"proposes a new path towards {key}: "
+                         + ", ".join(str(ch.get("key")) for ch in ev.get("children") or [] if isinstance(ch, dict)),
+        "path.accepted": f"accepts path {str(ev.get('path', ''))[:8]} and creates its subtasks",
+        "path.rejected": f"rejects path {str(ev.get('path', ''))[:8]}: {reason}",
         "integrator.vote": f"votes to {ev.get('action')} {ev.get('member') or str(ev.get('key', ''))[:16]} as integrator",
         "integrator.lease": "takes the integration lease",
         "integrator.renew": "renews the integration lease",
@@ -704,6 +708,49 @@ def cmd_sketch(args):
         "are open to anyone (you included) and your claim on the parent task is no longer needed.")
 
 
+def cmd_path(args):
+    """Open a new route towards a stuck task: subtasks of any kind, with an optional commit (their tests,
+    statements to prove, scaffolding). Anyone may, holding the task or not, once it's stuck."""
+    c = Ctx()
+    t = c.task(args.task)
+    if not c.st.stalled(t.id):
+        raise Fail(f"{t.key} isn't stuck ({c.st.failures_since_progress(t.id)} failures since its last progress; "
+                   f"paths open at {S.STALL_AFTER}): keep working on it as it is", 5)
+    spec = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    children = spec.get("children") if isinstance(spec, dict) else spec
+    notes = spec.get("notes", "") if isinstance(spec, dict) else ""
+    if not notes.strip():
+        raise Fail("say in \"notes\" why this route, and what has failed so far", 5)
+    err = c.st.check_children(t, children, path=True)
+    if err:
+        raise Fail(f"invalid path: {err}", 5)
+    repo = c.repo
+    coordgit.refresh_base(repo)
+    main = coordgit.base_ref(repo)
+    base = git(repo, "merge-base", "HEAD", main)
+    files = [f for f in git(repo, "diff", "--name-only", base, "HEAD").splitlines() if f]
+    tests_dir = S.sketch_dir(t.id)
+    commit = branch = None
+    if files:  # the path brings files: the subtasks' tests, statements, scaffolding
+        if git(repo, "status", "--porcelain", "--untracked-files=no"):
+            raise Fail("you have uncommitted changes: commit what the path brings before proposing it", 5)
+        outside = [f for f in files if not S.in_zone(f, t.zone + [tests_dir])]
+        if outside:
+            raise Fail(f"a path may only touch the zone ({', '.join(t.zone)}) and {tests_dir}/: "
+                       f"{', '.join(outside)}", 5)
+        n = len(c.st.paths_for(t.id)) + 1
+        branch = coordgit.patch_branch(repo, t.id, c.ident.short, f"p{n}")
+        coordgit.publish_patch(repo, branch)
+        commit = git(repo, "rev-parse", "HEAD")
+    ev = c.emit("path.proposed", task=t.id, children=children, notes=notes, commit=commit, branch=branch)
+    c.sync()
+    keys = ", ".join(f"{t.key}/{ch['key']}" for ch in children)
+    out(args, {"path": ev["id"], "branch": branch},
+        f"Path {ev['id'][:8]} proposed for {t.key}: {keys}. Once the integrator accepts it, the subtasks are open\n"
+        f"to anyone. {t.key} itself stays as it is, and still needs its own acceptance command to pass.\n"
+        f"Next: {KEEP_GOING}")
+
+
 # --- reading -------------------------------------------------------------------------------
 
 
@@ -746,6 +793,17 @@ def cmd_context(args):
         lines.append(f"- {p.id[:8]} {key}: {p.verdict or 'waiting for the integrator'}{reason}{fix}")
     if not mine:
         lines.append("(none yet)")
+    stuck = [t for t in st.tasks.values() if st.stalled(t.id)]
+    if stuck:
+        lines += ["", "## Stuck tasks: new paths welcome",
+                  "These keep failing. If you see a different route (a lemma, a tool, a smaller case, another method),",
+                  "propose it as a path: `python -m legion path <task-id> path.json` (see AGENTS.md)."]
+        for t in stuck:
+            fails = [a for a in st.attempts if a.get("task") == t.id and a.get("outcome") == "failure"][-3:]
+            paths = st.open_paths(t.id)
+            lines.append(f"- {t.id} ({t.key}): {st.failures_since_progress(t.id)} failures since its last progress"
+                         + (f", {len(paths)} path(s) under way" if paths else ""))
+            lines += [f"    tried: {a.get('notes', '').replace(chr(10), ' ')[:160]}" for a in fails]
     lines += ["", f"Next: {KEEP_GOING[0].upper()}{KEEP_GOING[1:]}"]
     print("\n".join(lines))
 
@@ -1006,6 +1064,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("file", help="JSON with the subtasks (see AGENTS.md)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_sketch)
+
+    s = sub.add_parser("path", help="open a new route towards a stuck task: subtasks of any kind (anyone may)")
+    s.add_argument("task")
+    s.add_argument("file", help="JSON with notes (why this route) and the subtasks (see AGENTS.md)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_path)
 
     s = sub.add_parser("log", help="event log")
     s.add_argument("--since", type=int, default=0)

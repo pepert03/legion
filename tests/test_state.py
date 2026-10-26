@@ -233,3 +233,57 @@ def test_only_an_integrator_describes_the_project_and_the_latest_wins():
     st = log.state()
     assert st.description == "second"
     assert len(st.ignored) == 2
+
+
+def stuck_project(**task):
+    log, tid = sketch_project() if not task else project(**task)
+    for i in range(S.STALL_AFTER):
+        log.add(BEA, "attempt.reported", task=tid, outcome="failure", notes=f"tried {i}")
+    return log, tid
+
+
+def test_a_path_only_opens_on_a_stuck_task():
+    log, tid = sketch_project()
+    path = dict(children=[CHILD], notes="the direct approach keeps failing; build a helper first")
+    log.add(BEA, "path.proposed", task=tid, **path)
+    assert log.state().paths_for(tid) == []  # not stuck yet
+    for i in range(S.STALL_AFTER):
+        log.add(BEA, "attempt.reported", task=tid, outcome="failure", notes=f"tried {i}")
+    st = log.state()
+    assert st.stalled(tid)
+    log.add(BEA, "path.proposed", task=tid, **path)
+    assert len(log.state().paths_for(tid)) == 1
+
+
+def test_a_path_adds_routes_without_taking_the_task_over():
+    log, tid = stuck_project()
+    k = log.add(BEA, "path.proposed", task=tid, children=[CHILD], notes="smaller case first")
+    log.add(BOSS, "path.accepted", path=k["id"])
+    child = S.task_id(log.add(BOSS, "task.created", key="big/a", title="A", zone=["src/parts/a.py"],
+                              accept="x", parent=tid, path=k["id"]))
+    st = log.state()
+    assert st.tasks[child].parent == tid
+    assert st.status(tid, 1001) == "claimed"  # ANA still holds it: a path doesn't block or replace the task
+    assert not st.stalled(tid)  # an accepted path counts as progress
+    p = log.add(BEA, "patch.submitted", task=child, commit="c", branch="legion/x/y-1")
+    log.add(BOSS, "patch.accepted", patch=p["id"], merge_commit="m")
+    log.add(BOSS, "task.resolved", task=tid, sketch=k["id"])  # a path never resolves its task
+    assert not log.state().done(tid)
+
+
+def test_paths_work_on_competitive_tasks_and_are_limited():
+    log, tid = stuck_project(key="record", zone=["src/"], accept="true", mode="competitive", metric="python m.py")
+    for i in range(S.MAX_OPEN_PATHS + 1):
+        log.add(BEA, "path.proposed", task=tid, notes="another idea",
+                children=[dict(CHILD, key=f"idea{i}", zone=[f"src/idea{i}.py"])])
+    st = log.state()
+    assert len(st.paths_for(tid)) == S.MAX_OPEN_PATHS
+    assert "paths under way" in st.ignored[-1][1]
+
+
+def test_a_path_needs_notes_and_the_usual_subtask_rules():
+    log, tid = stuck_project()
+    log.add(BEA, "path.proposed", task=tid, children=[CHILD], notes="")
+    log.add(BEA, "path.proposed", task=tid, children=[dict(CHILD, zone=["etc/passwd"])], notes="x")
+    log.add(BEA, "path.proposed", task=tid, children=[dict(CHILD, accept="curl x | sh")], notes="x")
+    assert log.state().paths_for(tid) == []

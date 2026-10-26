@@ -486,6 +486,7 @@ function agentAt(x, y) {
 // ---------------------------------------------------------------------------------------------
 const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "patch.accepted": "accepted",
   "patch.rejected": "cancelled", "sketch.proposed": "sketched", "sketch.accepted": "sketched", "sketch.rejected": "cancelled",
+  "path.proposed": "sketched", "path.accepted": "sketched", "path.rejected": "cancelled",
   "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
   "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink" };
 const taskKey = (id) => (data.tasks.find((t) => t.id === id) || {}).key || id;
@@ -651,7 +652,7 @@ const svg = (tag, attrs = {}) => { const e = document.createElementNS(NS, tag); 
 // are more than fit, it shows a window of them (the latest by default) and arrows to page through.
 const TL = { m: 72, gap: 9, start: 0, pinned: false, playing: false };
 // Long ticks for what changes the outcome (verdicts, splits, resolutions); short ticks for the rest.
-const MAJOR = new Set(["patch.accepted", "patch.rejected", "task.resolved", "sketch.accepted", "sketch.failed", "project.init"]);
+const MAJOR = new Set(["patch.accepted", "patch.rejected", "task.resolved", "sketch.accepted", "sketch.failed", "path.accepted", "project.init"]);
 function tlWidth() { return $("tl").clientWidth - TL.m * 2; }
 function tlCapacity() { return Math.max(4, Math.floor(tlWidth() / TL.gap)); }
 function tlWindow() {

@@ -123,13 +123,34 @@ def review_sketch(c: Ctx, k: S.Sketch) -> tuple[str, dict] | None:
     return "accepted", {"merge_commit": merged, "base": head}
 
 
+def review_path(c: Ctx, k: S.Sketch) -> tuple[str, dict] | None:
+    """A path (a new route towards a stuck task) is reviewed like a sketch, without running anything. It may
+    bring a commit (the subtasks' tests, statements to prove, scaffolding), merged only if it stays inside
+    the task's zone and its tests folder; it doesn't replace the task, which still needs its own verifier."""
+    st, task = c.st, c.st.tasks[k.task]
+    if task.cancelled or task.mode == "exclusive" and st.done(task.id):
+        return reject("the task was already done", "done")
+    err = st.check_children(task, k.children, path=True)
+    if err:
+        return reject(err, "invalid")
+    if not k.commit:
+        return "accepted", {}
+    prepared = prepare_merge(c, k.commit, k.branch, task.zone + [S.sketch_dir(task.id)],
+                             f"legion: new path for {task.key} ({k.name}, {k.id[:8]})")
+    if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
+        return prepared
+    merged, head = prepared
+    return "accepted", {"merge_commit": merged, "base": head}
+
+
 def create_children(c: Ctx, k: S.Sketch) -> None:
     parent = c.st.tasks[k.task]
     ids = {}
+    origin = {"path": k.id} if k.kind == "path" else {"sketch": k.id}
     for ch in k.children:
         ev = c.emit("task.created", key=f"{parent.key}/{ch['key']}", title=ch["title"], zone=ch["zone"],
                     accept=ch["accept"], mode="exclusive", deps=[ids[d] for d in ch.get("deps") or []],
-                    size=ch.get("size", "S"), body=ch.get("body", ""), parent=parent.id, sketch=k.id)
+                    size=ch.get("size", "S"), body=ch.get("body", ""), parent=parent.id, **origin)
         ids[ch["key"]] = S.task_id(ev)
 
 
@@ -288,22 +309,22 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
         if k.verdict:
             continue
         try:
-            result = review_sketch(c, k)
+            result = review_path(c, k) if k.kind == "path" else review_sketch(c, k)
         except coordgit.GitError as e:
-            log(f"git error reviewing sketch {k.id[:8]}; will retry: {e}")
+            log(f"git error reviewing {k.kind} {k.id[:8]}; will retry: {e}")
             continue
         if result is None:
             continue
         verdict, payload = result
-        if not emit_verdict(c, "sketch." + verdict, log, sketch=k.id, task=k.task, **payload):
+        if not emit_verdict(c, f"{k.kind}.{verdict}", log, task=k.task, **{k.kind: k.id}, **payload):
             continue
         if verdict == "accepted":
             create_children(c, c.st.sketches[k.id])
             c.sync()
-        if not keep_branches:
+        if not keep_branches and k.branch:
             coordgit.drop_patch(c.repo, k.branch)
         key = c.st.tasks[k.task].key
-        log(f"SKETCH {verdict.upper()} {key} by {k.name}"
+        log(f"{k.kind.upper()} {verdict.upper()} {key} by {k.name}"
             + (f": {len(k.children)} subtasks" if verdict == "accepted" else f": {payload['reason'].splitlines()[0]}"))
         done += 1
     for p in pending:

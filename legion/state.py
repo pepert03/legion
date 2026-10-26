@@ -19,6 +19,10 @@ PATCH_PREFIXES = ("legion/", "refs/legion/patches/")  # never main or anyone els
 # live in SKETCH_DIR/<parent-id>/, and the parent only counts as done if it passes its own test.
 SKETCH_DIR = "legion_sketches"
 MAX_CHILDREN, MAX_DEPTH = 8, 3
+# Paths: when a task stops advancing, anyone may open new routes towards it (subtasks of any kind). A task is
+# stuck after STALL_AFTER failures (failed reports, rejected patches, failed sketches) since its last progress,
+# and holds at most MAX_OPEN_PATHS paths that aren't finished, so being stuck doesn't turn into a flood.
+STALL_AFTER, MAX_OPEN_PATHS = 3, 3
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
 SHELL_META = set(";&|`$<>\n\r")
 CHILD_KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -61,6 +65,7 @@ class Sketch:
     merge_commit: str | None = None
     child_ids: list = field(default_factory=list)
     outcome: str | None = None  # once accepted: resolved (the parent passed its test) or failed
+    kind: str = "sketch"  # or "path": a new route towards a stuck task, which doesn't replace it
 
 
 @dataclass
@@ -162,8 +167,34 @@ class State:
             ps = [p for p in ps if p.verdict == verdict]
         return sorted(ps, key=lambda p: (p.lamport, p.id))
 
-    def sketches_for(self, tid: str) -> list[Sketch]:
-        return sorted((k for k in self.sketches.values() if k.task == tid), key=lambda k: (k.lamport, k.id))
+    def sketches_for(self, tid: str, kind: str = "sketch") -> list[Sketch]:
+        return sorted((k for k in self.sketches.values() if k.task == tid and k.kind == kind),
+                      key=lambda k: (k.lamport, k.id))
+
+    def paths_for(self, tid: str) -> list[Sketch]:
+        return self.sketches_for(tid, "path")
+
+    def open_paths(self, tid: str) -> list[Sketch]:
+        """Paths being reviewed, or accepted with subtasks still to do."""
+        return [k for k in self.paths_for(tid) if k.verdict is None or k.verdict == "accepted" and not
+                all(self.done(c) or self.tasks[c].cancelled for c in k.child_ids)]
+
+    def failures_since_progress(self, tid: str) -> int:
+        """How stuck a task is: failures since it last advanced (created, improved or accepted, a sketch or a
+        path accepted). Only from events, so every node counts the same."""
+        task = self.tasks[tid]
+        progress = max([task.lamport] + [p.lamport for p in self.patches_for(tid, "accepted")]
+                       + [k.lamport for k in self.sketches.values() if k.task == tid and k.verdict == "accepted"])
+        fails = [a for a in self.attempts if a.get("task") == tid and a.get("outcome") == "failure"]
+        return (sum(1 for a in fails if a["lamport"] > progress)
+                + sum(1 for p in self.patches_for(tid, "rejected") if p.lamport > progress)
+                + sum(1 for k in self.sketches_for(tid) if k.outcome == "failed" and k.lamport >= progress))
+
+    def stalled(self, tid: str) -> bool:
+        task = self.tasks[tid]
+        if task.cancelled or task.mode == "exclusive" and self.done(tid):
+            return False
+        return self.failures_since_progress(tid) >= STALL_AFTER
 
     def active_sketch(self, tid: str) -> Sketch | None:
         """The accepted sketch that isn't resolved yet: its subtasks are under way."""
@@ -174,7 +205,7 @@ class State:
 
     def ready_to_resolve(self) -> list[Sketch]:
         return [k for k in self.sketches.values()
-                if k.verdict == "accepted" and not k.outcome and k.child_ids
+                if k.kind == "sketch" and k.verdict == "accepted" and not k.outcome and k.child_ids
                 and all(self.done(c) for c in k.child_ids)]
 
     def best(self, tid: str) -> float | None:
@@ -218,14 +249,15 @@ class State:
         ex = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled]
         return bool(ex) and all(self.done(t.id) for t in ex)
 
-    def check_children(self, parent: Task, children) -> str | None:
+    def check_children(self, parent: Task, children, path: bool = False) -> str | None:
         """The rules that make it safe to let an agent split a task without auditing the subtasks."""
-        if parent.mode != "exclusive":
+        what = "path" if path else "sketch"
+        if parent.mode != "exclusive" and not path:
             return "only exclusive tasks can be split"
         if parent.depth + 1 > MAX_DEPTH:
             return f"can't split more than {MAX_DEPTH} levels deep"
         if not isinstance(children, list) or not 1 <= len(children) <= MAX_CHILDREN:
-            return f"a sketch has between 1 and {MAX_CHILDREN} subtasks"
+            return f"a {what} has between 1 and {MAX_CHILDREN} subtasks"
         seen = []
         for ch in children:
             if not isinstance(ch, dict):
@@ -250,7 +282,7 @@ class State:
                 return f"subtask {key}: {err}"
             deps = ch.get("deps") or []
             if not isinstance(deps, list) or any(d not in seen for d in deps):
-                return f"the dependencies of {key} must be earlier subtasks of the same sketch"
+                return f"the dependencies of {key} must be earlier subtasks of the same {what}"
             seen.append(key)
         return None
 
@@ -306,7 +338,7 @@ class State:
             self.main_tip = ev["commit"]
             return None
 
-        if t in ("sketch.accepted", "sketch.rejected", "sketch.failed"):
+        if t in ("sketch.accepted", "sketch.rejected", "sketch.failed", "path.accepted", "path.rejected"):
             return self._judge_sketch(ev)
 
         task = self.tasks.get(ev.get("task"))
@@ -372,6 +404,27 @@ class State:
                 return err
             self.sketches[ev["id"]] = Sketch(ev["id"], task.id, ev["author"], ev["name"], ev["children"],
                                              ev["commit"], ev["branch"], ev["lamport"], ev.get("notes", ""))
+        elif t == "path.proposed":
+            # Anyone may propose one, holding the task or not, exclusive or competitive: but only once the task
+            # is stuck, and only a few at a time.
+            if task.cancelled or task.mode == "exclusive" and self.done(task.id):
+                return "the task is already done"
+            if not self.stalled(task.id):
+                return (f"the task isn't stuck: paths open after {STALL_AFTER} failures since its last progress "
+                        f"(it has {self.failures_since_progress(task.id)})")
+            if len(self.open_paths(task.id)) >= MAX_OPEN_PATHS:
+                return f"the task already has {MAX_OPEN_PATHS} paths under way"
+            notes = ev.get("notes", "")
+            if not isinstance(notes, str) or not notes.strip() or len(notes) > E.MAX_NOTES:
+                return f"a path needs notes (why this route, what failed before), at most {E.MAX_NOTES} characters"
+            if ev.get("commit") and not valid_branch(ev.get("branch")):
+                return "the branch is outside the patch namespace"
+            err = self.check_children(task, ev.get("children"), path=True)
+            if err:
+                return err
+            self.sketches[ev["id"]] = Sketch(ev["id"], task.id, ev["author"], ev["name"], ev["children"],
+                                             ev.get("commit") or "", ev.get("branch") or "", ev["lamport"], notes,
+                                             kind="path")
         elif t == "task.resolved":
             k = self.sketches.get(ev.get("sketch"))
             if not k or k.task != task.id or k not in self.ready_to_resolve():
@@ -399,18 +452,19 @@ class State:
         if any(x.key == key for x in self.tasks.values()):
             return f"a task with key {key} already exists"
         depth, sketch = 0, None
-        if ev.get("parent") or ev.get("sketch"):
+        if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
-            sketch = self.sketches.get(ev.get("sketch"))
+            sketch = self.sketches.get(ev.get("sketch") or ev.get("path"))
             if not parent or not sketch or sketch.task != parent.id or sketch.verdict != "accepted":
-                return "a subtask needs a parent and an accepted sketch of that parent"
+                return "a subtask needs a parent and an accepted sketch or path of that parent"
             if not key.startswith(parent.key + "/") or not all(in_zone(z.rstrip("/"), parent.zone) for z in zone):
                 return "a subtask must carry its parent's key and stay inside its zone"
             depth = parent.depth + 1
         tid = task_id(ev)
         self.tasks[tid] = Task(tid, key, ev["title"], zone, ev["accept"], ev.get("mode", "exclusive"),
                                ev.get("metric"), ev.get("goal", "min"), deps, ev.get("size", "M"),
-                               ev.get("body", ""), ev["lamport"], ev.get("parent"), ev.get("sketch"), depth)
+                               ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
+                               depth)
         if sketch:
             sketch.child_ids.append(tid)
         return None
@@ -459,9 +513,11 @@ class State:
         return min(active, key=lambda c: (c.lamport, c.author)) if active else None
 
     def _judge_sketch(self, ev: dict) -> str | None:
-        k = self.sketches.get(ev.get("sketch"))
+        k = self.sketches.get(ev.get("sketch") or ev.get("path"))
         if k is None:
-            return "unknown sketch"
+            return "unknown sketch or path"
+        if (k.kind == "path") != ev["type"].startswith("path."):
+            return "a sketch's verdict is sketch.*, a path's is path.*"
         if ev["type"] == "sketch.failed":
             if k.verdict != "accepted" or k.outcome:
                 return "only an accepted, unresolved sketch can fail"
@@ -472,7 +528,7 @@ class State:
             return None
         if k.verdict:
             return "the sketch already had a verdict"
-        k.verdict = "accepted" if ev["type"] == "sketch.accepted" else "rejected"
+        k.verdict = "accepted" if ev["type"].endswith(".accepted") else "rejected"
         k.reason = ev.get("reason", "")
         k.code = ev.get("code")
         k.merge_commit = ev.get("merge_commit")

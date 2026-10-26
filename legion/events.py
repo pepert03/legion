@@ -22,6 +22,9 @@ TYPES = {
     "digest.published",
     "main.updated",
     "sketch.proposed",
+    "path.proposed",
+    "path.accepted",
+    "path.rejected",
     "sketch.accepted",
     "sketch.rejected",
     "sketch.failed",
@@ -33,6 +36,7 @@ TYPES = {
 }
 INTEGRATOR_ONLY = {"project.described", "task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
                    "sketch.accepted", "sketch.rejected", "sketch.failed", "task.resolved",
+                   "path.accepted", "path.rejected",
                    "integrator.vote", "integrator.lease", "integrator.renew", "integrator.release"}
 MAX_NOTES = 2000
 MAX_DESCRIPTION = 4000

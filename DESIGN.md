@@ -173,6 +173,20 @@ Inspired by Prove2Me's *proof-sketches*: "audit the top and let the agents loose
   a person wrote. What an agent writes can only cause work to be lost, never cause something that
   is not good to be accepted as good.
 
+## 8c. Decision 7 — New paths when work stalls
+
+A task is **stuck** when it gathers `STALL_AFTER` (3) failures since it last advanced: failed reports,
+rejected patches, failed sketches. Progress (the task's creation, an accepted or improving patch, an
+accepted sketch or path) resets the count. It's computed from events, so every node agrees.
+
+On a stuck task **anyone** may publish `path.proposed`: notes on why this route, subtasks of any kind
+(a lemma, a smaller case, a tool, another method) and optionally a commit with their tests or statements.
+Unlike a sketch it doesn't need the claim, works on competitive tasks too, and doesn't replace the task:
+the task stays open and only counts as done when its own acceptance command passes. The integrator
+reviews it like a sketch, without running anything (same rules for zones and test runners), merges its
+commit if clean, and creates the subtasks (`path.accepted`, then `task.created` with `path`). At most
+`MAX_OPEN_PATHS` (3) unfinished paths per task. `context` lists stuck tasks with what was tried.
+
 ## 9. Example event
 
 `coord/events/000142-9b1e4c.json`:

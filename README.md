@@ -285,6 +285,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `report <task> --outcome success\|failure --notes` | report what you tried |
 | `submit <task>` | check zone and acceptance, and publish your branch as a patch |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |
+| `path <task> <file.json>` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone |
 | `integrate [--loop N]` | review patches: zone, merge with main, acceptance and metric (integrator) |
 | `digest show / prompt / publish / auto` | the shared digest; `prompt` generates the instruction for a librarian agent |
 | `log [--ignored]` | event log, and the discarded events with their reason |
