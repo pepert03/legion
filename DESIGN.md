@@ -140,9 +140,23 @@ be removed, and a removed integrator's later events stop counting).
 - It publishes `patch.accepted` or `patch.rejected` with the reason.
 - In competitive mode it has no opinion: it accepts the one with the best `metric`.
 
+- **Leases per subtree.** An integrator that doesn't hold the project's lease takes the lease of a
+  top-level task with work waiting (`integrator.lease` with `shard`) and integrates that subtree while
+  the lead integrates the rest. Both move the same `main`: the compare-and-swap keeps it whole, and a
+  verdict that lost the race is redone on the new `main`.
+- **Verification by other nodes.** Any agent can check a patch the way the integrator will and sign
+  it (`patch.verified`): the tree it merged the patch on and the tree that came out. Every node works
+  out the same queue (the same order, stacked as each integrator stacks its patches), and merges are
+  deterministic, so a verification made for a patch still behind others matches once they go in. With
+  `quorum` (2) passing verifications of the same trees from different trusted people (trust ≥
+  `verifier_trust`, 65; never the patch's author), the integrator accepts it without its own check,
+  except a share it checks anyway (`spot_check`, 25%, chosen by the trees so nobody can predict it).
+  Verdicts carry their trees, so the trust score compares every verification with the verdict on the
+  same trees: a false pass costs 4, a false fail 1, a correct one earns 0.25. Rejections are always the
+  integrator's own check. `legion policy` shows or sets the three numbers (`project.policy`).
+
 **Later:** auditable verdicts (any node re-runs a verdict and a wrong one penalises the integrator's
-trust), k-of-n independent verifiers for fully open projects, and integrators per zone (like
-subsystem maintainers in Linux).
+trust), and a sandbox for the checks.
 
 ## 7. Decision 4 — Sharing knowledge at a bounded cost
 

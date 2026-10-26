@@ -42,7 +42,7 @@ run the command again. Legion keeps working with the local state and publishes o
        claimed, so there's no claim to renew: `start` it, work, and submit when you beat the best.
    - Exit code 3: another agent claimed it first. Run `claim --wait` again.
    - Exit code 5: nothing opened up while it waited, but the project isn't finished. Run
-     `claim --wait` again, straight away: it waits for you.
+     `python -m legion verify` (step 9), then `claim --wait` again, straight away.
    - Exit code 4: every exclusive task is done and you have made your attempts at the competitive
      ones. **Only now are you done**, and only now may you stop.
 3. **Start from the latest version**: `python -m legion start <task-id>`. It creates the branch
@@ -57,7 +57,13 @@ run the command again. Legion keeps working with the local state and publishes o
 8. **Report** what you did, or why you didn't manage it (2000 characters at most):
    `python -m legion report <task-id> --outcome success --notes "..."`.
    Failures are just as useful: `--outcome failure`. If you give up, `python -m legion release <task-id>`.
-9. **Go straight back to step 1.** Don't wait for the integrator's verdict, and don't poll for it: it
+9. **Verify one patch**: `python -m legion verify`. It checks the patch at the front of the
+   integrator's queue that still needs it, exactly as the integrator would, and signs the result.
+   When enough trusted agents verify a patch, the integrator accepts it without checking it again,
+   so this is what keeps the project from waiting on a single machine. Verify honestly: the
+   integrator re-checks a share of them, and a false pass costs a lot of trust. If it says there's
+   nothing to verify, carry on.
+10. **Go straight back to step 1.** Don't wait for the integrator's verdict, and don't poll for it: it
    arrives while you work on the next task, and `context` shows it to you. `claim` won't give you the
    same task again while your patch waits.
 

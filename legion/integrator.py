@@ -1,5 +1,6 @@
 """The integrator reviews pending patches and sketches, and is the only one who moves main forward."""
 
+import hashlib
 import io
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from . import coordgit
 from . import state as S
+from . import trust
 from .coordgit import git, run
 from .ctx import Ctx, Fail
 
@@ -176,12 +178,12 @@ def create_children(c: Ctx, k: S.Sketch) -> None:
         ids[ch["key"]] = S.task_id(ev)
 
 
-def resolve_parents(c: Ctx, timeout: int, log=print) -> int:
+def resolve_parents(c: Ctx, timeout: int, log=print, mine=lambda tid: True) -> int:
     """Once every subtask of a sketch is done, the parent passes (or not) its own test."""
     done = 0
     while True:
         c.reload()
-        ready = c.st.ready_to_resolve()
+        ready = [k for k in c.st.ready_to_resolve() if mine(k.task)]
         if not ready:
             return done
         k = ready[0]
@@ -214,6 +216,7 @@ def resolve_parents(c: Ctx, timeout: int, log=print) -> int:
 # Either way the checks run code from strangers, with no sandbox yet.
 
 FRESH = bool(os.environ.get("LEGION_FRESH_REVIEWS"))
+MISSING_AFTER = 600  # seconds a patch's commit may take to arrive before it's rejected as missing
 REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
 
 
@@ -248,6 +251,8 @@ class Job:
     merged: str
     head: str
     baseline: bool  # a competitive task with no best yet: measure main too, to beat it
+    base_tree: str = ""
+    tree: str = ""
 
 
 def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
@@ -259,10 +264,14 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
         return None  # written ahead, while the task was blocked: it waits for its dependencies
     prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})",
                              onto=onto)
+    missing = isinstance(prepared, tuple) and prepared[0] == "rejected" and prepared[1].get("code") == "missing"
+    if missing and time.time() - p.ts < MISSING_AFTER:
+        return None  # not here yet (a slow network), or another integrator judged it and dropped its branch
     if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
         return prepared
     merged, head = prepared
-    return Job(p, task, merged, head, bool(task.metric and st.best(task.id) is None))
+    trees = git(c.repo, "rev-parse", head + "^{tree}", merged + "^{tree}").split()
+    return Job(p, task, merged, head, bool(task.metric and st.best(task.id) is None), *trees)
 
 
 def check(repo, job: Job, name: str, timeout: int) -> tuple:
@@ -283,7 +292,13 @@ def check(repo, job: Job, name: str, timeout: int) -> tuple:
 
 
 def decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
-    code, out, value, mout, baseline = result
+    verdict, payload = _decide(c, job, result)
+    payload.update(base_tree=job.base_tree, tree=job.tree)  # what verifications are judged against
+    return verdict, payload
+
+
+def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
+    code, out, value, mout, baseline = result[:5]
     st, task = c.st, job.task
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
@@ -299,7 +314,44 @@ def decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
         payload["metric"] = value
     payload["merge_commit"] = job.merged
     payload["base"] = job.head
+    if len(result) > 5:
+        payload["verified_by"] = result[5]  # accepted on the verifications of these events, without a check here
     return "accepted", payload
+
+
+def trusted_verifiers(st: S.State, now: float) -> set[str]:
+    """Whose verifications count: the integrators, and agents whose trust reaches the project's threshold."""
+    by_agent, _ = trust.compute(st, now)
+    return set(st.integrators) | {a for a, t in by_agent.items()
+                                  if t.evidence >= 2 and t.score >= st.policy["verifier_trust"]}
+
+
+def quorum(c: Ctx, job: Job, now: float) -> list[dict] | None:
+    """The passing verifications of exactly this merge, by enough trusted people other than the author, unless
+    this patch is one the integrator checks itself anyway (a spot check, chosen by its trees)."""
+    pol = c.st.policy
+    if pol["quorum"] <= 0 or job.baseline:
+        return None
+    draw = int(hashlib.sha256(f"{job.patch.id}:{job.tree}".encode()).hexdigest(), 16) / 16 ** 64
+    if draw < pol["spot_check"]:
+        return None
+    ok = trusted_verifiers(c.st, now)
+    author_person = trust.owner_of(job.patch.name)
+    people = {}
+    for v in c.st.verifications.get(job.patch.id, ()):
+        person = trust.owner_of(v["name"])
+        if (v["outcome"] == "pass" and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)
+                and v["author"] in ok and person != author_person):
+            people.setdefault(person, v)
+    chosen = list(people.values())
+    return chosen if len(chosen) >= pol["quorum"] else None
+
+
+def verified_result(job: Job, vs: list[dict]) -> tuple:
+    """A check's result from verifications: the most cautious metric any of them saw."""
+    metrics = [v["metric"] for v in vs if v.get("metric") is not None]
+    value = (max(metrics) if job.task.goal == "min" else min(metrics)) if metrics else None
+    return 0, "", value, "", None, [v["id"] for v in vs]
 
 
 def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
@@ -310,10 +362,14 @@ def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
     return decide(c, job, check(c.repo, job, "0", timeout))
 
 
-def check_all(c: Ctx, jobs: list[Job], timeout: int) -> list:
+def check_all(c: Ctx, jobs: list[Job], timeout: int, ready: dict | None = None) -> list:
     """Check the jobs at once, each in its reviewer's folder, while this thread keeps the lease. A job that
-    raised gives back its exception."""
+    raised gives back its exception. `ready` holds the results already known (from verifications)."""
+    ready = ready or {}
+
     def one(i, job):
+        if job.patch.id in ready:
+            return ready[job.patch.id]
         try:
             return check(c.repo, job, str(i), timeout)
         except Exception as e:  # noqa: BLE001 - reported, and the patch retried, by the caller
@@ -441,9 +497,12 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
     c.sync()
     c.require_integrator()
     follow_main(c)
-    finish_interrupted(c, log)
+    if c.st.leader(time.time()) and c.st.leader(time.time()).author == c.me:
+        finish_interrupted(c, log)
+    mine = lambda tid: c.st.integrates(c.me, tid, time.time())  # noqa: E731 - its subtrees, or all the others
     done = 0
-    sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None), key=lambda k: (k.lamport, k.id))
+    sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None and mine(k.task)),
+                      key=lambda k: (k.lamport, k.id))
     for k in sketches:
         c.reload()
         k = c.st.sketches[k.id]
@@ -474,12 +533,17 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
     # was checked on exactly the main it would land on), and the ones after it go back to the queue: their
     # check assumed it would go in. After every round the order is worked out again, since an accepted patch
     # can resolve its parent and unblock patches written ahead.
-    tried = set()
+    tried, rounds = set(), 0
     while True:
-        c.reload()
-        ready = sorted((p for p in c.st.patches.values() if p.verdict is None and p.id not in tried
-                        and c.st.deps_ok(c.st.tasks[p.task])),  # written ahead: it waits, quietly
-                       key=lambda p: (-c.st.unblocks(p.task), p.lamport, p.id))
+        if rounds:  # a round takes minutes: catch up first, so a subtree another integrator just took is left
+            try:    # to it instead of checked twice
+                c.sync()
+            except coordgit.GitError:
+                c.reload()
+        else:
+            c.reload()
+        rounds += 1
+        ready = [p for p in queue_order(c.st) if p.id not in tried and mine(p.task)]
         if not ready:
             break
         jobs, onto = [], None
@@ -507,7 +571,12 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
                 done += 1
         if not jobs:
             continue
-        for job, result in zip(jobs, check_all(c, jobs, timeout)):
+        now, known = time.time(), {}
+        for job in jobs:
+            if vs := quorum(c, job, now):
+                known[job.patch.id] = verified_result(job, vs)
+                log(f"patch {job.patch.id[:8]} verified by {', '.join(v['name'] for v in vs)}: no check needed here")
+        for job, result in zip(jobs, check_all(c, jobs, timeout, known)):
             tried.add(job.patch.id)
             if isinstance(result, Exception):
                 log(f"error checking {job.patch.id[:8]}; will retry: {result}")
@@ -520,15 +589,63 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
             if verdict[0] == "rejected":
                 break  # the ones after it were checked on top of it
             try:  # its parent may be complete now: resolving it is what unblocks the tasks waiting for it
-                done += resolve_parents(c, timeout, log)
+                done += resolve_parents(c, timeout, log, mine)
             except coordgit.GitError as e:
                 log(f"git error checking tasks with subtasks; will retry: {e}")
                 break
     try:
-        done += resolve_parents(c, timeout, log)
+        done += resolve_parents(c, timeout, log, mine)
     except coordgit.GitError as e:
         log(f"git error checking tasks with subtasks; will retry: {e}")
     return done
+
+
+
+def handler(st: S.State, tid: str, now: float) -> str | None:
+    """Which integrator takes this task now: its subtree's lease holder, or else the project's."""
+    holder = st.leader(now, st.root_of(tid)) or st.leader(now)
+    return holder.author if holder else None
+
+
+def verify_one(c: Ctx, timeout: int, depth: int = 8) -> tuple[Job, str] | None:
+    """Check, the way the integrator will, the first patch in the queue that still lacks verifications, and
+    sign the result. Patches are stacked as each integrator stacks them (one queue per integrator, following
+    the leases), so the trees match when the integrator gets there. None if there's nothing to verify."""
+    now = time.time()
+    stacks: dict = {}
+    for p in queue_order(c.st):
+        stack = stacks.setdefault(handler(c.st, p.task, now), {"jobs": [], "onto": None})
+        if len(stack["jobs"]) >= depth or any(j.patch.task == p.task for j in stack["jobs"]):
+            continue
+        planned = plan(c, p, stack["onto"])
+        if isinstance(planned, Job):
+            stack["jobs"].append(planned)
+            stack["onto"] = planned.merged
+    ok, need = trusted_verifiers(c.st, now), c.st.policy["quorum"]
+    order = [j for i in range(depth) for s in stacks.values() if i < len(s["jobs"]) for j in [s["jobs"][i]]]
+    for job in order:
+        vs = c.st.verifications.get(job.patch.id, [])
+        if job.patch.author == c.me or job.baseline or any(
+                v["author"] == c.me and v["base_tree"] == job.base_tree for v in vs):
+            continue
+        have = {trust.owner_of(v["name"]) for v in vs if v["outcome"] == "pass" and v["author"] in ok
+                and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)}
+        if len(have) >= max(1, need):
+            continue
+        code, out, value = check(c.repo, job, "verify", timeout)[:3]
+        outcome = "pass" if code == 0 and (not job.task.metric or value is not None) else "fail"
+        c.emit("patch.verified", task=job.task.id, patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,
+               outcome=outcome, metric=value)
+        c.sync()
+        return job, outcome
+    return None
+
+def queue_order(st: S.State) -> list[S.Patch]:
+    """The patches waiting for a verdict, in the order the queue takes them: every node works it out the same
+    way, which is what lets verifiers check ahead of the integrator. The one that unblocks the most tasks
+    first, then the oldest; patches written ahead of their dependencies wait."""
+    return sorted((p for p in st.patches.values() if p.verdict is None and st.deps_ok(st.tasks[p.task])),
+                  key=lambda p: (-st.unblocks(p.task), p.lamport, p.id))
 
 
 # --- the integration lease ---------------------------------------------------------------
@@ -552,7 +669,7 @@ def hold_lease(c: Ctx, ttl: int) -> tuple[bool, str | None]:
             c.sync()
         return True, lead.name
     if lead:
-        release_lease(c)  # a stale lease of mine would only muddy who's next
+        release_lease(c, project_only=True)  # a stale lease of mine would only muddy who's next
         return False, lead.name
     c.emit("integrator.lease", ttl=ttl)
     c.sync()
@@ -561,14 +678,51 @@ def hold_lease(c: Ctx, ttl: int) -> tuple[bool, str | None]:
     lead = c.st.leader(time.time())
     if lead and lead.author == c.me:
         return True, lead.name
-    release_lease(c)
+    release_lease(c, project_only=True)
     return False, lead.name if lead else None
 
 
-def release_lease(c: Ctx) -> None:
-    if any(l.author == c.me and not l.released and l.active(time.time()) for l in c.st.leases):
+def hold_shards(c: Ctx, ttl: int, most: int) -> list[str]:
+    """For an integrator that doesn't hold the project's lease: take the subtrees (top-level tasks) with the most
+    work waiting that nobody else holds, up to `most`, and give back the ones with nothing left. Returns the
+    ones it holds now; the integrator holding the project's lease leaves them alone."""
+    now = time.time()
+    work = c.st.pending_roots()
+    held = [r for r in c.st.tasks if not c.st.tasks[r].parent and (h := c.st.leader(now, r)) and h.author == c.me]
+    for root in held:
+        if not work.get(root):
+            c.emit("integrator.release", shard=root)
+    held = [r for r in held if work.get(r)]
+    # Not what the lead is about to check: the first patches of its queue, which every node can work out. By the
+    # round after, it will have seen this lease and leave the subtree alone.
+    lead = c.st.leader(now)
+    nxt = [] if not lead else [p for p in queue_order(c.st) if handler(c.st, p.task, now) == lead.author]
+    busy = {c.st.root_of(p.task) for p in nxt[:max(1, REVIEWERS)]}
+    free = sorted((r for r in work if r not in held and r not in busy and not c.st.leader(now, r)),
+                  key=lambda r: -work[r])
+    for root in free[:max(0, most - len(held))]:
+        c.emit("integrator.lease", ttl=ttl, shard=root)
+    c.sync()
+    time.sleep(LEASE_SETTLE)
+    c.sync()
+    now = time.time()
+    return [r for r in c.st.tasks if not c.st.tasks[r].parent and (h := c.st.leader(now, r)) and h.author == c.me]
+
+
+def keep_leases(c: Ctx, ttl: int) -> None:
+    """Renew every lease this integrator holds that's past half its time: while a long check runs."""
+    now = time.time()
+    for lease in [l for l in c.st.leases if l.author == c.me and l.active(now) and now - l.last_beat > ttl / 2]:
+        shard = lease.task.partition(":")[2] or None
+        c.emit("integrator.renew", **({"shard": shard} if shard else {}))
+    c.sync()
+
+
+def release_lease(c: Ctx, project_only: bool = False) -> None:
+    if any(l.author == c.me and not l.released and l.active(time.time())
+           and (l.task == S.LEASE or not project_only) for l in c.st.leases):
         try:
-            c.emit("integrator.release")
+            c.emit("integrator.release", **({"project_lease": True} if project_only else {}))
             c.sync()
         except Fail:
             pass

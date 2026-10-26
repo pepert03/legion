@@ -14,19 +14,23 @@ from . import state as S
 
 PRIOR = 2.0  # pseudo-observations on each side: a new agent sits at 50 and moves quickly at first
 
-GOOD = {"accepted": 1.0, "competitive": 1.0, "sketch_resolved": 1.5}
+GOOD = {"accepted": 1.0, "competitive": 1.0, "sketch_resolved": 1.5, "verified": 0.25}
 # How much each kind of rejection says about the agent. A conflict or someone merging first is
 # mostly bad luck; failing tests or leaving the zone is not.
 BAD = {"tests": 1.0, "zone": 1.5, "scaffold": 0.8, "invalid": 0.8, "metric": 0.5, "empty": 0.5,
        "missing": 0.3, "deps": 0.2, "conflict": 0.15, "done": 0.0, "no_gain": 0.0,
-       "sketch_failed": 1.0, "abandoned": 0.4}
+       "sketch_failed": 1.0, "abandoned": 0.4,
+       # A verification the integrator's own check contradicted: a false pass would have let a broken patch in.
+       "false_pass": 4.0, "false_fail": 1.0}
 LABEL = {"accepted": "patch accepted", "competitive": "improved a competitive task",
          "sketch_resolved": "split a task that then got done", "tests": "submitted failing tests",
          "zone": "touched files outside its zone", "scaffold": "sketch without subtask tests",
          "invalid": "invalid sketch", "metric": "metric did not run", "empty": "empty patch",
          "missing": "patch not found", "deps": "submitted before its dependencies",
          "conflict": "conflict with main", "done": "task already done", "no_gain": "did not beat the best",
-         "sketch_failed": "split a task whose parent then failed", "abandoned": "let a claim expire"}
+         "sketch_failed": "split a task whose parent then failed", "abandoned": "let a claim expire",
+         "verified": "verified a patch correctly", "false_pass": "verified as passing a patch that fails",
+         "false_fail": "verified as failing a patch that passes"}
 
 
 def legacy_code(reason: str) -> str:
@@ -101,6 +105,19 @@ def compute(st: S.State, now: float) -> tuple[dict[str, Trust], dict[str, Trust]
             get(k.author).add("sketch_failed")
         elif k.verdict == "rejected":
             get(k.author).add(k.code or legacy_code(k.reason))
+    for p in st.patches.values():  # verifications, against the verdict reached on the same trees
+        if not p.verdict or not p.tree:
+            continue
+        for v in st.verifications.get(p.id, ()):
+            if (v["base_tree"], v["tree"]) != (p.base_tree, p.tree):
+                continue
+            passed, accepted = v["outcome"] == "pass", p.verdict == "accepted"
+            if passed == accepted and (accepted or p.code == "tests"):
+                get(v["author"]).add("verified")
+            elif passed and p.code == "tests":
+                get(v["author"]).add("false_pass")
+            elif not passed and accepted:
+                get(v["author"]).add("false_fail")
     for tid, claims in st.claims.items():
         for c in claims:
             delivered = any(p.author == c.author and p.lamport > c.lamport for p in st.patches_for(tid)) or \

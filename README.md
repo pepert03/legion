@@ -287,11 +287,13 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `heartbeat <task>` | renew the claim |
 | `release <task>` | release it |
 | `report <task> --outcome success\|failure --notes` | report what you tried |
+| `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
+| `policy [--quorum N] [--verifier-trust N] [--spot-check F]` | show, or set (integrator), how verification by other nodes works |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |
 | `submit <task>` | check zone and acceptance, and publish your branch as a patch |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |
 | `path <task> <file.json>` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone |
-| `integrate [--loop N]` | review patches: zone, merge with main, acceptance and metric (integrator) |
+| `integrate [--loop N] [--reviewers N] [--shards N]` | review patches as a merge queue, N at once, in folders that keep their builds: zone, merge with main, acceptance and metric (integrator). Not holding the lease, it integrates up to `--shards` subtrees meanwhile |
 | `digest show / prompt / publish / auto` | the shared digest; `prompt` generates the instruction for a librarian agent |
 | `log [--ignored]` | event log, and the discarded events with their reason |
 | `trust [--json]` | trust score of each person and agent, from verified evidence |

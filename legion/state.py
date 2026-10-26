@@ -33,6 +33,13 @@ MAX_TASK_NOTES = 30
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
 COMPETITIVE_TRIES = 3
+# Verification by other nodes. A node checks a patch the way the integrator would and signs the result
+# (patch.verified): on which tree it merged it (main plus the patches ahead of it in the queue, which every node
+# works out the same way) and which tree came out. Merges are deterministic, so when the integrator gets there
+# the trees match and a quorum of passes from trusted people lets it accept without running the check itself;
+# it still checks a share of them (spot_check), and a verification that turns out false costs trust.
+POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25}
+TREE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 SIZES = {"L": 0, "M": 1, "S": 2}
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
 SHELL_META = set(";&|`$<>\n\r")
@@ -109,6 +116,9 @@ class Patch:
     code: str | None = None  # why it was rejected: tests, zone, conflict... (see integrator.py)
     metric: float | None = None
     merge_commit: str | None = None
+    ts: float = 0.0
+    base_tree: str | None = None  # the trees the verdict was reached on: they tell a true verification from a
+    tree: str | None = None       # false one
 
 
 def task_id(ev: dict) -> str:
@@ -138,6 +148,10 @@ def check_accept(cmd, runners: list) -> str | None:
     return None
 
 
+
+def lease_key(shard: str | None) -> str:
+    return LEASE if shard is None else f"{LEASE}:{shard}"
+
 class State:
     def __init__(self):
         self.project: dict | None = None
@@ -156,7 +170,9 @@ class State:
         self.ignored: list[tuple[dict, str]] = []
         self.max_lamport = 0
         self.votes: dict[tuple[str, str], set] = {}  # (add|remove, key) -> integrators who voted for it
-        self.leases: list[Claim] = []                # claims on the integrator role
+        self.leases: list[Claim] = []                # claims on the integrator role, whole or per subtree
+        self.verifications: dict[str, list[dict]] = defaultdict(list)  # patch -> patch.verified events
+        self.policy: dict = dict(POLICY)
         self.integrator_names: dict[str, str] = {}
 
     # --- queries -----------------------------------------------------------
@@ -410,6 +426,18 @@ class State:
         if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
             return None
 
+        if t == "project.policy":
+            policy = dict(self.policy)
+            for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
+                                      ("spot_check", (int, float), 0, 1)):
+                if key in ev:
+                    v = ev[key]
+                    if not isinstance(v, kind) or isinstance(v, bool) or not lo <= v <= hi:
+                        return f"{key} must be between {lo} and {hi}"
+                    policy[key] = v
+            self.policy = policy
+            return None
+
         if t == "project.described":
             if not isinstance(ev.get("description"), str):
                 return "missing description"
@@ -458,6 +486,23 @@ class State:
             if not isinstance(ev.get("notes", ""), str) or len(ev.get("notes", "")) > E.MAX_NOTES:
                 return f"notes must be text of at most {E.MAX_NOTES} characters"
             self.attempts.append(ev)
+        elif t == "patch.verified":
+            p = self.patches.get(ev.get("patch"))
+            if p is None or p.task != task.id:
+                return "unknown patch"
+            if p.verdict:
+                return "the patch already has a verdict"
+            if ev["author"] == p.author:
+                return "a patch can't be verified by its own author"
+            if ev.get("outcome") not in ("pass", "fail"):
+                return "outcome must be pass or fail"
+            if not all(isinstance(ev.get(k), str) and TREE.match(ev[k]) for k in ("base_tree", "tree")):
+                return "base_tree and tree must be git tree ids"
+            if ev.get("metric") is not None and (not isinstance(ev["metric"], (int, float)) or isinstance(ev["metric"], bool)):
+                return "metric must be a number"
+            if any(v["author"] == ev["author"] and v["base_tree"] == ev["base_tree"] for v in self.verifications[p.id]):
+                return "already verified on that tree"
+            self.verifications[p.id].append(ev)
         elif t == "task.note":
             text = ev.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
@@ -473,7 +518,7 @@ class State:
             if not valid_branch(ev["branch"]):
                 return "a patch branch must be under legion/ or refs/legion/patches/"
             self.patches[ev["id"]] = Patch(ev["id"], task.id, ev["author"], ev["name"], ev["commit"],
-                                           ev["branch"], ev["lamport"])
+                                           ev["branch"], ev["lamport"], ts=ev["ts"])
         elif t in ("patch.accepted", "patch.rejected"):
             p = self.patches.get(ev.get("patch"))
             if p is None:
@@ -485,6 +530,7 @@ class State:
             p.code = ev.get("code")
             p.metric = ev.get("metric")
             p.merge_commit = ev.get("merge_commit")
+            p.base_tree, p.tree = ev.get("base_tree"), ev.get("tree")
             if p.merge_commit:
                 self.main_tip = p.merge_commit
         elif t == "sketch.proposed":
@@ -584,13 +630,20 @@ class State:
                     self.integrator_names[key] = ev["member"]
                 self.votes.pop((action, key), None)
             return None
+        shard = ev.get("shard")
+        if shard is not None and (shard not in self.tasks or self.tasks[shard].parent):
+            return "a lease's shard is a top-level task"
         if t == "integrator.lease":
             ttl = ev.get("ttl")
             if not isinstance(ttl, int) or not MIN_LEASE <= ttl <= MAX_TTL:
                 return "lease ttl out of range"
-            self.leases.append(Claim(LEASE, author, ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"]))
+            self.leases.append(Claim(lease_key(shard), author, ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"]))
             return None
         mine = [c for c in self.leases if c.author == author and not c.released]
+        # A renewal names its lease (a shard, or none: the project's); a release too, or with neither a shard nor
+        # project_lease it ends them all.
+        if shard is not None or t == "integrator.renew" or ev.get("project_lease") is True:
+            mine = [c for c in mine if c.task == lease_key(shard)]
         if not mine:
             return "no lease to renew or release"
         if t == "integrator.renew":
@@ -603,10 +656,36 @@ class State:
                 c.released = True
         return None
 
-    def leader(self, now: float) -> Claim | None:
-        """The integrator holding the lease right now: the earliest active lease of a current integrator."""
-        active = [c for c in self.leases if c.author in self.integrators and c.active(now)]
+    def leader(self, now: float, shard: str | None = None) -> Claim | None:
+        """The integrator holding the lease (the whole project's, or a shard's) right now: the earliest active
+        one of a current integrator."""
+        active = [c for c in self.leases if c.task == lease_key(shard) and c.author in self.integrators
+                  and c.active(now)]
         return min(active, key=lambda c: (c.lamport, c.author)) if active else None
+
+    def root_of(self, tid: str) -> str:
+        while self.tasks[tid].parent:
+            tid = self.tasks[tid].parent
+        return tid
+
+    def integrates(self, author: str, tid: str, now: float) -> bool:
+        """Whether this integrator handles the task now: it holds its subtree's lease, or the project's lease
+        and nobody else holds the subtree's."""
+        holder = self.leader(now, self.root_of(tid)) or self.leader(now)
+        return holder.author == author if holder else author in self.integrators  # no lease: anyone may
+
+    def pending_roots(self) -> dict[str, int]:
+        """Top-level tasks with work waiting for an integrator, and how much."""
+        work = defaultdict(int)
+        for p in self.patches.values():
+            if p.verdict is None and self.deps_ok(self.tasks[p.task]):
+                work[self.root_of(p.task)] += 1
+        for k in self.sketches.values():
+            if k.verdict is None:
+                work[self.root_of(k.task)] += 1
+        for k in self.ready_to_resolve():
+            work[self.root_of(k.task)] += 1
+        return dict(work)
 
     def _judge_sketch(self, ev: dict) -> str | None:
         k = self.sketches.get(ev.get("sketch") or ev.get("path"))

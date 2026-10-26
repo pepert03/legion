@@ -17,6 +17,8 @@ TYPES = {
     "task.released",
     "attempt.reported",
     "task.note",
+    "patch.verified",
+    "project.policy",
     "patch.submitted",
     "patch.accepted",
     "patch.rejected",
@@ -35,7 +37,7 @@ TYPES = {
     "integrator.renew",
     "integrator.release",
 }
-INTEGRATOR_ONLY = {"project.described", "task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
+INTEGRATOR_ONLY = {"project.described", "project.policy", "task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
                    "sketch.accepted", "sketch.rejected", "sketch.failed", "task.resolved",
                    "path.accepted", "path.rejected",
                    "integrator.vote", "integrator.lease", "integrator.renew", "integrator.release"}

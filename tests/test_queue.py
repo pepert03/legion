@@ -26,6 +26,10 @@ def git(cwd, *args):
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
+    return make_project(tmp_path, monkeypatch)
+
+
+def make_project(tmp_path, monkeypatch):
     """A p2p repository whose integrator is `boss`, with tasks a and b and a patch for each."""
     monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
     repo = tmp_path / "r"
@@ -38,6 +42,7 @@ def project(tmp_path, monkeypatch):
     git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "start")
     coordgit.add_peer(repo, "offline", str(tmp_path / "nobody"))  # p2p, with nobody to reach
     boss, agent = Identity.generate("boss"), Identity.generate("ana#1")
+    others = [Identity.generate("luis#1"), Identity.generate("marta#1")]  # integrators too: trusted verifiers
     identity.bind(repo, boss)
     lamport = iter(range(1, 100))
 
@@ -46,7 +51,7 @@ def project(tmp_path, monkeypatch):
         coordgit.append(repo, who, ev)
         return ev
 
-    add(boss, "project.init", project="p", integrators=[boss.author], runners=["python"])
+    add(boss, "project.init", project="p", integrators=[boss.author] + [o.author for o in others], runners=["python"])
     add(boss, "main.updated", commit=git(repo, "rev-parse", "HEAD"))
     tids = {k: S.task_id(add(boss, "task.created", key=k, title=k, zone=[f"{k}.txt"], accept=f"python check.py {k}"))
             for k in "ab"}
@@ -62,6 +67,8 @@ def project(tmp_path, monkeypatch):
 
     monkeypatch.chdir(repo)
     monkeypatch.setattr(integrator, "REVIEWERS", 2)
+    make_project.people = {"boss": boss, "luis": others[0], "marta": others[1]}
+    make_project.add = add
     return repo, tids, patch
 
 
@@ -106,3 +113,81 @@ def test_a_review_folder_keeps_its_builds_and_nothing_else(project):
     integrator.checkout(repo, head, dest)
     assert (dest / "build" / "cached").read_text() == "kept"
     assert not (dest / "stray.txt").exists() and (dest / "a.txt").read_text().strip() == "todo"
+
+
+def as_(repo, who):
+    identity.bind(repo, make_project.people[who])
+    return Ctx()
+
+
+def runs(repo, reviewer):
+    f = integrator.common_dir(repo) / "legion-review" / reviewer / "build" / "runs"
+    return int(f.read_text()) if f.exists() else 0
+
+
+def test_a_patch_verified_by_a_quorum_goes_in_without_a_check(project):
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    for who in ("luis", "marta"):
+        job, outcome = integrator.verify_one(as_(repo, who), 60)
+        assert (job.task.key, outcome) == ("a", "pass")
+    assert integrator.verify_one(as_(repo, "luis"), 60) is None  # already verified on that tree
+    c = as_(repo, "boss")
+    c.emit("project.policy", spot_check=0)
+    integrator.integrate_once(c, 60, log=[].append)
+    st = Ctx(sync=False).st
+    accepted = st.patches_for(tids["a"], "accepted")
+    assert accepted and runs(repo, "0") == 0 and runs(repo, "verify") == 2  # the integrator ran nothing
+    ev = next(e for e in st.events if e["type"] == "patch.accepted")
+    assert len(ev["verified_by"]) == 2
+
+
+def test_verifications_of_a_patch_behind_another_still_match(project):
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    patch("b", "ok\n")
+    for who in ("luis", "marta"):  # each checks a first, then b on top of a
+        assert integrator.verify_one(as_(repo, who), 60)[0].task.key == "a"
+        assert integrator.verify_one(as_(repo, who), 60)[0].task.key == "b"
+    c = as_(repo, "boss")
+    c.emit("project.policy", spot_check=0)
+    integrator.integrate_once(c, 60, log=[].append)
+    assert verdicts(tids) == {"a": ["accepted"], "b": ["accepted"]} and runs(repo, "0") == 0
+
+
+def test_a_spot_check_runs_anyway_and_a_false_pass_costs_trust(project):
+    from legion import trust
+    repo, tids, patch = project
+    patch("a", "broken\n")
+    c = as_(repo, "luis")
+    job = integrator.plan(c, c.st.patches_for(tids["a"])[0])
+    for who in ("luis", "marta"):  # two verifiers that lie: they sign a pass without checking
+        as_(repo, who).emit("patch.verified", task=tids["a"], patch=job.patch.id, base_tree=job.base_tree,
+                            tree=job.tree, outcome="pass")
+    c = as_(repo, "boss")
+    c.emit("project.policy", spot_check=1)  # every verified patch is checked anyway
+    integrator.integrate_once(c, 60, log=[].append)
+    st = Ctx(sync=False).st
+    assert verdicts(tids)["a"] == ["rejected"] and runs(repo, "0") == 1
+    by_agent, _ = trust.compute(st, 0)
+    assert by_agent[make_project.people["luis"].author].counts == {"false_pass": 1}
+
+
+def test_a_standby_integrator_takes_a_subtree(project, monkeypatch):
+    repo, tids, patch = project
+    monkeypatch.setattr(integrator, "REVIEWERS", 1)  # the lead's next round is one patch: the other subtree is free
+    patch("a", "ok\n")
+    patch("b", "ok\n")
+    boss = as_(repo, "boss")
+    assert integrator.hold_lease(boss, 300)[0]
+    luis = as_(repo, "luis")
+    assert not integrator.hold_lease(luis, 300)[0]
+    taken = integrator.hold_shards(luis, 300, 1)
+    assert len(taken) == 1
+    mine = Ctx(sync=False).st.tasks[taken[0]].key
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    other = "b" if mine == "a" else "a"
+    assert verdicts(tids)[other] == ["accepted"] and verdicts(tids)[mine] == [None]  # the boss left it alone
+    integrator.integrate_once(as_(repo, "luis"), 60, log=[].append)
+    assert verdicts(tids)[mine] == ["accepted"]
+    assert integrator.hold_shards(as_(repo, "luis"), 300, 1) == []  # nothing left there: handed back

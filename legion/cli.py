@@ -17,6 +17,7 @@ from . import update
 from . import events as E
 from . import integrator
 from . import state as S
+from . import trust
 from .coordgit import git
 from .ctx import Ctx, Fail, need_identity, remember_agent, repo_root
 from . import identity
@@ -95,6 +96,8 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "task.heartbeat": f"renews {key}",
         "task.released": f"releases {key}",
         "attempt.reported": f"reports {ev.get('outcome')} on {key}: {notes}",
+        "patch.verified": f"verifies patch {str(ev.get('patch', ''))[:8]} for {key}: {ev.get('outcome')}",
+        "project.policy": "sets how patches are verified",
         "task.note": f"notes on {key}: {ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",
         "patch.submitted": f"submits patch {ev['id'][:8]} for {key}",
         "patch.accepted": f"accepts patch {ev.get('patch', '')[:8]} for {key}"
@@ -266,8 +269,9 @@ def cmd_init(args):
 
 AGENT_PROMPT = "Read AGENTS.md and follow its protocol until it says you are done."
 # What every step that ends a piece of work reminds the agent: it's a loop, and stopping early is the usual mistake.
-KEEP_GOING = ("go straight back to `python -m legion context` and then `python -m legion claim --wait`, without "
-              "stopping or asking: you're done only when claim exits with code 4.")
+KEEP_GOING = ("verify one patch with `python -m legion verify`, then go straight back to `python -m legion context` "
+              "and `python -m legion claim --wait`, without stopping or asking: you're done only when claim exits "
+              "with code 4.")
 
 
 def radicle_ready(alias: str, home: str | None) -> str:
@@ -768,6 +772,41 @@ def cmd_report(args):
     print(f"Next: {KEEP_GOING}")
 
 
+def cmd_verify(args):
+    """Check one patch the integrator will review, the way it will, and sign the result: with enough of these
+    from trusted people it accepts the patch without checking it itself."""
+    c = Ctx()
+    now = time.time()
+    by_agent, _ = trust.compute(c.st, now)
+    mine = by_agent.get(c.me) or trust.Trust()
+    counts = c.me in integrator.trusted_verifiers(c.st, now)
+    done = integrator.verify_one(c, args.timeout)
+    if done is None:
+        out(args, {"verified": None}, "No patch needs verifying right now.")
+        return 0
+    job, outcome = done
+    note = "" if counts else (f" Your verifications don't count towards a quorum yet (trust {mine.score}, "
+                              f"{c.st.policy['verifier_trust']} needed); correct ones raise it.")
+    out(args, {"verified": job.patch.id, "task": job.task.key, "outcome": outcome, "counts": counts},
+        f"Verified patch {job.patch.id[:8]} for {job.task.key}: {outcome}.{note}")
+    return 0
+
+
+def cmd_policy(args):
+    c = Ctx()
+    change = {k: v for k, v in (("quorum", args.quorum), ("verifier_trust", args.verifier_trust),
+                                ("spot_check", args.spot_check)) if v is not None}
+    if change:
+        c.require_integrator()
+        c.emit("project.policy", **change)
+        c.sync()
+    p = c.st.policy
+    out(args, p, f"Verification: a patch is accepted without the integrator's check when {p['quorum']} trusted "
+                 f"people verify it (trust {p['verifier_trust']} or more); the integrator still checks "
+                 f"{p['spot_check']:.0%} of those itself." if p["quorum"] else
+                 "Verification by other nodes is off: the integrator checks every patch.")
+
+
 def cmd_note(args):
     c = Ctx()
     t = c.task(args.task)
@@ -1038,16 +1077,23 @@ def cmd_integrate(args):
     deadline = time.time() + args.timeout
     last_status, last_role = None, None
     log = lambda m: print(m, flush=True)  # noqa: E731
-    integrator.beat = lambda: integrator.hold_lease(c, args.lease)  # keeps the lease through long checks
+    integrator.beat = lambda: integrator.keep_leases(c, args.lease)  # keeps the leases through long checks
+    integrator.BEAT_EVERY = max(1, min(30, args.lease // 3))  # often enough for a short lease not to lapse
     try:
         while True:
             try:
                 leading, who = integrator.hold_lease(c, args.lease)
-                role = "lead" if leading else f"standby:{who}"
+                # Not the lead: take the subtrees with work waiting that nobody holds, instead of only waiting.
+                shards = [] if leading else integrator.hold_shards(c, args.lease, args.shards)
+                keys = ", ".join(c.st.tasks[r].key for r in shards)
+                role = "lead" if leading else f"standby:{who}:{keys}"
                 if role != last_role:  # say it once when the role changes, not on every pass
                     log("Holding the integration lease: integrating." if leading
+                        else f"{who} holds the integration lease; integrating {keys} meanwhile." if shards
                         else f"{who} holds the integration lease; standing by to take over if it goes quiet.")
                     last_role = role
+                if shards:
+                    integrator.integrate_once(c, args.cmd_timeout, log=log, keep_branches=args.keep_branches)
                 if leading:
                     integrator.integrate_once(c, args.cmd_timeout, log=log, keep_branches=args.keep_branches)
                     if not args.no_status:
@@ -1227,6 +1273,18 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--notes", required=True)
     s.set_defaults(func=cmd_report)
 
+    s = sub.add_parser("verify", help="check a patch the integrator will review, and sign the result")
+    s.add_argument("--timeout", type=int, default=1800, help="seconds the check may take")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_verify)
+
+    s = sub.add_parser("policy", help="show, or set (integrator), how verification by other nodes works")
+    s.add_argument("--quorum", type=int, help="trusted verifications that let a patch in unchecked (0: off)")
+    s.add_argument("--verifier-trust", type=int, help="trust score a verifier needs to count")
+    s.add_argument("--spot-check", type=float, help="share of verified patches the integrator checks anyway")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_policy)
+
     s = sub.add_parser("note", help="talk with the other agents on a task: post a note, or read them")
     s.add_argument("task")
     s.add_argument("text", nargs="?", help="what to tell them; without it, shows the task's notes")
@@ -1276,6 +1334,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--reviewers", type=int, default=integrator.REVIEWERS,
                    help="patches checked at once, as a merge queue (default 2, or LEGION_REVIEWERS); each one "
                         "runs the task's acceptance command, so mind the memory a check needs")
+    s.add_argument("--shards", type=int, default=1,
+                   help="when another integrator holds the project's lease, how many subtrees (top-level tasks) "
+                        "with work waiting to take on meanwhile (default 1; 0 just stands by)")
     s.add_argument("--fresh", action="store_true",
                    help="check every patch in an empty folder instead of each reviewer's own, which keeps its "
                         "builds between checks (or LEGION_FRESH_REVIEWS=1)")

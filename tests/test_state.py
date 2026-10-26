@@ -422,3 +422,42 @@ def test_a_blocked_task_someone_prepares_can_be_joined():
     b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true", deps=[a]))
     log.add(ANA, "task.claimed", task=b, ttl=600)
     assert [t.id for t in log.state().joinable(BEA.author, 1001)] == [b]
+
+
+TREE_A, TREE_B = "a" * 40, "b" * 40
+
+
+def test_verifications_follow_their_rules():
+    log, tid = project()
+    p = log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/t/a-1")
+    ok = dict(task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+    log.add(BEA, "patch.verified", **ok)
+    log.add(BEA, "patch.verified", **ok)                       # twice on the same tree
+    log.add(ANA, "patch.verified", **ok)                       # its own patch
+    log.add(CEL, "patch.verified", **dict(ok, outcome="maybe"))
+    log.add(CEL, "patch.verified", **dict(ok, tree="not-a-tree"))
+    log.add(BOSS, "project.policy", quorum=3, spot_check=0.5)
+    log.add(BOSS, "project.policy", quorum=99)
+    log.add(ANA, "project.policy", quorum=0)
+    st = log.state()
+    assert [v["author"] for v in st.verifications[p["id"]]] == [BEA.author]
+    assert st.policy == dict(S.POLICY, quorum=3, spot_check=0.5)
+    assert [why for _, why in st.ignored] == [
+        "already verified on that tree", "a patch can't be verified by its own author", "outcome must be pass or fail",
+        "base_tree and tree must be git tree ids", "quorum must be between 0 and 9",
+        "only an integrator can publish this event"]
+
+
+def test_a_subtree_lease_takes_its_tasks_from_the_project_lease():
+    log, tid = project()
+    other = S.task_id(log.add(BOSS, "task.created", key="o", title="O", zone=["o"], accept="true"))
+    log.add(BOSS, "integrator.vote", action="add", key=ANA.author)
+    log.add(BOSS, "integrator.lease", ttl=300)
+    log.add(ANA, "integrator.lease", ttl=300, shard=tid)
+    st = log.state()
+    assert st.integrates(ANA.author, tid, 1001) and not st.integrates(BOSS.author, tid, 1001)
+    assert st.integrates(BOSS.author, other, 1001) and not st.integrates(ANA.author, other, 1001)
+    log.add(ANA, "integrator.release", project_lease=True)  # it held no project lease: its subtree stays
+    assert log.state().integrates(ANA.author, tid, 1001)
+    log.add(ANA, "integrator.release", shard=tid)
+    assert log.state().integrates(BOSS.author, tid, 1001)
