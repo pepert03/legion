@@ -177,6 +177,31 @@ const isIntegrator = (a) => a.role === "integrator";
 // Logos from Lobe Icons (lobehub/lobe-icons). A local file in .legion/logos/<kind>.svg wins, and
 // legion ships Muse and Instinct, which that collection lacks.
 const LOBE = "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.95.1/icons/";
+
+// The page talks to `legion viz`. With ?demo=FILE it replays a recorded run from a static file instead (the
+// landing page uses that), and with &autoplay=1 it plays it on a loop.
+const PARAMS = new URLSearchParams(location.search);
+const DEMO = PARAMS.get("demo"), AUTOPLAY = PARAMS.get("autoplay") === "1";
+let demoRun = null;
+async function api(path, params = {}) {
+  if (!DEMO) {
+    const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
+    const res = await fetch(`/${path}${q ? `?${q}` : ""}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+  demoRun = demoRun || await (await fetch(DEMO)).json();
+  if (path === "state.json") {  // the recorded snapshot at or just before that point
+    const upto = params.upto == null ? demoRun.total : params.upto;
+    const snap = demoRun.snapshots.filter((x) => x.index <= upto).pop() || demoRun.snapshots[0];
+    return { ...snap, live: params.upto == null };
+  }
+  if (path === "timeline.json") return demoRun.timeline;
+  if (path === "logos.json") return Object.keys(demoRun.logos || {});
+  if (path === "history.json") return demoRun.history[params.node] || [];
+  return [];
+}
+const logoUrl = (kind) => (DEMO ? (demoRun && demoRun.logos || {})[kind] : `/logo/${kind}`);
 const KIND_LOGO = {
   claude: "claude-color", codex: "codex-color", openai: "openai", deepseek: "deepseek-color", gemini: "gemini-color",
   cursor: "cursor", opencode: "opencode", qwen: "qwen-color", kimi: "kimi-color", mistral: "mistral-color",
@@ -215,7 +240,7 @@ function loadLogo(kind) {
     img.onerror = () => tryUrl(urls.slice(1));
     img.src = urls[0];
   };
-  tryUrl([...(localLogos.has(kind) ? [`/logo/${kind}`] : []), ...(KIND_LOGO[kind] ? [`${LOBE}${KIND_LOGO[kind]}.svg`] : [])]);
+  tryUrl([...(localLogos.has(kind) ? [logoUrl(kind)] : []), ...(KIND_LOGO[kind] ? [`${LOBE}${KIND_LOGO[kind]}.svg`] : [])]);
 }
 // The agent's disc: paper, a hairline and the logo; without a logo, the initial in LaTeX italic.
 const discs = new Map();
@@ -534,8 +559,7 @@ function viewLog() {
 }
 
 async function history(id) {
-  const q = data.live ? "" : `&upto=${data.index}`;
-  return (await fetch(`/history.json?node=${encodeURIComponent(id)}${q}`)).json();
+  return api("history.json", { node: id, upto: data.live ? null : data.index });
 }
 
 function trustBlock(a) {
@@ -724,14 +748,13 @@ function renderTimeline() {
 // ---------------------------------------------------------------------------------------------
 let lastIndex = -1, lastLive = null;
 async function load(upto) {
-  const res = await fetch(`/state.json${upto == null ? "" : `?upto=${upto}`}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  data = await res.json();
+  data = await api("state.json", { upto });
+  if (DEMO && !userMoved) { clearTimeout(load.fitTimer); load.fitTimer = setTimeout(() => fit(700), 600); }
   $("notice").style.display = data.project ? "none" : "block";
   $("notice").textContent = "This repository has no legion project yet.";
   applySnapshot(data);
   renderTitle(data);
-  if (data.total !== marksTotal) { marksTotal = data.total; marks = await (await fetch("/timeline.json")).json(); }
+  if (data.total !== marksTotal) { marksTotal = data.total; marks = await api("timeline.json"); }
   renderTimeline();
   if (data.index !== lastIndex || data.live !== lastLive) renderPop();
   lastIndex = data.index; lastLive = data.live;
@@ -747,7 +770,11 @@ function play() {
   playTimer = setInterval(() => {
     const next = marks.find((m) => m.i > i);
     i = next ? next.i : (data ? data.total : 0);
-    if (!data || i >= data.total) return goLive();
+    if (!data || i >= data.total) {
+      goLive();
+      if (AUTOPLAY) setTimeout(() => { seek(0); setTimeout(play, 1200); }, 5000);  // and again, on a loop
+      return;
+    }
     load(i).catch(() => {});
   }, 900);
   renderTimeline();
@@ -761,7 +788,7 @@ async function init() {
     return;
   }
   try { await Promise.all([document.fonts.load(`12px ${SERIF}`), document.fonts.load(`italic 12px ${SERIF}`)]); } catch {}
-  try { localLogos = new Set(await (await fetch("/logos.json")).json()); } catch {}
+  try { localLogos = new Set(await api("logos.json")); } catch {}
   const el = $("graph"), tip = $("tip");
   Graph = ForceGraph()(el)
     .backgroundColor("rgba(0,0,0,0)")
@@ -862,6 +889,7 @@ async function init() {
   try {
     await load(null);
     for (const [ms, anim] of [[300, 0], [1500, 600], [3500, 800]]) setTimeout(() => !userMoved && fit(anim), ms);
+    if (AUTOPLAY) setTimeout(() => { seek(0); setTimeout(play, 1200); }, 2500);
   } catch (e) {
     $("notice").style.display = "block"; $("notice").textContent = `Couldn't read the state: ${e.message}`;
   }

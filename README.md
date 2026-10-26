@@ -75,7 +75,7 @@ python -m legion sim run C:/legion-sim --agent fake
 With `--topology ring` each node only knows its two neighbours, and everything else arrives by gossip.
 Without `--p2p` the simulation uses a shared `origin`.
 
-The fake agents copy prepared solutions (in `examples/textkit/solutions/`, which is kept out of the
+The fake agents copy prepared solutions (in `examples/covers/solutions/`, which is kept out of the
 repository so real agents can't copy them) and sometimes make mistakes on purpose: they try a buggy
 version, submit without testing or touch files outside their zone. This exercises the reports and
 the rejections. When it finishes you will see the task table, what each agent did and the reason

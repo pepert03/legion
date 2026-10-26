@@ -39,7 +39,7 @@ def add_parser(sub) -> None:
     i = ssub.add_parser("init", help="create the integrator and the agents' clones")
     i.add_argument("dir")
     i.add_argument("--agents", type=int, default=3)
-    i.add_argument("--example", default="textkit")
+    i.add_argument("--example", default="covers")
     i.add_argument("--force", action="store_true", help="replace a previous simulation in the same directory")
     i.add_argument("--remote", help="URL of an empty repository (on GitHub, for instance) to act as origin")
     i.add_argument("--people", default="ana,luis,marta",
