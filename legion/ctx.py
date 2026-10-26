@@ -24,8 +24,8 @@ def repo_root() -> Path:
     return Path(p.stdout.strip())
 
 
-def need_identity() -> Identity:
-    ident = Identity.load()
+def need_identity(repo=None) -> Identity:
+    ident = Identity.load(repo=repo)
     if not ident:
         raise Fail("you have no identity: python -m legion id new --name YOUR_NAME")
     return ident
@@ -34,7 +34,7 @@ def need_identity() -> Identity:
 class Ctx:
     def __init__(self, sync: bool = True):
         self.repo = repo_root()
-        self.ident = need_identity()
+        self.ident = need_identity(self.repo)
         self.unreachable: list[str] = []
         if sync:
             self.sync()

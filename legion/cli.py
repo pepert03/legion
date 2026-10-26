@@ -19,6 +19,7 @@ from . import integrator
 from . import state as S
 from .coordgit import git
 from .ctx import Ctx, Fail, need_identity, repo_root
+from . import identity
 from .identity import Identity, home
 
 TEMPLATES = Path(__file__).parent / "templates"
@@ -131,18 +132,70 @@ def status_table(st: S.State, now: float) -> str:
 # --- identity and project ------------------------------------------------------------------
 
 
+def current_repo() -> Path | None:
+    p = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return Path(p.stdout.strip()) if p.returncode == 0 else None
+
+
+def pick_identity(ref: str) -> Identity:
+    matches = identity.find(ref)
+    if len(matches) != 1:
+        known = ", ".join(f"{i.name} ({i.key_id})" for i in identity.all_identities()) or "none"
+        raise Fail(f"{'no identity' if not matches else 'several identities'} match {ref!r}; known: {known}")
+    return matches[0]
+
+
+def bind_here(repo: Path, ident: Identity, force: bool) -> None:
+    """Bind a repository to an identity, unless it's already bound to another one (then only with --force)."""
+    current = identity.bound_id(repo)
+    if current and current != ident.key_id and not force:
+        other = Identity.load(repo=repo)
+        raise Fail(f"this repository already works as {other.name if other else current} ({current}): "
+                   "each repository keeps its identity. Use --force to switch (the old key stays in "
+                   f"{identity.identities_dir()})")
+    identity.bind(repo, ident)
+
+
 def cmd_id(args):
+    repo = current_repo()
     if args.action == "new":
-        if Identity.load() and not args.force:
-            raise Fail(f"you already have an identity in {home()}; use --force to replace it")
         if not args.name:
             raise Fail("give your name with --name")
         # A person can run several agents: each has its own identity, named name#number.
         ident = Identity.generate(f"{args.name}#{args.number}" if args.number else args.name)
-        path = ident.save()
-        print(f"Identity created: {ident.name} ({ident.short}) in {path}")
+        if repo:
+            bind_here(repo, ident, args.force)
+            where = f"for this repository ({repo.name})"
+        else:  # not in a project yet: the next `legion join` uses it
+            ident.save()
+            (home() / "next-identity").write_text(ident.key_id, encoding="utf-8")
+            where = "for the next project you join"
+        if not (home() / "identity.json").exists():
+            ident.save(home() / "identity.json")  # the default, for repositories bound to nothing
+        print(f"Identity created: {ident.name} ({ident.short}), {where}. Kept in {identity.identities_dir()}")
+    elif args.action == "list":
+        mine = identity.bound_id(repo) if repo else None
+        default = Identity.load(home() / "identity.json")
+        for i in identity.all_identities():
+            marks = [m for m, on in (("this repository", i.key_id == mine),
+                                     ("default", default and default.author == i.author)) if on]
+            print(f"{i.key_id}  {i.name}" + (f"  ({', '.join(marks)})" if marks else ""))
+    elif args.action == "use":
+        if not repo or not args.ref:
+            raise Fail("inside a repository: legion id use NAME_OR_KEY")
+        ident = pick_identity(args.ref)
+        bind_here(repo, ident, args.force)
+        print(f"This repository now works as {ident.name} ({ident.short}).")
+    elif args.action == "import":
+        if not args.ref:
+            raise Fail("legion id import FILE (an identity.json)")
+        ident = Identity.load(Path(args.ref))
+        if not ident:
+            raise Fail(f"no identity in {args.ref}")
+        ident.save()
+        print(f"Imported {ident.name} ({ident.key_id}). Bind a repository to it with `legion id use {ident.key_id}`.")
     else:
-        ident = need_identity()
+        ident = need_identity(repo)
         out(args, {"name": ident.name, "author": ident.author}, f"{ident.name}  {ident.author}")
 
 
@@ -166,7 +219,8 @@ def cmd_describe(args):
 
 
 def cmd_init(args):
-    repo, ident = repo_root(), need_identity()
+    repo = repo_root()
+    ident = need_identity(repo)
     coordgit.sync(repo, ident)
     if coordgit.state(repo).project:
         raise Fail("this repository already has a legion project")
@@ -180,6 +234,7 @@ def cmd_init(args):
         extra["runners"] = S.DEFAULT_RUNNERS + [r.strip() for r in args.runner]
     ev = E.create(ident, "project.init", 1, project=name, integrators=[ident.author], **extra)
     coordgit.append(repo, ident, ev)
+    identity.bind(repo, ident)  # whatever identity an agent creates later, this repository stays the integrator's
     coordgit.sync(repo, ident)
     agents = repo / "AGENTS.md"
     if not agents.exists():
@@ -256,7 +311,8 @@ def cmd_radicle(args):
             seeds = [l for l in status.splitlines() if "✓" in l and ":8776" in l]
             print(f"Connected to {len(seeds)} seed(s)." if seeds else "Not connected to any seed yet (give it a minute).")
             return
-        repo, ident = repo_root(), need_identity()
+        repo = repo_root()
+        ident = need_identity(repo)
         if args.action == "init":
             st = coordgit.state(repo)
             if not st.project:
@@ -342,19 +398,27 @@ def cmd_join(args):
     dest = Path(args.dir or default).resolve()
     if dest.exists() and any(dest.iterdir()):
         raise Fail(f"{dest} already exists and is not empty")
-    ident = Identity.load()
-    if not ident:
-        if not args.name:
-            raise Fail("you don't have an identity yet: run the command again with --name YOUR_NAME")
-        ident = Identity.generate(args.name)
-        ident.save()
-        print(f"Identity created: {ident.name} ({ident.short}) in {home()}")
+    # Each clone gets its own identity, so agents sharing a computer never share (or replace) one.
+    nxt = home() / "next-identity"
+    if args.name:
+        ident = Identity.generate(f"{args.name}#{args.number}" if args.number else args.name)
+        print(f"Identity created for this clone: {ident.name} ({ident.short})")
+    elif args.identity:
+        ident = pick_identity(args.identity)
+    elif nxt.exists() and (picked := identity.find(nxt.read_text(encoding="utf-8").strip())):
+        ident = picked[0]  # the one `legion id new` just made
+        nxt.unlink()
+    else:
+        ident = Identity.load()
+        if not ident:
+            raise Fail("say who you are: --name YOUR_NAME (and --number N if you run several agents)")
     if url.startswith("rad:"):
         join_radicle(args, ident, dest)
     else:
         p = coordgit.run(Path.cwd(), "clone", "-q", *coordgit.CLONE_CONFIG, url, str(dest))
         if p.returncode:
             raise Fail(f"couldn't clone {url}: {p.stderr.decode('utf-8', 'replace').strip()}")
+    identity.bind(dest, ident)
     if args.p2p and not url.startswith("rad:"):  # whoever gave you the URL becomes your first peer
         coordgit.git(dest, "remote", "rename", "origin", args.peer_name)
         coordgit.git(dest, "config", "--add", "legion.peer", args.peer_name)
@@ -528,7 +592,7 @@ def cmd_peer(args):
         if not args.name or not args.url:
             raise Fail("usage: python -m legion peer add NAME URL")
         coordgit.add_peer(repo, args.name, args.url)
-        ident = need_identity()
+        ident = need_identity(repo)
         failed = coordgit.sync(repo, ident)
         state = "no answer for now" if args.name in failed else "synced"
         print(f"Peer {args.name} added ({args.url}): {state}.")
@@ -553,7 +617,7 @@ def cmd_serve(args):
     host = args.host or socket.gethostname()
     url = f"git://{host}:{args.port}/{repo.name}" if args.port != 9418 else f"git://{host}/{repo.name}"
     print(f"Serving {repo} read-only.\nYour peers add you with:\n\n"
-          f"  python -m legion peer add {need_identity().name} {url}\n\n"
+          f"  python -m legion peer add {need_identity(repo).name} {url}\n\n"
           "Nobody can write to your repository: every peer only reads. No encryption or authentication,\n"
           "so use it on a network you trust (your LAN or Tailscale). Ctrl+C to stop.", flush=True)
     cmd = ["git", "daemon", "--reuseaddr", "--informative-errors", f"--port={args.port}",
@@ -936,7 +1000,10 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("id", help="create or show your identity")
-    s.add_argument("action", choices=["new", "show"])
+    s.add_argument("action", choices=["new", "show", "list", "use", "import"],
+                   help="new: create one (bound to this repository, if you're in one); show; list; "
+                        "use NAME_OR_KEY: bind this repository to an existing identity; import FILE")
+    s.add_argument("ref", nargs="?", help="for use: a name or key; for import: a file")
     s.add_argument("--name", help="your name")
     s.add_argument("--number", type=int, help="this agent's number, if you run several (stored as name#number)")
     s.add_argument("--force", action="store_true")
@@ -960,7 +1027,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("join", help="clone a legion project and get it ready for your agent")
     s.add_argument("url")
     s.add_argument("dir", nargs="?")
-    s.add_argument("--name", help="your name, if you don't have an identity yet")
+    s.add_argument("--name", help="your name: this clone gets a new identity of its own")
+    s.add_argument("--number", type=int, help="this agent's number, if you run several (name#number)")
+    s.add_argument("--identity", help="use this existing identity (a name or key) instead of a new one")
     s.add_argument("--p2p", action="store_true", help="join without a central server: the URL becomes your first peer")
     s.add_argument("--peer-name", default="seed", help="name for that first peer (default: seed)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")

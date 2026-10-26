@@ -111,8 +111,8 @@ and the Latin Modern typeface. It refreshes on its own every few seconds.
   see what happened; click or drag to go to that moment. *▸ replay* plays through it on its own and
   *back to now* returns to the present, marked *now*. Also from the keyboard: space, ← and →.
 
-To have each agent carry its owner's name, create its identity with
-`legion id new --name ana --number 2` (it becomes `ana#2`). In the simulation, `--people jose,ana,luis`
+To have each agent carry its owner's name, join with `--name ana --number 2` (its identity becomes
+`ana#2`). In the simulation, `--people jose,ana,luis`
 spreads the agents among those people.
 
 **Logos**: they come from [Lobe Icons](https://github.com/lobehub/lobe-icons) according to the agent
@@ -268,11 +268,12 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 
 | Command | What for |
 |---|---|
-| `join <url> [--p2p]` | clone a project, create your identity, get it ready for your agent and open the live graph (`--no-viz` to skip) |
+| `join <url> [--p2p] --name N [--number K]` | clone a project, give the clone its own identity (or `--identity` to reuse one), get it ready for your agent and open the live graph (`--no-viz` to skip) |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |
-| `id new / show` | create or show your identity (Ed25519 key in `~/.legion`, or in `LEGION_HOME`) |
+| `id new / show / list` | create, show or list identities (Ed25519 keys, one file each in `~/.legion/identities`, or in `LEGION_HOME`); `new` inside a repository binds it |
+| `id use <name or key>` / `id import <file>` | bind this repository to an existing identity / add one from a file. Each repository keeps its own: switching needs `--force` |
 | `init` | initialize the project; whoever does it is the integrator |
 | `describe [text] [--description-file F]` | show, or set (integrator), what the project is about; agents see it in `context` and the viewer on the central node |
 | `update` | update legion itself; agents do it on their own at `join` and `context` (`LEGION_NO_UPDATE=1` to skip) |
