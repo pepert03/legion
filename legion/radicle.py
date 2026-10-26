@@ -449,14 +449,14 @@ def fetch_all(repo) -> list[str]:
 
 def publish_specs(repo, who: str) -> list[str]:
     """The refspecs that push this repository's legion refs under its identity's own prefix."""
-    specs = []
-    for prefix, dest in (("refs/legion/pub/", f"refs/legion/pub/{who}/"),
-                         ("refs/legion/patches/", "refs/legion/patches/")):
-        has = subprocess.run(["git", "for-each-ref", "--count=1", "--format=x", prefix], cwd=repo,
-                             capture_output=True, text=True).stdout.strip()
-        if has:  # a pattern that matches nothing makes the whole push fail
-            specs.append(f"{prefix}*:{dest}*")
-    return specs
+    def listed(prefix):
+        return subprocess.run(["git", "for-each-ref", "--format=%(refname)", prefix], cwd=repo,
+                              capture_output=True, text=True).stdout.split()
+
+    specs = [f"refs/legion/pub/*:refs/legion/pub/{who}/*"] if listed("refs/legion/pub/") else []
+    # Patches by name, not with a pattern: judged ones are deleted as they go, and on Windows the git in WSL
+    # can still see a just-deleted ref file under /mnt/c, expand the pattern to it and fail the whole push.
+    return specs + [f"{ref}:{ref}" for ref in listed("refs/legion/patches/")]
 
 
 def publish_main(repo) -> None:
@@ -475,6 +475,6 @@ def publish(repo, who: str) -> None:
     """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
     the node announces them to the network."""
     specs = publish_specs(repo, who)
-    if specs:
-        rgit(repo, "push", "-q", "--force", "rad", *specs, timeout=120)
+    for i in range(0, len(specs), 200):  # keeps the command line short with many patches
+        rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=120)
     publish_main(repo)

@@ -34,9 +34,16 @@ STANDARD = {"propext", "Classical.choice", "Quot.sound"}
 SHARED = Path(os.environ.get("LEGION_LEAN_PACKAGES", Path.home() / ".legion" / "lean-packages" / "erdos902"))
 
 
+_packages_ready = False
+
+
 def ensure_packages():
     """Mathlib, already built, for this copy of the project. The integrator checks patches in fresh copies,
     which have no .lake/: link it to a shared one instead of downloading gigabytes for every review."""
+    global _packages_ready
+    if _packages_ready:
+        return
+    _packages_ready = True
     packages = ROOT / ".lake" / "packages"
     if (packages / "mathlib").exists():
         if not SHARED.exists():  # the first copy on this machine that has it shares it with the rest
@@ -66,6 +73,7 @@ def lake(*args, timeout=3600):
 
 
 def lean_file(text):
+    ensure_packages()
     d = ROOT / ".lake" / "legion-check"
     d.mkdir(parents=True, exist_ok=True)
     path = d / "Check.lean"
@@ -75,6 +83,7 @@ def lean_file(text):
 
 
 def build(module):
+    ensure_packages()  # sketches' tests call this directly: without it, lake builds Mathlib from source
     p = lake("build", module)
     if p.returncode:
         out = (p.stdout + p.stderr).strip().splitlines()

@@ -950,6 +950,7 @@ def cmd_integrate(args):
     deadline = time.time() + args.timeout
     last_status, last_role = None, None
     log = lambda m: print(m, flush=True)  # noqa: E731
+    integrator.beat = lambda: integrator.hold_lease(c, args.lease)  # keeps the lease through long checks
     try:
         while True:
             try:

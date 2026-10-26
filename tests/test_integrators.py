@@ -127,3 +127,14 @@ def test_scratch_copies_are_removed_without_following_links(tmp_path):
     remove_tree(scratch)
     assert not scratch.exists()
     assert (shared / "precious.txt").read_text() == "keep me"
+
+
+def test_a_long_check_keeps_the_lease_beating(monkeypatch):
+    from legion import integrator
+    beats = []
+    monkeypatch.setattr(integrator, "BEAT_EVERY", 0.2)
+    monkeypatch.setattr(integrator, "beat", lambda: beats.append(1))
+    code, out = integrator.run_cmd('python -c "import time; time.sleep(1); print(42)"', ".", 30)
+    assert (code, out.strip()) == (0, "42") and len(beats) >= 3
+    code, out = integrator.run_cmd('python -c "import time; time.sleep(5)"', ".", 1)
+    assert code is None and "timed out" in out

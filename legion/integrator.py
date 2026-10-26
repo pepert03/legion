@@ -30,15 +30,32 @@ def tail(text: str, n: int = 15) -> str:
 PYTHON = re.compile(r"^(python3?|py)(?=\s|$)")
 
 
+# Called every BEAT_EVERY seconds while a check runs, so a long one (a Lean build takes minutes) doesn't let
+# the integration lease expire: `legion integrate` sets it to renew the lease.
+beat = None
+BEAT_EVERY = 30
+
+
 def run_cmd(cmd: str, cwd, timeout: int) -> tuple[int | None, str]:
     # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
     cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', cmd.strip(), count=1)
-    try:
-        p = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, timeout=timeout,
-                           encoding="utf-8", errors="replace")
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return None, f"timed out ({timeout}s)"
+    p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         encoding="utf-8", errors="replace")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            out, err = p.communicate(timeout=max(0.1, min(BEAT_EVERY, deadline - time.time())))
+            return p.returncode, (out or "") + (err or "")
+        except subprocess.TimeoutExpired:
+            if time.time() >= deadline:
+                p.kill()
+                p.communicate()
+                return None, f"timed out ({timeout}s)"
+            if beat:
+                try:
+                    beat()
+                except Exception:  # noqa: BLE001 - a failed renewal is retried on the next beat
+                    pass
 
 
 def measure(cmd: str, cwd, timeout: int) -> tuple[float | None, str]:
