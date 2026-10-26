@@ -191,3 +191,14 @@ def test_a_standby_integrator_takes_a_subtree(project, monkeypatch):
     integrator.integrate_once(as_(repo, "luis"), 60, log=[].append)
     assert verdicts(tids)[mine] == ["accepted"]
     assert integrator.hold_shards(as_(repo, "luis"), 300, 1) == []  # nothing left there: handed back
+
+
+def test_a_verified_patch_goes_in_before_a_sketch_moves_main(project):
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    for who in ("luis", "marta"):
+        integrator.verify_one(as_(repo, who), 60)
+    c = as_(repo, "boss")
+    c.emit("project.policy", spot_check=0)
+    assert integrator.accept_verified(c, [].append, False, lambda tid: True) == 1  # before anything moves main
+    assert verdicts(tids)["a"] == ["accepted"] and runs(repo, "0") == 0

@@ -500,7 +500,7 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
     if c.st.leader(time.time()) and c.st.leader(time.time()).author == c.me:
         finish_interrupted(c, log)
     mine = lambda tid: c.st.integrates(c.me, tid, time.time())  # noqa: E731 - its subtrees, or all the others
-    done = 0
+    done = accept_verified(c, log, keep_branches, mine)
     sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None and mine(k.task)),
                       key=lambda k: (k.lamport, k.id))
     for k in sketches:
@@ -654,6 +654,29 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
         c.sync()
         return job, outcome
     return None
+
+def accept_verified(c: Ctx, log, keep_branches: bool, mine) -> int:
+    """First of all, the patches at the front of the queue that a quorum already verified on this very main:
+    they go in at once, with no check. Anything else first (a sketch merging its scaffold, say) would move main
+    and leave those verifications stale."""
+    done = 0
+    while True:
+        c.reload()
+        front = next((p for p in queue_order(c.st) if mine(p.task)), None)
+        if front is None:
+            return done
+        try:
+            job = plan(c, front)
+        except coordgit.GitError:
+            return done
+        vs = quorum(c, job, time.time()) if isinstance(job, Job) else None
+        if not vs:
+            return done  # it needs a check (or a spot check): the queue gets to it in its turn
+        log(f"patch {front.id[:8]} verified by {', '.join(v['name'] for v in vs)}: no check needed here")
+        if not publish_verdict(c, front, decide(c, job, verified_result(job, vs)), log, keep_branches):
+            return done
+        done += 1
+
 
 def queue_order(st: S.State) -> list[S.Patch]:
     """The patches waiting for a verdict, in the order the queue takes them: every node works it out the same
