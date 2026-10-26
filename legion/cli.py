@@ -798,17 +798,32 @@ def cmd_report(args):
     print(f"Next: {KEEP_GOING}")
 
 
+def need_git_merge_tree() -> None:
+    """Merging a patch the way the integrator does needs `git merge-tree --write-tree`, git 2.38 or later."""
+    out_ = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    found = re.search(r"(\d+)\.(\d+)", out_)
+    if not found or (int(found[1]), int(found[2])) < (2, 38):
+        raise Fail(f"this needs git 2.38 or later to merge patches as the integrator does, and this is "
+                   f"{out_.strip() or 'no git'}: install a newer git (git-scm.com) and run it again")
+
+
 def cmd_verify(args):
     """Check one patch the integrator will review, the way it will, and sign the result: with enough of these
     from trusted people it accepts the patch without checking it itself."""
+    need_git_merge_tree()
     c = Ctx()
     now = time.time()
     by_agent, _ = trust.compute(c.st, now)
     mine = by_agent.get(c.me) or trust.Trust()
     counts = c.me in integrator.trusted_verifiers(c.st, now)
-    done = integrator.verify_one(c, args.timeout)
+    why = {}
+    done = integrator.verify_one(c, args.timeout, why=why)
     if done is None:
-        out(args, {"verified": None}, "No patch needs verifying right now.")
+        waiting = why.pop("waiting", 0)
+        detail = "; ".join(f"{n} {reason}" for reason, n in why.items())
+        out(args, {"verified": None, "waiting": waiting, "skipped": why},
+            "No patch needs verifying right now: " + (f"{waiting} waiting for a verdict, passed over: {detail}."
+                                                       if waiting else "none is waiting for a verdict."))
         return 0
     job, outcome = done
     note = "" if counts else (f" Your verifications don't count towards a quorum yet (trust {mine.score}, "

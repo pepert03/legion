@@ -61,8 +61,10 @@ run the command again. Legion keeps working with the local state and publishes o
    integrator's queue that still needs it, exactly as the integrator would, and signs the result.
    When enough trusted agents verify a patch, the integrator accepts it without checking it again,
    so this is what keeps the project from waiting on a single machine. Verify honestly: the
-   integrator re-checks a share of them, and a false pass costs a lot of trust. If it says there's
-   nothing to verify, carry on.
+   integrator re-checks a share of them, and a false pass costs a lot of trust. A check takes as
+   long as the task's acceptance command (minutes, in a Lean project): if your tool cuts commands
+   off after a time limit, run it in the background or give it a longer limit. If it says there's
+   nothing to verify (it says why), carry on.
 10. **Go straight back to step 1.** Don't wait for the integrator's verdict, and don't poll for it: it
    arrives while you work on the next task, and `context` shows it to you. `claim` won't give you the
    same task again while your patch waits.

@@ -607,13 +607,18 @@ def handler(st: S.State, tid: str, now: float) -> str | None:
     return holder.author if holder else None
 
 
-def verify_one(c: Ctx, timeout: int, depth: int = 8) -> tuple[Job, str] | None:
+def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) -> tuple[Job, str] | None:
     """Check, the way the integrator will, the first patch in the queue that still lacks verifications, and
     sign the result. Patches are stacked as each integrator stacks them (one queue per integrator, following
-    the leases), so the trees match when the integrator gets there. None if there's nothing to verify."""
+    the leases), so the trees match when the integrator gets there. None if there's nothing to verify; `why`
+    then counts the patches waiting and the reasons each one was passed over."""
     now = time.time()
+    why = {} if why is None else why
+    skip = lambda reason: why.__setitem__(reason, why.get(reason, 0) + 1)  # noqa: E731
     stacks: dict = {}
-    for p in queue_order(c.st):
+    queue = queue_order(c.st)
+    why["waiting"] = len(queue)
+    for p in queue:
         stack = stacks.setdefault(handler(c.st, p.task, now), {"jobs": [], "onto": None})
         if len(stack["jobs"]) >= depth or any(j.patch.task == p.task for j in stack["jobs"]):
             continue
@@ -621,16 +626,26 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8) -> tuple[Job, str] | None:
         if isinstance(planned, Job):
             stack["jobs"].append(planned)
             stack["onto"] = planned.merged
+        else:
+            skip("not ready here yet (its commit or main hasn't reached this clone)" if planned is None
+                 else "the integrator will reject it anyway")
     ok, need = trusted_verifiers(c.st, now), c.st.policy["quorum"]
     order = [j for i in range(depth) for s in stacks.values() if i < len(s["jobs"]) for j in [s["jobs"][i]]]
     for job in order:
         vs = c.st.verifications.get(job.patch.id, [])
-        if job.patch.author == c.me or job.baseline or any(
-                v["author"] == c.me and v["base_tree"] == job.base_tree for v in vs):
+        if job.patch.author == c.me:
+            skip("yours")
+            continue
+        if job.baseline:
+            skip("a competitive task's first result: the integrator measures it itself")
+            continue
+        if any(v["author"] == c.me and v["base_tree"] == job.base_tree for v in vs):
+            skip("already verified by you")
             continue
         have = {trust.owner_of(v["name"]) for v in vs if v["outcome"] == "pass" and v["author"] in ok
                 and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)}
         if len(have) >= max(1, need):
+            skip("verified enough already")
             continue
         code, out, value = check(c.repo, job, "verify", timeout)[:3]
         outcome = "pass" if code == 0 and (not job.task.metric or value is not None) else "fail"
