@@ -817,7 +817,15 @@ def cmd_verify(args):
     mine = by_agent.get(c.me) or trust.Trust()
     counts = c.me in integrator.trusted_verifiers(c.st, now)
     why = {}
-    done = integrator.verify_one(c, args.timeout, why=why)
+    try:
+        done = integrator.verify_one(c, args.timeout, why=why)
+    except Fail as e:
+        if "already verified on that tree" not in str(e):
+            raise
+        # Another process with this identity (a subagent sharing the clone) signed the same check first.
+        out(args, {"verified": None, "duplicate": True},
+            "Another process working as you verified that patch first; nothing to add.")
+        return 0
     if done is None:
         waiting = why.pop("waiting", 0)
         detail = "; ".join(f"{n} {reason}" for reason, n in why.items())
