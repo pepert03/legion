@@ -34,8 +34,7 @@ class Source:
 
     def refresh(self) -> None:
         try:
-            raw = coordgit.view_events(self.repo, fetch=self.fetch)
-            self.events = S.build(raw).events  # only the valid ones, already sorted
+            self.events = coordgit.view_state(self.repo, fetch=self.fetch).events  # only valid ones, sorted
         except coordgit.GitError:
             pass  # keep showing the last thing that could be read
 
@@ -53,7 +52,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     from .cli import describe, event_text
     live = upto is None or upto >= len(events)
     evs = events if live else events[:max(upto, 0)]
-    st = S.build(evs)
+    st = S.build(evs, trusted=True)  # already validated by the Source
     now = time.time() if live else (evs[-1]["ts"] if evs else 0)
 
     tasks = []
@@ -137,7 +136,7 @@ ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: 
 
 def timeline(events: list[dict]) -> list[dict]:
     """The events that deserve a mark on the timeline (position = their index)."""
-    st = S.build(events)
+    st = S.build(events, trusted=True)  # already validated by the Source
     return [{"i": i + 1, **item(e, st)} for i, e in enumerate(events) if e["type"] in TIMELINE_TYPES]
 
 
@@ -151,7 +150,7 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
 
 def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
     evs = events if upto is None else events[:max(upto, 0)]
-    st = S.build(evs)
+    st = S.build(evs, trusted=True)  # already validated by the Source
     if node.startswith("a-"):
         mine = [e for e in evs if agent_id(e["author"]) == node and e["type"] not in ROUTINE]
     else:

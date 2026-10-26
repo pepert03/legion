@@ -352,7 +352,7 @@ def hold_lease(c: Ctx, ttl: int) -> tuple[bool, str | None]:
     now = time.time()
     lead = c.st.leader(now)
     if lead and lead.author == c.me:
-        if now - lead.last_beat > ttl / 3:
+        if now - lead.last_beat > ttl / 2:  # each renewal is an event everyone keeps: not more often than needed
             c.emit("integrator.renew")
             c.sync()
         return True, lead.name

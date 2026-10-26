@@ -46,7 +46,7 @@ class Ctx:
         return self.ident.author
 
     def reload(self) -> None:
-        self.st = S.build(coordgit.read_events(self.repo))
+        self.st = coordgit.state(self.repo)
 
     def sync(self) -> None:
         self.unreachable = coordgit.sync(self.repo, self.ident)
@@ -65,7 +65,7 @@ class Ctx:
     def emit(self, type: str, **payload) -> dict:
         """Validate the event against the current state and, if valid, append it to the local coord."""
         ev = E.create(self.ident, type, self.st.max_lamport + 1, **payload)
-        trial = S.build(coordgit.read_events(self.repo) + [ev])
+        trial = coordgit.state(self.repo, extra=[ev])
         err = next((e for x, e in trial.ignored if x.get("id") == ev["id"]), None)
         if err:
             raise Fail(f"event rejected: {err}")

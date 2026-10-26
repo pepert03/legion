@@ -224,8 +224,9 @@ legion integrators list               # who may integrate, who is integrating no
 ```
 
 Each of them runs `legion integrate --loop 30`. Whoever holds the **integration lease** reviews
-and merges; it renews the lease on every pass. If that machine dies or goes offline, the lease
-expires (60 s by default, `--lease`) and the next integrator takes over by itself. A clean exit
+and merges, renewing the lease as it goes. If that machine dies or goes offline, the lease
+expires (5 minutes by default, `--lease`; it's renewed at half of that, so the renewals don't flood the
+log) and the next integrator takes over by itself. A clean exit
 (Ctrl+C) hands over at once.
 
 What keeps `main` consistent is not the lease but a rule in the state: an acceptance only counts if

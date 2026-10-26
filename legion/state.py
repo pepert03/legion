@@ -481,11 +481,14 @@ class State:
         return None
 
 
-def build(events: list[dict]) -> State:
+def build(events: list[dict], trusted=None) -> State:
+    """The state after these events, in Lamport order. `trusted`: events whose signature is known to be good
+    (a set of their id(), or True for all of them), which aren't checked again."""
     st = State()
     for ev in sorted(events, key=lambda e: (e.get("lamport", 0) if isinstance(e.get("lamport"), int) else 0,
                                             str(e.get("id", "")))):
-        err = E.check(ev) or st.apply(ev)
+        known = trusted is True or (trusted is not None and id(ev) in trusted)
+        err = (None if known else E.check(ev)) or st.apply(ev)
         if err:
             st.ignored.append((ev, err))
             continue

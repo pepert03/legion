@@ -7,9 +7,11 @@ union of their files: there are never conflicts.
 
 import json
 import os
+import pickle
 import random
 import subprocess
 import time
+from pathlib import Path
 
 from . import events as E
 from .identity import Identity
@@ -67,22 +69,121 @@ def list_files(repo, commit: str | None) -> dict[str, str]:
     return files
 
 
-def read_events(repo, ref: str = REF) -> list[dict]:
+def read_blobs(repo, blobs: list[str]) -> dict[str, dict | None]:
+    """The events stored in these blobs (None for a file that isn't valid JSON), in one git call."""
+    if not blobs:
+        return {}
+    data = git(repo, "cat-file", "--batch", input=("\n".join(blobs) + "\n").encode(), binary=True)
+    out, pos = {}, 0
+    while pos < len(data):
+        nl = data.index(b"\n", pos)
+        sha, _, size = data[pos:nl].decode().split()
+        size = int(size)
+        try:
+            out[sha] = json.loads(data[nl + 1:nl + 1 + size])
+        except ValueError:
+            out[sha] = None  # a corrupt file is ignored; the rest of the log still counts
+        pos = nl + 1 + size + 1
+    return out
+
+
+# --- local cache -------------------------------------------------------------------------------
+#
+# Every command rebuilds the state from the whole log, and checking the events' signatures is nearly all
+# of that cost. The cache, kept in the repository's .git, remembers which files have been read and which
+# have passed the check, by their git blob id: a blob id names the exact bytes, so an event that was
+# tampered with is a different blob and is checked again. When the log grows, only the new files are read.
+
+class _Store:
+    """An append-only file of pickled frames ({blob: event} or {blob, ...}), read incrementally: each process
+    reads what other processes appended since it last looked, and writes only what's new. A torn or corrupt
+    frame (two processes appending at once, say) throws the file away: it's only a cache."""
+
+    def __init__(self, path: Path, empty):
+        self.path, self.empty, self.data, self.offset = path, empty, empty(), 0
+
+    def refresh(self):
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            size = 0
+        if size < self.offset:  # replaced or truncated: start again
+            self.data, self.offset = self.empty(), 0
+        if size == self.offset:
+            return self.data
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.offset)
+                while f.tell() < size:
+                    self.data.update(pickle.load(f))
+                self.offset = f.tell()
+        except (OSError, EOFError, ValueError, pickle.UnpicklingError, AttributeError, TypeError):
+            self.data, self.offset = self.empty(), 0
+            self.path.unlink(missing_ok=True)
+        return self.data
+
+    def add(self, new) -> None:
+        if not new:
+            return
+        self.data.update(new)
+        frame = pickle.dumps(new, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+            try:
+                os.write(fd, frame)
+            finally:
+                os.close(fd)
+            if self.offset + len(frame) == self.path.stat().st_size:
+                self.offset += len(frame)  # nobody else appended in between: no need to read our own frame
+        except OSError:
+            pass
+
+
+_STORES: dict[str, tuple[_Store, _Store]] = {}
+
+
+def _stores(repo) -> tuple[_Store, _Store]:
+    """(events read so far, blobs whose signature checked out) for this repository."""
+    key = str(Path(repo).resolve())
+    if key not in _STORES:
+        d = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        _STORES[key] = (_Store(d / "legion-events.cache", dict), _Store(d / "legion-verified.cache", set))
+    events, verified = _STORES[key]
+    return events, verified
+
+
+def read_pairs(repo, ref: str = REF) -> list[tuple[str, dict]]:
+    """(blob id, event) for every event on `ref`, reading only the files the cache hasn't seen."""
     files = list_files(repo, rev(repo, ref))
     if not files:
         return []
-    data = git(repo, "cat-file", "--batch", input=("\n".join(files.values()) + "\n").encode(), binary=True)
-    out, pos = [], 0
-    while pos < len(data):
-        nl = data.index(b"\n", pos)
-        header = data[pos:nl].split()
-        size = int(header[2])
-        try:
-            out.append(json.loads(data[nl + 1:nl + 1 + size]))
-        except ValueError:
-            pass  # a corrupt file is ignored; the rest of the log still counts
-        pos = nl + 1 + size + 1
-    return out
+    store, _ = _stores(repo)
+    events = store.refresh()
+    missing = [b for b in set(files.values()) if b not in events]
+    if missing:
+        store.add(read_blobs(repo, missing))
+    return [(b, events[b]) for b in files.values() if events.get(b) is not None]
+
+
+def read_events(repo, ref: str = REF) -> list[dict]:
+    return [ev for _, ev in read_pairs(repo, ref)]
+
+
+def build_state(repo, pairs: list[tuple[str, dict]], extra: list[dict] = ()):
+    """The state from these events, skipping the signature check of those already checked before."""
+    from . import state as S
+    _, store = _stores(repo)
+    verified = store.refresh()
+    trusted = {id(ev) for b, ev in pairs if b in verified}
+    st = S.build([ev for _, ev in pairs] + list(extra), trusted)
+    bad = {id(ev) for ev, _ in st.ignored}
+    # Ignored for breaking a rule of the state isn't the same as a bad signature: only remember the latter.
+    store.add({b for b, ev in pairs if b not in verified and (id(ev) not in bad or E.check(ev) is None)})
+    return st
+
+
+def state(repo, ref: str = REF, extra: list[dict] = ()):
+    return build_state(repo, read_pairs(repo, ref), extra)
 
 
 def _commit(repo, files: dict[str, str], parents: list[str], message: str, env) -> str:
@@ -167,19 +268,55 @@ def sync_peers(repo, ident: Identity) -> list[str]:
     return failed
 
 
-def merge_coords(repo, ident: Identity, names: list[str]) -> None:
-    """Union of our coord and every peer's: events are files with unique names, so it never conflicts."""
-    local = rev(repo, REF)
-    cur = local
-    for peer in names:
-        theirs = rev(repo, f"{PEERS}{peer}/coord")
-        if not theirs or theirs == cur:
+def event_trees(repo, commits: list[str]) -> dict[str, dict[str, str]]:
+    """{commit: {event file: blob}} for several commits, reading all their trees in one git call."""
+    if not commits:
+        return {}
+    data = run(repo, "cat-file", "--batch", input="".join(f"{c}:events\n" for c in commits).encode()).stdout
+    out, pos = {}, 0
+    for c in commits:
+        nl = data.index(b"\n", pos)
+        header = data[pos:nl].split()
+        if len(header) < 3 or header[1] != b"tree":  # "missing": a commit with no events/ yet
+            out[c], pos = {}, nl + 1
             continue
-        if cur is None or is_ancestor(repo, cur, theirs):
-            cur = theirs
-        elif not is_ancestor(repo, theirs, cur):
-            files = {**list_files(repo, theirs), **list_files(repo, cur)}
-            cur = _commit(repo, files, [cur, theirs], "merge coord", author_env(ident))
+        size = int(header[2])
+        body, files, i = data[nl + 1:nl + 1 + size], {}, 0
+        while i < len(body):  # a tree's entries: "<mode> <name>\0<20-byte id>"
+            sp, nul = body.index(b" ", i), body.index(b"\0", i)
+            files[body[sp + 1:nul].decode()] = body[nul + 1:nul + 21].hex()
+            i = nul + 21
+        out[c], pos = files, nl + 1 + size + 1
+    return out
+
+
+def merge_coords(repo, ident: Identity, names: list[str]) -> None:
+    """Union of our coord and every peer's: events are files with unique names, so it never conflicts.
+
+    In one pass, whatever the number of peers: their tips in one git call, the trees of those that differ
+    from ours in another, and at most one merge commit."""
+    local = rev(repo, REF)
+    wanted = {f"{PEERS}{n}/coord" for n in names}
+    out = run(repo, "for-each-ref", "--format=%(objectname) %(refname)", PEERS).stdout.decode()
+    tips = sorted({sha for sha, ref in (l.split(" ", 1) for l in out.splitlines()) if ref in wanted} - {local})
+    cur = local
+    if tips:
+        trees = event_trees(repo, ([local] if local else []) + tips)
+        mine = trees.get(local, {})
+        union = dict(mine)
+        adding = []
+        for t in tips:
+            new = {k: v for k, v in trees[t].items() if k not in union}
+            if new:
+                union.update(new)
+                adding.append(t)
+        if adding:
+            # Just behind one peer that has everything: move to its commit instead of merging.
+            whole = [t for t in adding if len(trees[t]) == len(union)]
+            if whole and (local is None or is_ancestor(repo, local, whole[0])):
+                cur = whole[0]
+            else:
+                cur = _commit(repo, union, ([local] if local else []) + adding, "merge coord", author_env(ident))
     if cur and cur != local:
         git(repo, "update-ref", REF, cur, local or ZERO)
     if cur:
@@ -198,7 +335,11 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
     try:
         radicle.keep_bridge(repo)
         if not radicle.network_sync(repo):
-            failed.append("network")
+            if not radicle.node_running(repo):  # stopped (a reboot, say): start it and try once more
+                radicle.ensure_node(repo)
+                time.sleep(5)  # it needs a moment to connect to the seeds
+            if not radicle.network_sync(repo, force=True):
+                failed.append("network")
     except radicle.RadError:
         failed.append("network")  # offline: carry on with what the local storage has
     try:
@@ -280,6 +421,14 @@ def drop_patch(repo, branch: str) -> None:
 def view_events(repo, fetch: bool = True) -> list[dict]:
     """Every event this node can see (its own, origin's and its peers') without modifying its coord
     branch. Useful for watching while agents work in the same repository."""
+    return [ev for _, ev in view_pairs(repo, fetch)]
+
+
+def view_state(repo, fetch: bool = True):
+    return build_state(repo, view_pairs(repo, fetch))
+
+
+def view_pairs(repo, fetch: bool = True) -> list[tuple[str, dict]]:
     if fetch and is_radicle(repo):
         from . import radicle
         try:
@@ -300,8 +449,8 @@ def view_events(repo, fetch: bool = True) -> list[dict]:
     seen = {}
     for ref in refs:
         if rev(repo, ref):
-            for ev in read_events(repo, ref):
-                seen.setdefault(ev.get("id"), ev)
+            for blob, ev in read_pairs(repo, ref):
+                seen.setdefault(ev.get("id"), (blob, ev))
     return list(seen.values())
 
 

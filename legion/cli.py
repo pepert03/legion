@@ -160,7 +160,7 @@ def cmd_describe(args):
 def cmd_init(args):
     repo, ident = repo_root(), need_identity()
     coordgit.sync(repo, ident)
-    if S.build(coordgit.read_events(repo)).project:
+    if coordgit.state(repo).project:
         raise Fail("this repository already has a legion project")
     name = args.project or repo.name
     desc = read_description(args)
@@ -245,7 +245,7 @@ def cmd_radicle(args):
             return
         repo, ident = repo_root(), need_identity()
         if args.action == "init":
-            st = S.build(coordgit.read_events(repo))
+            st = coordgit.state(repo)
             if not st.project:
                 raise Fail("run `legion init` first; this publishes an existing legion project on Radicle")
             if ident.author not in st.integrators:
@@ -342,12 +342,12 @@ def cmd_join(args):
         coordgit.git(dest, "remote", "rename", "origin", args.peer_name)
         coordgit.git(dest, "config", "--add", "legion.peer", args.peer_name)
     coordgit.sync(dest, ident)
-    coordgit.update_main(dest, S.build(coordgit.read_events(dest)).main_tip)
-    st = S.build(coordgit.read_events(dest))
+    coordgit.update_main(dest, coordgit.state(dest).main_tip)
+    st = coordgit.state(dest)
     if st.project:
         os.chdir(dest)  # Ctx works on the current repository
         announce(Ctx())
-        st = S.build(coordgit.read_events(dest))
+        st = coordgit.state(dest)
     if not st.project:
         raise Fail(f"{url} is not a legion project (no coord branch with project.init)")
     integ = ", ".join(e["name"] for e in st.events if e["author"] in st.integrators and e["type"] == "project.init")
@@ -1025,8 +1025,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--until-done", action="store_true")
     s.add_argument("--timeout", type=float, default=3600)
     s.add_argument("--cmd-timeout", type=int, default=600)
-    s.add_argument("--lease", type=int, default=int(os.environ.get("LEGION_LEASE", "60")),
-                   help="seconds the integration lease lasts without renewal (default 60, or LEGION_LEASE)")
+    s.add_argument("--lease", type=int, default=int(os.environ.get("LEGION_LEASE", "300")),
+                   help="seconds the integration lease lasts without renewal, so how long a takeover can take; "
+                        "it's renewed at half of it (default 300, or LEGION_LEASE)")
     s.add_argument("--keep-branches", action="store_true", help="don't delete reviewed patch branches on origin")
     s.add_argument("--no-status", action="store_true", help="don't publish the legion-status branch")
     s.set_defaults(func=cmd_integrate)
