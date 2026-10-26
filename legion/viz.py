@@ -20,6 +20,7 @@ from . import trust
 
 PAGE = Path(__file__).parent / "templates" / "viz.html"
 ACTIVE_SECONDS = 600  # an agent counts as active if it published something in the last 10 minutes
+GONE_SECONDS = 300    # and it leaves the graph after 5 minutes without publishing, holding nothing
 
 
 class Source:
@@ -107,6 +108,9 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         a["owner"], a["number"] = split_name(a["name"])
         a["role"] = "integrator" if a["author"] in st.integrators else "agent"  # membership can change
         a["leader"] = bool(lead and lead.author == a["author"])
+        # Offline: no claim, no lease, and silent for a while. A working agent holds a claim, so it stays.
+        holds_lease = any(l.author == a["author"] and l.active(now) for l in st.leases)
+        a["gone"] = not a["holds"] and not holds_lease and now - a["last_ts"] > GONE_SECONDS
         a["trust"] = None if a["role"] == "integrator" else (by_agent.get(a["author"]) or trust.Trust()).as_dict()
     people = {name: t.as_dict() for name, t in by_person.items()}
 

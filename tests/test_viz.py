@@ -115,3 +115,16 @@ def test_an_agent_that_only_joined_shows_up():
            E.create(muse, "agent.joined", 2)]
     assert not S.build(evs).ignored
     assert any(a["name"] == "jose#1" for a in viz.snapshot(evs, len(evs))["agents"])
+
+
+def test_an_agent_silent_for_minutes_with_nothing_held_leaves_the_graph(monkeypatch):
+    evs, tid = project_events()
+    luis = Identity.generate("luis")
+    evs.append(E.create(luis, "agent.joined", 4))
+    now = evs[-1]["ts"]
+    monkeypatch.setattr(viz.time, "time", lambda: now + viz.GONE_SECONDS + 1)
+    agents = {a["name"]: a for a in viz.snapshot(evs, None)["agents"]}
+    assert agents["luis"]["gone"]          # silent and holding nothing
+    assert not agents["ana"]["gone"]       # silent too, but it holds a claim: it's working
+    monkeypatch.setattr(viz.time, "time", lambda: now + 10)
+    assert not {a["name"]: a for a in viz.snapshot(evs, None)["agents"]}["luis"]["gone"]

@@ -362,6 +362,7 @@ function applySnapshot(d) {
   }
   const seen = new Set();
   for (const a of d.agents) {
+    if (a.gone) continue;  // offline for a while: off the graph (it comes back with its next event)
     seen.add(a.id); loadLogo(kindOf(a));
     const cur = agents.get(a.id);
     if (cur) cur.a = a; else agents.set(a.id, { a, x: 0, y: 0, alpha: 0 });
@@ -592,7 +593,8 @@ function eventList(items, withName) {
 }
 
 function viewLog() {
-  const list = [...data.agents].sort((x, y) => (y.holds.length - x.holds.length) || (y.active - x.active) || x.name.localeCompare(y.name));
+  const offline = data.agents.filter((a) => a.gone).length;
+  const list = data.agents.filter((a) => !a.gone).sort((x, y) => (y.holds.length - x.holds.length) || (y.active - x.active) || x.name.localeCompare(y.name));
   const people = Object.entries(data.people || {}).sort((x, y) => y[1].score - x[1].score);
   const agentsOf = (p) => data.agents.filter((a) => !isIntegrator(a) && nameParts(a).owner === p).length;
   return [
@@ -606,6 +608,7 @@ function viewLog() {
       return h("div", { class: "row", onclick: () => openPop("item", a.id) }, discImg(a),
         h("div", { class: "who" }, nameNode(a), h("div", {}, doing)), scoreNode(a.trust));
     }),
+    offline ? h("p", { class: "empty" }, `and ${offline} offline (nothing published for more than 5 minutes)`) : null,
     h("h2", { class: "caps" }, "Activity"),
     eventList(data.recent, true),
     h("h2", { class: "caps" }, "Legend"),
