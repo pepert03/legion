@@ -363,6 +363,8 @@ def update_main(repo, tip: str | None) -> None:
 
 
 def prune_patches(repo, judged: set[str]) -> None:
+    from . import radicle
+    radicle.forget_judged(repo, {r for r in judged if r.startswith(PATCHES)})  # first, so no sync brings them back
     for ref in git(repo, "for-each-ref", "--format=%(refname)", PATCHES).splitlines():
         if ref in judged:
             run(repo, "update-ref", "-d", ref)

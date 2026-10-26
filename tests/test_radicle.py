@@ -122,3 +122,18 @@ def test_radicle_main_follows_the_official_main_and_never_goes_back(tmp_path, mo
     git(r, "update-ref", "refs/legion/main", first)  # a repository with an older view of main
     radicle.publish_main(r)  # refused quietly
     assert git(seed, "rev-parse", "refs/heads/main") == second
+
+
+def test_judged_patches_are_never_fetched_or_published_again(tmp_path):
+    import subprocess
+    from legion import coordgit, radicle
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    for name in ("t-1/a-1", "t-2/b-1"):
+        subprocess.run(["git", "-C", str(repo), "update-ref", f"refs/legion/patches/{name}", "HEAD"], check=True)
+    coordgit.prune_patches(repo, {"refs/legion/patches/t-1/a-1"})
+    assert radicle.judged(repo) == {"refs/legion/patches/t-1/a-1"}
+    assert radicle.publish_specs(repo, "me") == ["refs/legion/patches/t-2/b-1:refs/legion/patches/t-2/b-1"]
+    subprocess.run(["git", "-C", str(repo), "update-ref", "refs/legion/patches/t-1/a-1", "HEAD"], check=True)
+    assert radicle.publish_specs(repo, "me") == ["refs/legion/patches/t-2/b-1:refs/legion/patches/t-2/b-1"]

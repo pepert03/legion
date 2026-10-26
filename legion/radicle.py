@@ -424,10 +424,10 @@ def fetch_all(repo) -> list[str]:
         specs = [f"+{prefix}*:refs/legion/peers/{name}/*" for name, prefix in pubs.items()]
         # Every node re-publishes the patches it has seen (that's the gossip), so one patch can sit in
         # several namespaces. Patches are immutable, so take each one from the first namespace that has it.
-        chosen = {}
+        chosen, gone = {}, judged(repo)
         for ref in refs:
             m = re.match(r"refs/namespaces/[^/]+/(refs/legion/patches/.+)$", ref)
-            if m and m.group(1) not in chosen:
+            if m and m.group(1) not in chosen and m.group(1) not in gone:
                 chosen[m.group(1)] = ref
         specs += [f"+{src}:{dest}" for dest, src in sorted(chosen.items())]
         for attempt in range(3):
@@ -447,6 +447,29 @@ def fetch_all(repo) -> list[str]:
     return list(pubs)
 
 
+def _judged_file(repo) -> Path:
+    d = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo,
+                       capture_output=True, text=True).stdout.strip()
+    return Path(d) / "legion-judged"
+
+
+def judged(repo) -> set[str]:
+    """Patch refs this repository dropped once they had a verdict: never fetched or published again. Without
+    this, every sync brought them back from the other nodes' namespaces and the next prune deleted them, and a
+    process pushing while another one pruned failed on a ref that had just disappeared."""
+    try:
+        return set(_judged_file(repo).read_text(encoding="utf-8").split())
+    except OSError:
+        return set()
+
+
+def forget_judged(repo, refs) -> None:
+    new = set(refs) - judged(repo)
+    if new:
+        with open(_judged_file(repo), "a", encoding="utf-8") as f:
+            f.write("".join(f"{r}\n" for r in sorted(new)))
+
+
 def publish_specs(repo, who: str) -> list[str]:
     """The refspecs that push this repository's legion refs under its identity's own prefix."""
     def listed(prefix):
@@ -456,7 +479,8 @@ def publish_specs(repo, who: str) -> list[str]:
     specs = [f"refs/legion/pub/*:refs/legion/pub/{who}/*"] if listed("refs/legion/pub/") else []
     # Patches by name, not with a pattern: judged ones are deleted as they go, and on Windows the git in WSL
     # can still see a just-deleted ref file under /mnt/c, expand the pattern to it and fail the whole push.
-    return specs + [f"{ref}:{ref}" for ref in listed("refs/legion/patches/")]
+    gone = judged(repo)
+    return specs + [f"{ref}:{ref}" for ref in listed("refs/legion/patches/") if ref not in gone]
 
 
 def publish_main(repo) -> None:
