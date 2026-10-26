@@ -365,3 +365,20 @@ def test_notes_per_agent_are_limited():
     for i in range(S.MAX_TASK_NOTES + 2):
         log.add(ANA, "task.note", task=tid, text=f"note {i}")
     assert len(log.state().notes[tid]) == S.MAX_TASK_NOTES
+
+
+def test_unblocks_counts_dependents_and_parents_up_the_chain():
+    log, tid = sketch_project()
+    k = log.add(ANA, "sketch.proposed", task=tid, commit="c", branch="legion/big/s-1",
+                children=[CHILD, dict(CHILD, key="b", zone=["src/parts/b.py"])])
+    log.add(BOSS, "sketch.accepted", sketch=k["id"], merge_commit="m1")
+    a = S.task_id(log.add(BOSS, "task.created", key="big/a", title="A", zone=["src/parts/a.py"],
+                          accept="x", parent=tid, sketch=k["id"]))
+    b = S.task_id(log.add(BOSS, "task.created", key="big/b", title="B", zone=["src/parts/b.py"],
+                          accept="x", parent=tid, sketch=k["id"]))
+    later = S.task_id(log.add(BOSS, "task.created", key="later", title="L", zone=["l"], accept="x", deps=[tid]))
+    last = S.task_id(log.add(BOSS, "task.created", key="last", title="Z", zone=["z"], accept="x", deps=[later]))
+    lone = S.task_id(log.add(BOSS, "task.created", key="lone", title="O", zone=["o"], accept="x"))
+    st = log.state()
+    assert st.unblocks(a) == 3  # its parent, the task waiting for the parent, and the one after that
+    assert st.unblocks(b) == 3 and st.unblocks(later) == 1 and st.unblocks(lone) == 0 and st.unblocks(last) == 0

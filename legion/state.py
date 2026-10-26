@@ -245,6 +245,24 @@ class State:
     def done(self, tid: str) -> bool:
         return tid in self.resolved or bool(self.patches_for(tid, "accepted"))
 
+    def unblocks(self, tid: str) -> int:
+        """How many unfinished tasks wait, directly or not, for this one: those that depend on it, and the parent
+        whose sketch it belongs to, and so on up and along. The integrator reviews these first."""
+        waiting = defaultdict(set)
+        for t in self.tasks.values():
+            for d in t.deps:
+                waiting[d].add(t.id)
+            k = self.sketches.get(t.sketch) if t.sketch else None
+            if t.parent and k and k.kind == "sketch":  # the parent is done once its sketch's subtasks are
+                waiting[t.id].add(t.parent)
+        seen, todo = set(), [tid]
+        while todo:
+            for nxt in waiting[todo.pop()]:
+                if nxt not in seen and not self.done(nxt) and not self.tasks[nxt].cancelled:
+                    seen.add(nxt)
+                    todo.append(nxt)
+        return len(seen)
+
     def deps_ok(self, task: Task) -> bool:
         return all(self.done(d) for d in task.deps)
 

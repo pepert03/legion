@@ -335,7 +335,6 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
     c.require_integrator()
     follow_main(c)
     finish_interrupted(c, log)
-    pending = sorted((p for p in c.st.patches.values() if p.verdict is None), key=lambda p: (p.lamport, p.id))
     done = 0
     sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None), key=lambda k: (k.lamport, k.id))
     for k in sketches:
@@ -362,11 +361,17 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
         log(f"{k.kind.upper()} {verdict.upper()} {key} by {k.name}"
             + (f": {len(k.children)} subtasks" if verdict == "accepted" else f": {payload['reason'].splitlines()[0]}"))
         done += 1
-    for p in pending:
+    tried = set()
+    while True:
+        # The patch that unblocks the most tasks first (then the oldest), chosen again after every verdict: an
+        # accepted one can resolve its parent and unblock patches written ahead, which then go in this pass.
         c.reload()
-        p = c.st.patches[p.id]
-        if p.verdict or not c.st.deps_ok(c.st.tasks[p.task]):  # written ahead: it waits, quietly
-            continue
+        ready = [p for p in c.st.patches.values() if p.verdict is None and p.id not in tried
+                 and c.st.deps_ok(c.st.tasks[p.task])]  # written ahead: it waits, quietly
+        if not ready:
+            break
+        p = min(ready, key=lambda p: (-c.st.unblocks(p.task), p.lamport, p.id))
+        tried.add(p.id)
         try:
             result = review(c, p, timeout)
         except coordgit.GitError as e:  # a git failure on this machine is not the patch's fault: no rejection
@@ -385,6 +390,11 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
         log(f"{verdict.upper()} {key} by {p.name}{extra}"
             + (f": {payload['reason'].splitlines()[0]}" if verdict == "rejected" else ""))
         done += 1
+        if verdict == "accepted":
+            try:  # its parent may be complete now: resolving it is what unblocks the tasks waiting for it
+                done += resolve_parents(c, timeout, log)
+            except coordgit.GitError as e:
+                log(f"git error checking tasks with subtasks; will retry: {e}")
     try:
         done += resolve_parents(c, timeout, log)
     except coordgit.GitError as e:
