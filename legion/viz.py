@@ -20,7 +20,7 @@ from . import trust
 
 PAGE = Path(__file__).parent / "templates" / "viz.html"
 ACTIVE_SECONDS = 600  # an agent counts as active if it published something in the last 10 minutes
-GONE_SECONDS = 300    # and it leaves the graph after 5 minutes without publishing, holding nothing
+GONE_SECONDS = 7200   # and it leaves the graph after 2 hours without publishing, holding nothing
 
 
 class Source:
