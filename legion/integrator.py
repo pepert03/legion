@@ -9,7 +9,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import coordgit
@@ -51,7 +54,7 @@ def run_cmd(cmd: str, cwd, timeout: int) -> tuple[int | None, str]:
                 p.kill()
                 p.communicate()
                 return None, f"timed out ({timeout}s)"
-            if beat:
+            if beat and threading.current_thread() is threading.main_thread():
                 try:
                     beat()
                 except Exception:  # noqa: BLE001 - a failed renewal is retried on the next beat
@@ -72,8 +75,9 @@ def reject(reason: str, code: str):
     return "rejected", {"reason": reason, "code": code}
 
 
-def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str):
-    """Fetch the commit, check it only touches `allowed`, and merge it into main without any worktree.
+def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, onto: str | None = None):
+    """Fetch the commit, check it only touches `allowed`, and merge it into main (or into `onto`, a main with
+    the patches ahead of it in the queue already merged) without any worktree.
 
     Returns (merged, head), ("rejected", payload), or None to retry later.
     """
@@ -91,7 +95,7 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str):
         if coordgit.is_p2p(repo):
             return None  # the event arrived before the commit: gossip will bring it on a later sync
         return reject("the commit is not on its branch", "missing")
-    head = tip or git(repo, "rev-parse", main + "^{commit}")
+    head = onto or tip or git(repo, "rev-parse", main + "^{commit}")
     base = git(repo, "merge-base", head, commit)
     files = [f for f in git(repo, "diff", "--name-only", base, commit).splitlines() if f]
     if not files:
@@ -184,11 +188,12 @@ def resolve_parents(c: Ctx, timeout: int, log=print) -> int:
         task = c.st.tasks[k.task]
         coordgit.refresh_base(c.repo)
         head = git(c.repo, "rev-parse", coordgit.base_ref(c.repo) + "^{commit}")
-        tmp = Path(tempfile.mkdtemp(prefix="lgr-"))
+        scratch = []
         try:
-            code, out = run_cmd(task.accept, export(c.repo, head, tmp / "m"), timeout)
+            code, out = run_cmd(task.accept, place(c.repo, head, "parent", scratch), timeout)
         finally:
-            remove_tree(tmp)
+            for tmp in scratch:
+                remove_tree(tmp)
         if code == 0:
             c.emit("task.resolved", task=task.id, sketch=k.id)
             log(f"RESOLVED {task.key}: its {len(k.child_ids)} subtasks are done and it passes its own test")
@@ -200,40 +205,130 @@ def resolve_parents(c: Ctx, timeout: int, log=print) -> int:
         done += 1
 
 
-def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
-    """("accepted" | "rejected", payload), or None if main moved and it must be retried."""
-    st, repo, task = c.st, c.repo, c.st.tasks[p.task]
+# --- where checks run ---------------------------------------------------------------------
+#
+# Each reviewer has a folder of its own that outlives the review, .git/legion-review/<n>. Moving it to the next
+# commit only rewrites the files that differ, and what the checks built there (.lake, __pycache__: whatever the
+# project's .gitignore ignores) stays, so the next check only rebuilds what the patch changed: in a Lean project,
+# a minute instead of the whole project. LEGION_FRESH_REVIEWS=1 checks every patch in an empty folder instead.
+# Either way the checks run code from strangers, with no sandbox yet.
+
+FRESH = bool(os.environ.get("LEGION_FRESH_REVIEWS"))
+REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
+
+
+def common_dir(repo) -> Path:
+    return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+
+
+def checkout(repo, commit: str, dest: Path) -> Path:
+    """Make dest hold exactly the commit's files, keeping what its .gitignore ignores (the builds)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, GIT_DIR=str(common_dir(repo)), GIT_WORK_TREE=str(dest),
+               GIT_INDEX_FILE=str(dest.with_name(dest.name + ".index")))
+    git(repo, "read-tree", "--reset", "-u", commit, env=env)
+    git(repo, "clean", "-fdq", env=env)  # what a previous check left behind, except the ignored builds
+    return dest
+
+
+def place(repo, commit: str, name: str, scratch: list) -> Path:
+    """A folder holding the commit's files, for a check: reviewer `name`'s own one, or a new empty one."""
+    if FRESH:
+        tmp = Path(tempfile.mkdtemp(prefix="lgr-"))
+        scratch.append(tmp)
+        return export(repo, commit, tmp / "m")
+    return checkout(repo, commit, common_dir(repo) / "legion-review" / name)
+
+
+@dataclass
+class Job:
+    """A patch ready to check: merged on top of `head`, a main that may include the patches ahead of it."""
+    patch: S.Patch
+    task: S.Task
+    merged: str
+    head: str
+    baseline: bool  # a competitive task with no best yet: measure main too, to beat it
+
+
+def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
+    """The patch merged and ready to check, its rejection, or None to retry it later."""
+    st, task = c.st, c.st.tasks[p.task]
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
     if not st.deps_ok(task):
         return None  # written ahead, while the task was blocked: it waits for its dependencies
-    prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})")
+    prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})",
+                             onto=onto)
     if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
         return prepared
     merged, head = prepared
-    tmp = Path(tempfile.mkdtemp(prefix="lgr-"))
+    return Job(p, task, merged, head, bool(task.metric and st.best(task.id) is None))
+
+
+def check(repo, job: Job, name: str, timeout: int) -> tuple:
+    """Run the task's commands on the merged patch: (exit code, output, metric, metric output, baseline).
+    Only commands, no events: it runs in a reviewer thread."""
+    scratch = []
     try:
         baseline = None
-        if task.metric and st.best(task.id) is None:
-            baseline, _ = measure(task.metric, export(repo, head, tmp / "base"), timeout)
-        wt = export(repo, merged, tmp / "m")
-        code, out = run_cmd(task.accept, wt, timeout)
-        if code != 0:
-            return reject(f"the acceptance command fails:\n{tail(out)}", "tests")
-        payload = {}
-        if task.metric:
-            value, out = measure(task.metric, wt, timeout)
-            if value is None:
-                return reject(f"the metric did not print a number:\n{tail(out)}", "metric")
-            ref = st.best(task.id) if st.best(task.id) is not None else baseline
-            if ref is not None and not better(value, ref, task.goal):
-                return reject(f"does not improve the metric: {value:g} vs {ref:g}", "no_gain")
-            payload["metric"] = value
-        payload["merge_commit"] = merged
-        payload["base"] = head
-        return "accepted", payload
+        if job.baseline:
+            baseline, _ = measure(job.task.metric, place(repo, job.head, name, scratch), timeout)
+        wt = place(repo, job.merged, name, scratch)
+        code, out = run_cmd(job.task.accept, wt, timeout)
+        value, mout = measure(job.task.metric, wt, timeout) if code == 0 and job.task.metric else (None, "")
+        return code, out, value, mout, baseline
     finally:
-        remove_tree(tmp)
+        for tmp in scratch:
+            remove_tree(tmp)
+
+
+def decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
+    code, out, value, mout, baseline = result
+    st, task = c.st, job.task
+    if task.mode == "exclusive" and st.done(task.id):
+        return reject("the task was already done by another patch", "done")
+    if code != 0:
+        return reject(f"the acceptance command fails:\n{tail(out)}", "tests")
+    payload = {}
+    if task.metric:
+        if value is None:
+            return reject(f"the metric did not print a number:\n{tail(mout)}", "metric")
+        ref = st.best(task.id) if st.best(task.id) is not None else baseline
+        if ref is not None and not better(value, ref, task.goal):
+            return reject(f"does not improve the metric: {value:g} vs {ref:g}", "no_gain")
+        payload["metric"] = value
+    payload["merge_commit"] = job.merged
+    payload["base"] = job.head
+    return "accepted", payload
+
+
+def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
+    """("accepted" | "rejected", payload), or None if it must be retried: one patch, start to end."""
+    job = plan(c, p)
+    if not isinstance(job, Job):
+        return job
+    return decide(c, job, check(c.repo, job, "0", timeout))
+
+
+def check_all(c: Ctx, jobs: list[Job], timeout: int) -> list:
+    """Check the jobs at once, each in its reviewer's folder, while this thread keeps the lease. A job that
+    raised gives back its exception."""
+    def one(i, job):
+        try:
+            return check(c.repo, job, str(i), timeout)
+        except Exception as e:  # noqa: BLE001 - reported, and the patch retried, by the caller
+            return e
+    if len(jobs) == 1:
+        return [one(0, jobs[0])]
+    with ThreadPoolExecutor(len(jobs)) as pool:
+        futures = [pool.submit(one, i, job) for i, job in enumerate(jobs)]
+        while wait(futures, timeout=BEAT_EVERY).not_done:
+            if beat:
+                try:
+                    beat()
+                except Exception:  # noqa: BLE001 - retried on the next beat
+                    pass
+        return [f.result() for f in futures]
 
 
 def remove_tree(path: Path) -> None:
@@ -320,6 +415,18 @@ def emit_verdict(c: Ctx, type: str, log, **payload) -> bool:
     return True
 
 
+def publish_verdict(c: Ctx, p: S.Patch, result: tuple[str, dict], log, keep_branches: bool) -> bool:
+    verdict, payload = result
+    if not emit_verdict(c, "patch." + verdict, log, patch=p.id, task=p.task, **payload):
+        return False
+    if not keep_branches:  # the patch is in main or discarded; its commit is still referenced in coord
+        coordgit.drop_patch(c.repo, p.branch)
+    extra = f" (metric {payload['metric']:g})" if "metric" in payload else ""
+    log(f"{verdict.upper()} {c.st.tasks[p.task].key} by {p.name}{extra}"
+        + (f": {payload['reason'].splitlines()[0]}" if verdict == "rejected" else ""))
+    return True
+
+
 def finish_interrupted(c: Ctx, log) -> None:
     """An integrator can die between accepting a sketch and creating its subtasks (separate events).
     Whoever integrates next finishes the job, so the parent is never left split with nothing under it."""
@@ -361,40 +468,62 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
         log(f"{k.kind.upper()} {verdict.upper()} {key} by {k.name}"
             + (f": {len(k.children)} subtasks" if verdict == "accepted" else f": {payload['reason'].splitlines()[0]}"))
         done += 1
+    # A merge queue. The ready patches in order (the one that unblocks the most tasks first, then the oldest),
+    # up to REVIEWERS of them: the i-th is merged on top of main and the ones before it, all are checked at once,
+    # and the verdicts go out in order. If they all pass, they all go in. If one fails, its rejection holds (it
+    # was checked on exactly the main it would land on), and the ones after it go back to the queue: their
+    # check assumed it would go in. After every round the order is worked out again, since an accepted patch
+    # can resolve its parent and unblock patches written ahead.
     tried = set()
     while True:
-        # The patch that unblocks the most tasks first (then the oldest), chosen again after every verdict: an
-        # accepted one can resolve its parent and unblock patches written ahead, which then go in this pass.
         c.reload()
-        ready = [p for p in c.st.patches.values() if p.verdict is None and p.id not in tried
-                 and c.st.deps_ok(c.st.tasks[p.task])]  # written ahead: it waits, quietly
+        ready = sorted((p for p in c.st.patches.values() if p.verdict is None and p.id not in tried
+                        and c.st.deps_ok(c.st.tasks[p.task])),  # written ahead: it waits, quietly
+                       key=lambda p: (-c.st.unblocks(p.task), p.lamport, p.id))
         if not ready:
             break
-        p = min(ready, key=lambda p: (-c.st.unblocks(p.task), p.lamport, p.id))
-        tried.add(p.id)
-        try:
-            result = review(c, p, timeout)
-        except coordgit.GitError as e:  # a git failure on this machine is not the patch's fault: no rejection
-            log(f"git error reviewing {p.id[:8]}; will retry: {e}")
+        jobs, onto = [], None
+        for p in ready:
+            if len(jobs) == max(1, REVIEWERS):
+                break
+            if any(j.patch.task == p.task for j in jobs):
+                continue  # two patches for one task would only race each other
+            try:
+                planned = plan(c, p, onto)
+            except coordgit.GitError as e:  # a git failure on this machine is not the patch's fault
+                log(f"git error reviewing {p.id[:8]}; will retry: {e}")
+                tried.add(p.id)
+                continue
+            if isinstance(planned, Job):
+                jobs.append(planned)
+                onto = planned.merged
+                continue
+            if planned is not None and onto is not None and isinstance(plan(c, p), Job):
+                continue  # it only clashes with a patch ahead of it in the queue: next round, on the new main
+            tried.add(p.id)
+            if planned is None:
+                log(f"patch {p.id[:8]} is not ready yet (main moved or its commit hasn't arrived); will retry")
+            elif publish_verdict(c, p, planned, log, keep_branches):
+                done += 1
+        if not jobs:
             continue
-        if result is None:
-            log(f"patch {p.id[:8]} is not ready yet (main moved or its commit hasn't arrived); will retry")
-            continue
-        verdict, payload = result
-        if not emit_verdict(c, "patch." + verdict, log, patch=p.id, task=p.task, **payload):
-            continue
-        if not keep_branches:  # the patch is in main or discarded; its commit is still referenced in coord
-            coordgit.drop_patch(c.repo, p.branch)
-        key = c.st.tasks[p.task].key
-        extra = f" (metric {payload['metric']:g})" if "metric" in payload else ""
-        log(f"{verdict.upper()} {key} by {p.name}{extra}"
-            + (f": {payload['reason'].splitlines()[0]}" if verdict == "rejected" else ""))
-        done += 1
-        if verdict == "accepted":
+        for job, result in zip(jobs, check_all(c, jobs, timeout)):
+            tried.add(job.patch.id)
+            if isinstance(result, Exception):
+                log(f"error checking {job.patch.id[:8]}; will retry: {result}")
+                break
+            c.reload()
+            verdict = decide(c, job, result)
+            if not publish_verdict(c, job.patch, verdict, log, keep_branches):
+                break
+            done += 1
+            if verdict[0] == "rejected":
+                break  # the ones after it were checked on top of it
             try:  # its parent may be complete now: resolving it is what unblocks the tasks waiting for it
                 done += resolve_parents(c, timeout, log)
             except coordgit.GitError as e:
                 log(f"git error checking tasks with subtasks; will retry: {e}")
+                break
     try:
         done += resolve_parents(c, timeout, log)
     except coordgit.GitError as e:

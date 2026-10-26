@@ -1033,6 +1033,8 @@ def cmd_integrate(args):
     c = Ctx()
     c.strict = True
     c.require_integrator()
+    integrator.REVIEWERS = max(1, args.reviewers)
+    integrator.FRESH = integrator.FRESH or args.fresh
     deadline = time.time() + args.timeout
     last_status, last_role = None, None
     log = lambda m: print(m, flush=True)  # noqa: E731
@@ -1271,6 +1273,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--lease", type=int, default=int(os.environ.get("LEGION_LEASE", "300")),
                    help="seconds the integration lease lasts without renewal, so how long a takeover can take; "
                         "it's renewed at half of it (default 300, or LEGION_LEASE)")
+    s.add_argument("--reviewers", type=int, default=integrator.REVIEWERS,
+                   help="patches checked at once, as a merge queue (default 2, or LEGION_REVIEWERS); each one "
+                        "runs the task's acceptance command, so mind the memory a check needs")
+    s.add_argument("--fresh", action="store_true",
+                   help="check every patch in an empty folder instead of each reviewer's own, which keeps its "
+                        "builds between checks (or LEGION_FRESH_REVIEWS=1)")
     s.add_argument("--keep-branches", action="store_true", help="don't delete reviewed patch branches on origin")
     s.add_argument("--no-status", action="store_true", help="don't publish the legion-status branch")
     s.set_defaults(func=cmd_integrate)

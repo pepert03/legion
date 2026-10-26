@@ -125,7 +125,18 @@ be removed, and a removed integrator's later events stop counting).
 - **Interrupted work is finished by the next integrator**: an accepted sketch without subtasks
   gets them created.
 - Only integrators advance `main` and modify `AGENTS.md` and `ZONES.md`.
-- Before accepting a patch, it **reruns `accept` itself in a sandbox**; it does not trust the author's claim that it passes.
+- Before accepting a patch, it **reruns `accept` itself**; it does not trust the author's claim that it
+  passes. There is no sandbox yet: the integrator runs code from strangers on its own machine.
+- **A merge queue.** It takes the ready patches in order (the one that unblocks the most tasks first)
+  up to `--reviewers` of them (2): the i-th is merged on top of `main` and the ones before it, all are
+  checked at once, and the verdicts go out in order. If they all pass, they all go in. A failing one is
+  rejected (it was checked on exactly the `main` it would land on) and the ones after it go back to
+  the queue. Only the main thread writes events, and it keeps renewing the lease while checks run.
+- **Persistent review folders.** Each reviewer checks in its own folder, `.git/legion-review/<n>`,
+  moved to each commit with its own index (`read-tree -u`, then `clean`), so what the project's
+  `.gitignore` ignores, the builds, survives: a Lean check rebuilds only what the patch changed. The
+  price is that a check could leave a poisoned build for the next one; `--fresh` checks each patch
+  in an empty folder instead.
 - It publishes `patch.accepted` or `patch.rejected` with the reason.
 - In competitive mode it has no opinion: it accepts the one with the best `metric`.
 
