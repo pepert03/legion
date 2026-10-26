@@ -459,9 +459,22 @@ def publish_specs(repo, who: str) -> list[str]:
     return specs
 
 
+def publish_main(repo) -> None:
+    """Move the repository's ordinary `main` branch, the one Radicle's web and `rad clone` show, to the
+    official main. Without --force: it only moves forward, so a repository with an older view (another agent
+    sharing this node, say) can't drag it back, and a refused push is no error."""
+    tip = subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/legion/main"], cwd=repo,
+                         capture_output=True, text=True).stdout.strip()
+    shown = subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/remotes/rad/main"], cwd=repo,
+                           capture_output=True, text=True).stdout.strip()
+    if tip and tip != shown:
+        rgit(repo, "push", "-q", "rad", "refs/legion/main:refs/heads/main", check=False, timeout=120)
+
+
 def publish(repo, who: str) -> None:
     """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
     the node announces them to the network."""
     specs = publish_specs(repo, who)
     if specs:
         rgit(repo, "push", "-q", "--force", "rad", *specs, timeout=120)
+    publish_main(repo)

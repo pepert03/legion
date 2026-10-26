@@ -68,7 +68,8 @@ networks reach each other without opening ports, and nobody can write to anyone 
 
 To sync, legion asks the node for the latest (`rad sync --fetch`, rate-limited), copies every
 namespace's coord into `refs/legion/peers/<NID>/coord`, merges them exactly as in p2p, and pushes its
-own refs back. Since every node republishes the patches it has seen, the same patch can be in many
+own refs back. It also moves the ordinary `main` branch, the one Radicle's web and `rad clone` show, to the
+official main, without forcing it, so it only ever moves forward. Since every node republishes the patches it has seen, the same patch can be in many
 namespaces; patches are immutable, so legion takes each from the first namespace that has it.
 
 On Windows, Radicle runs inside WSL and legion calls it through `wsl.exe`: the repository, the agents

@@ -210,6 +210,8 @@ On **Windows**, Radicle only runs inside WSL; `legion radicle setup` installs Ub
 missing (that may need an administrator and a reboot the first time) and drives Radicle through it.
 In Git Bash, set `MSYS_NO_PATHCONV=1`.
 
+Radicle's web shows the project's `main` as the official main, with every accepted patch.
+
 `legion radicle status` shows this node, how many nodes have published project state, and its
 connections.
 

@@ -98,3 +98,27 @@ def test_two_repositories_on_one_node_dont_overwrite_each_other(network):
     coordgit.sync(alice, boss)
     assert {e.get("task") for e in coordgit.read_events(alice)} == {None, "x", "y"}
     assert len(radicle.publishers(alice)) == 3
+
+
+def test_radicle_main_follows_the_official_main_and_never_goes_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(radicle, "run", lambda *a, repo=None, home=None, timeout=60, check=True, cwd=None:
+                        subprocess.run(list(a), cwd=cwd, capture_output=True, encoding="utf-8"))
+    seed = tmp_path / "seed.git"
+    git(tmp_path, "init", "-q", "--bare", str(seed))
+    r = tmp_path / "r"
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.name", "x")
+    git(r, "config", "user.email", "x@x")
+    git(r, "remote", "add", "rad", str(seed))
+    for n in (1, 2):
+        (r / "f.txt").write_text(str(n))
+        git(r, "add", "f.txt")
+        git(r, "commit", "-qm", str(n))
+    first, second = git(r, "rev-parse", "HEAD~1"), git(r, "rev-parse", "HEAD")
+    git(r, "update-ref", "refs/legion/main", second)
+    radicle.publish_main(r)
+    assert git(seed, "rev-parse", "refs/heads/main") == second
+    git(r, "update-ref", "refs/legion/main", first)  # a repository with an older view of main
+    radicle.publish_main(r)  # refused quietly
+    assert git(seed, "rev-parse", "refs/heads/main") == second
