@@ -1,0 +1,70 @@
+[
+  {
+    "key": "search",
+    "title": "A shared local-search library",
+    "zone": ["search/"],
+    "accept": "python -m unittest -q tests.test_search",
+    "size": "M",
+    "body": "search.improve(v, k, t, blocks=None, seconds, seed) returns the smallest valid covering it finds in that time. Every record task can build on it, so make it good: incremental bookkeeping of how often each t-subset is covered, simulated annealing (Nurmela and Ostergard's method is the classic), restarts. Split it if it helps (a sketch: bookkeeping, moves, schedule)."
+  },
+  {
+    "key": "c14-5-3",
+    "title": "C(14,5,3): beat 43 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C14-5-3.txt", "work/c14-5-3/"],
+    "accept": "python verify.py 14 5 3 solutions/C14-5-3.txt",
+    "metric": "python verify.py 14 5 3 solutions/C14-5-3.txt",
+    "goal": "min",
+    "body": "Fewest 5-subsets of {1..14} covering every 3-subset. Known record 43 (Nurmela and Ostergard, simulated annealing, 1996); best known lower bound 37. Put your search code in work/c14-5-3/ and the covering in solutions/C14-5-3.txt."
+  },
+  {
+    "key": "c15-6-4",
+    "title": "C(15,6,4): beat 117 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C15-6-4.txt", "work/c15-6-4/"],
+    "accept": "python verify.py 15 6 4 solutions/C15-6-4.txt",
+    "metric": "python verify.py 15 6 4 solutions/C15-6-4.txt",
+    "goal": "min",
+    "body": "Fewest 6-subsets of {1..15} covering every 4-subset. Known record 117 (2003); lower bound 93."
+  },
+  {
+    "key": "c18-6-4",
+    "title": "C(18,6,4): beat 236 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C18-6-4.txt", "work/c18-6-4/"],
+    "accept": "python verify.py 18 6 4 solutions/C18-6-4.txt",
+    "metric": "python verify.py 18 6 4 solutions/C18-6-4.txt",
+    "goal": "min",
+    "body": "Fewest 6-subsets of {1..18} covering every 4-subset. Known record 236 (Bluskov and Hamalainen, 1999); lower bound 205."
+  },
+  {
+    "key": "c20-5-3",
+    "title": "C(20,5,3): beat 133 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C20-5-3.txt", "work/c20-5-3/"],
+    "accept": "python verify.py 20 5 3 solutions/C20-5-3.txt",
+    "metric": "python verify.py 20 5 3 solutions/C20-5-3.txt",
+    "goal": "min",
+    "body": "Fewest 5-subsets of {1..20} covering every 3-subset. Known record 133 (Nurmela and Ostergard, with symmetries, 1997); lower bound 124."
+  },
+  {
+    "key": "c25-5-3",
+    "title": "C(25,5,3): beat 256 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C25-5-3.txt", "work/c25-5-3/"],
+    "accept": "python verify.py 25 5 3 solutions/C25-5-3.txt",
+    "metric": "python verify.py 25 5 3 solutions/C25-5-3.txt",
+    "goal": "min",
+    "body": "Fewest 5-subsets of {1..25} covering every 3-subset. Known record 256 (Dambmann, 2005); lower bound 240."
+  },
+  {
+    "key": "c27-7-3",
+    "title": "C(27,7,3): beat 104 blocks",
+    "mode": "competitive",
+    "zone": ["solutions/C27-7-3.txt", "work/c27-7-3/"],
+    "accept": "python verify.py 27 7 3 solutions/C27-7-3.txt",
+    "metric": "python verify.py 27 7 3 solutions/C27-7-3.txt",
+    "goal": "min",
+    "body": "Fewest 7-subsets of {1..27} covering every 3-subset. Known record 104 (Marco Meoli, 2020); lower bound 93."
+  }
+]

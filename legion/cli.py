@@ -35,7 +35,9 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "deps": [st.tasks[d].key for d in t.deps], "size": t.size, "body": t.body,
             "parent": st.tasks[t.parent].key if t.parent else None, "depth": t.depth,
             "children_done": sum(st.done(c.id) for c in st.children(t.id)),
-            "children": len(st.children(t.id))}
+            "children": len(st.children(t.id)),
+            "stalled": st.stalled(t.id), "failures": st.failures_since_progress(t.id),
+            "open_paths": len(st.open_paths(t.id))}
 
 
 def tree_order(st: S.State) -> list[S.Task]:
@@ -416,7 +418,7 @@ def cmd_status(args):
             "patches": [{"id": p.id, "task": p.task, "key": st.tasks[p.task].key, "name": p.name, "author": p.author,
                          "verdict": p.verdict, "reason": p.reason, "code": p.code, "metric": p.metric}
                         for p in sorted(st.patches.values(), key=lambda p: p.lamport)],
-            "sketches": [{"id": k.id, "task": k.task, "key": st.tasks[k.task].key, "name": k.name,
+            "sketches": [{"id": k.id, "kind": k.kind, "task": k.task, "key": st.tasks[k.task].key, "name": k.name,
                           "verdict": k.verdict, "outcome": k.outcome, "reason": k.reason,
                           "children": [st.tasks[c].key for c in k.child_ids]}
                          for k in sorted(st.sketches.values(), key=lambda k: k.lamport)],

@@ -116,6 +116,28 @@ class FakeAgent:
                 return
             time.sleep(1.5)
 
+    def propose_path(self, task: dict) -> None:
+        """On a stuck task, open the new route prepared in solutions/<key>.path (same layout as a sketch)."""
+        tid, key = task["id"], task["key"]
+        src = self.solutions / f"{key}.path"
+        self.fresh(tid)
+        tests = Path("legion_sketches") / tid
+        for f in src.rglob("*"):
+            if not f.is_file() or f.name == "path.json":
+                continue
+            rel = f.relative_to(src)
+            dest = tests / rel.relative_to("_tests") if rel.parts[0] == "_tests" else rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, dest)
+        spec = (src / "path.json").read_text(encoding="utf-8").replace("{tests}", tests.as_posix())
+        Path("..", f"path-{tid}.json").write_text(spec, encoding="utf-8")
+        self.commit(f"{key}: files for a new path")
+        p = legion("path", tid, str(Path("..", f"path-{tid}.json")), "--json")
+        if p.returncode:
+            log(f"{key}: couldn't propose a path: {p.stderr.strip()}")
+            return
+        log(f"{key} is stuck ({task['failures']} failures): proposing a new path ({json.loads(p.stdout)['path'][:8]})")
+
     def work(self, task: dict) -> None:
         tid, key = task["id"], task["key"]
         log(f"got {key}")
@@ -183,7 +205,7 @@ class FakeAgent:
                         f"{self.notes(variant)} Result: {verdict}. {reason}".strip())
 
     def run(self, deadline: float) -> None:
-        tried = set()
+        tried, proposed = set(), set()
         while time.time() < deadline:
             p = legion("claim", "--json")
             if p.returncode == 0:
@@ -202,6 +224,12 @@ class FakeAgent:
                 time.sleep(2)
                 continue
             st = self.status()
+            stuck = [t for t in st["tasks"] if t.get("stalled") and not t.get("open_paths")
+                     and (self.solutions / f"{t['key']}.path").exists() and t["id"] not in proposed]
+            if stuck:
+                proposed.add(stuck[0]["id"])
+                self.propose_path(stuck[0])
+                continue
             comp = [t for t in st["tasks"] if t["mode"] == "competitive" and t["id"] not in tried]
             if comp:
                 tried.add(comp[0]["id"])
