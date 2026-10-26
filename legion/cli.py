@@ -761,8 +761,7 @@ def cmd_submit(args):
             raise Fail(f"task {t.key} is already done", 3)
         if not c.holder_is_me(t.id):
             raise Fail(f"you don't hold the claim on {t.key}: claim it before submitting", 3)
-    if not c.st.deps_ok(t):
-        raise Fail(f"the dependencies of {t.key} are not accepted yet", 3)
+    waits = not c.st.deps_ok(t)  # prepared ahead: the integrator reviews it once its dependencies are in
     repo = c.repo
     coordgit.refresh_base(repo)
     main = coordgit.base_ref(repo)
@@ -786,7 +785,9 @@ def cmd_submit(args):
     c.sync()
     out(args, {"patch": ev["id"], "branch": branch},
         f"Patch {ev['id'][:8]} submitted for {t.key} (branch {branch}). "
-        f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
+        + (f"It waits for {', '.join(c.st.tasks[d].key for d in t.deps if not c.st.done(d))} to be accepted; "
+           "then the integrator reviews it. " if waits else "")
+        + f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
         f"for the verdict: `context` will show it to you. {KEEP_GOING}")
 
 
