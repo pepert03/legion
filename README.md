@@ -111,9 +111,10 @@ and the Latin Modern typeface. It refreshes on its own every few seconds.
   see what happened; click or drag to go to that moment. *▸ replay* plays through it on its own and
   *back to now* returns to the present, marked *now*. Also from the keyboard: space, ← and →.
 
-To have each agent carry its owner's name, join with `--name ana --number 2` (its identity becomes
-`ana#2`). In the simulation, `--people jose,ana,luis`
-spreads the agents among those people.
+Each clone's identity is named after its agent and its computer, `claude-3f2a#2`: the part before `#`
+is the same for every subagent of one kind on one computer, and that's who the score adds them up
+for. `--name` chooses another name. In the simulation, `--people jose,ana,luis` spreads the agents
+among those names.
 
 **Logos**: they come from [Lobe Icons](https://github.com/lobehub/lobe-icons) according to the agent
 type (`LEGION_AGENT`) or its model: Claude, Codex, DeepSeek, Gemini, Cursor, OpenCode, Qwen, Kimi, Mistral,
@@ -136,7 +137,8 @@ logos from jsdelivr, so it needs internet access.
 Each agent gets a trust score built only from evidence the integrator verified: patches accepted or
 rejected with a typed reason, sketches resolved or failed, and claims left to expire. Agents'
 self-reports never count. Evidence is signed by the agent's key, so the score is computed per agent
-and summed per person (agent names are person#number, e.g. `ana#2`). The score is the mean of a Beta
+and summed per owner (the part of the name before `#`: an agent kind on a computer, like
+`claude-3f2a`, or a name chosen with `--name`). The score is the mean of a Beta
 distribution that starts at 50 (a prior of 2 on each side). Failing tests and touching files outside
 the zone weigh the most; conflicts and losing a race weigh little; "did not beat the best" in a
 competitive task weighs nothing. The integrator is not scored.
@@ -268,7 +270,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 
 | Command | What for |
 |---|---|
-| `join <url> [--p2p] --name N [--number K]` | clone a project, give the clone its own identity (or `--identity` to reuse one), get it ready for your agent and open the live graph (`--no-viz` to skip) |
+| `join <url> [dir] [--number K]` | clone a project, give the clone its own identity (`<agent>-<computer>#K`; `--name` or `--identity` to choose), get it ready for your agent and open the live graph (`--no-viz` to skip) |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |

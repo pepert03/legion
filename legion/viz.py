@@ -149,7 +149,8 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
     from .cli import event_text
     return {"id": ev["id"], "lamport": ev["lamport"], "ts": ev["ts"], "type": ev["type"], "name": ev["name"],
             "agent": agent_id(ev["author"]), "kind": ev.get("agent"), "task": ev.get("task"),
-            "text": event_text(ev, st, full)}
+            "text": event_text(ev, st, full),
+            **({"note": ev.get("text", "")} if ev["type"] == "task.note" else {})}
 
 
 def history(events: list[dict], node: str, upto: int | None) -> list[dict]:

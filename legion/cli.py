@@ -411,6 +411,33 @@ def open_viewer(repo: Path) -> str | None:
     return f"http://127.0.0.1:{port}/" if port else "a local address (see .git/legion-viz.log)"
 
 
+def machine_tag() -> str:
+    """Four characters that tell this computer apart, made once: an identity's name says which computer and
+    which agent it is, without asking anyone for their name."""
+    path = home() / "machine"
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        tag = os.urandom(2).hex()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tag, encoding="utf-8")
+        return tag
+
+
+def auto_name(number: int | None = None) -> str:
+    """`<agent>-<computer>#<n>`, e.g. claude-3f2a#2: n is the given number, or the next one free here."""
+    kind = re.sub(r"[^a-z0-9-]+", "-", (os.environ.get("LEGION_AGENT") or E.detect_agent() or "agent").lower())
+    base = f"{kind.strip('-') or 'agent'}-{machine_tag()}"
+    if number is None:
+        used = set()
+        for i in identity.all_identities():
+            name, _, n = i.name.partition("#")
+            if name == base and n.isdigit():
+                used.add(int(n))
+        number = next(k for k in range(1, len(used) + 2) if k not in used)
+    return f"{base}#{number}"
+
+
 def cmd_join(args):
     update.check()
     url = args.url
@@ -428,10 +455,9 @@ def cmd_join(args):
     elif nxt.exists() and (picked := identity.find(nxt.read_text(encoding="utf-8").strip())):
         ident = picked[0]  # the one `legion id new` just made
         nxt.unlink()
-    else:
-        ident = Identity.load()
-        if not ident:
-            raise Fail("say who you are: --name YOUR_NAME (and --number N if you run several agents)")
+    else:  # nobody to ask: named after the agent and this computer, numbered like its other clones here
+        ident = Identity.generate(auto_name(args.number))
+        print(f"Identity created for this clone: {ident.name} ({ident.short})")
     if url.startswith("rad:"):
         join_radicle(args, ident, dest)
     else:
@@ -1163,8 +1189,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("join", help="clone a legion project and get it ready for your agent")
     s.add_argument("url")
     s.add_argument("dir", nargs="?")
-    s.add_argument("--name", help="your name: this clone gets a new identity of its own")
-    s.add_argument("--number", type=int, help="this agent's number, if you run several (name#number)")
+    s.add_argument("--name", help="a name for this clone's identity (default: the agent and this computer, "
+                                  "like claude-3f2a#1)")
+    s.add_argument("--number", type=int, help="the subagent's number, if you run several (name#number)")
     s.add_argument("--identity", help="use this existing identity (a name or key) instead of a new one")
     s.add_argument("--p2p", action="store_true", help="join without a central server: the URL becomes your first peer")
     s.add_argument("--peer-name", default="seed", help="name for that first peer (default: seed)")

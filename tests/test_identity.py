@@ -84,3 +84,20 @@ def test_rename_keeps_the_key(machine, monkeypatch):
     after = Identity.load(repo=r)
     assert after.author == before.author and after.name == "muse-pepe"
     assert subprocess.run(["git", "config", "user.name"], cwd=r, capture_output=True, text=True).stdout.strip() == "muse-pepe"
+
+
+def test_a_clone_is_named_after_the_agent_and_the_computer(machine, monkeypatch):
+    from legion import cli
+    monkeypatch.setenv("LEGION_AGENT", "Claude")
+    first = cli.auto_name()
+    tag = first.split("-")[1].split("#")[0]
+    assert first == f"claude-{tag}#1" and cli.machine_tag() == tag  # the same computer keeps its tag
+    Identity.generate(first).save()
+    assert cli.auto_name() == f"claude-{tag}#2"  # the next subagent here
+    assert cli.auto_name(7) == f"claude-{tag}#7"
+    monkeypatch.setenv("LEGION_AGENT", "")
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    for k in [k for k in __import__("os").environ if k.startswith(("CODEX_", "OPENCODE", "GEMINI_CLI", "CURSOR_"))]:
+        monkeypatch.delenv(k)
+    assert cli.auto_name().startswith(f"agent-{tag}#")

@@ -95,6 +95,11 @@
   .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px;
                          border: 1px solid var(--c); background: var(--f, transparent); }
   .empty { font-style: italic; color: var(--ink3); }
+  .chat { list-style: none; margin: 0 0 6px; padding: 0; }
+  .chat li { margin: 0 0 10px; padding: 8px 11px; border: 1px solid var(--hair); border-radius: 3px 12px 12px 12px;
+    background: var(--card); font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .chat li .who { display: block; margin-bottom: 3px; font-size: 13px; }
+  .chat li .when { font-style: italic; color: var(--ink3); font-size: 12px; margin-left: 6px; }
 
   #time { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; }
   #time svg { width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
@@ -640,7 +645,7 @@ async function viewAgent(a) {
     h("div", { class: "head" }, discImg(a, 46),
       h("div", {}, h("div", { class: "name" }, nameNode(a)),
         h("div", { class: "sub" }, [KIND_LABEL[kind], ...a.models].filter(Boolean).join(", "),
-          a.number ? ` · ${a.owner}'s agent ${a.number}` : ""))),
+          a.number ? ` · subagent ${a.number} of ${a.owner}` : ""))),
     h("div", { style: "font-style:italic;color:var(--ink2);margin-bottom:12px" },
       a.holds.length ? `Working on ${taskKey(a.holds[0])}.` : a.active ? "Waiting for a task." : "Inactive."),
     h("div", { class: "nums" },
@@ -657,6 +662,7 @@ async function viewAgent(a) {
 async function viewTask(n) {
   const col = P[n.status] || P.ink, items = await history(n.id);
   const workers = data.agents.filter((a) => a.holds.includes(n.id));
+  const notes = items.filter((e) => e.type === "task.note");
   return [
     h("div", { class: "head" },
       h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
@@ -669,9 +675,19 @@ async function viewTask(n) {
       h("dt", {}, "acceptance"), h("dd", {}, h("code", {}, n.accept)),
       n.best != null ? [h("dt", {}, "best"), h("dd", {}, String(n.best))] : null,
       n.body ? [h("dt", {}, "what"), h("dd", {}, n.body)] : null),
+    notes.length ? [h("h2", { class: "caps" }, "Conversation"), chatList(notes)] : null,
     h("h2", { class: "caps" }, "History"),
-    eventList(items, true),
+    eventList(items.filter((e) => e.type !== "task.note"), true),
   ];
+}
+
+// What the agents on a task tell each other (legion note): in order, the latest at the bottom.
+function chatList(notes) {
+  return h("ul", { class: "chat" }, ...notes.map((e) => {
+    const a = data.agents.find((x) => x.id === e.agent);
+    return h("li", {}, h("span", { class: "who" }, a ? nameNode(a) : e.name, h("span", { class: "when" }, ago(e.ts))),
+      e.note);
+  }));
 }
 
 function viewGoal() {
