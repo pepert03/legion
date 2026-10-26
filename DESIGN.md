@@ -187,6 +187,19 @@ reviews it like a sketch, without running anything (same rules for zones and tes
 commit if clean, and creates the subtasks (`path.accepted`, then `task.created` with `path`). At most
 `MAX_OPEN_PATHS` (3) unfinished paths per task. `context` lists stuck tasks with what was tried.
 
+## 8d. Decision 8 — Nobody waits while work remains
+
+When no task is open, `claim` doesn't leave the agent waiting:
+
+- **It joins a task under way.** A claim with `join: true` adds the agent to whoever holds the task, up to
+  `MAX_SHARED` (3) agents per task, the first by Lamport order. A claim without it still races and loses as
+  before. The hardest task goes first: stuck, then the most failures, then size L, then the one held
+  longest. The first patch accepted wins and the others are closed as `done`, which costs no trust.
+- **It prepares a blocked task** that nobody holds. The agent may split it with a sketch, whose subtasks
+  only depend on each other and so are claimable at once (the parent is resolved only once its own
+  dependencies are in), or write the patch. Such a patch isn't rejected: the task stays `blocked`, and the
+  integrator reviews the patch once the dependencies are accepted.
+
 ## 9. Example event
 
 `coord/events/000142-9b1e4c.json`:

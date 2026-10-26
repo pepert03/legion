@@ -23,6 +23,11 @@ MAX_CHILDREN, MAX_DEPTH = 8, 3
 # stuck after STALL_AFTER failures (failed reports, rejected patches, failed sketches) since its last progress,
 # and holds at most MAX_OPEN_PATHS paths that aren't finished, so being stuck doesn't turn into a flood.
 STALL_AFTER, MAX_OPEN_PATHS = 3, 3
+# When nothing is open, idle agents don't wait: they join a task someone already holds (at most MAX_SHARED
+# agents on one task; the first patch accepted wins), or prepare a blocked one (they split it into subtasks
+# that don't need its dependencies, or write the patch, which is reviewed once the dependencies are in).
+MAX_SHARED = 3
+SIZES = {"L": 0, "M": 1, "S": 2}
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
 SHELL_META = set(";&|`$<>\n\r")
 CHILD_KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -78,6 +83,7 @@ class Claim:
     ttl: int
     last_beat: float
     released: bool = False
+    join: bool = False  # joins whoever holds the task, instead of competing for it
 
     def active(self, now: float) -> bool:
         return not self.released and now <= self.last_beat + self.ttl
@@ -161,6 +167,23 @@ class State:
         active = [c for c in self.claims[tid] if c.active(now)]
         return min(active, key=lambda c: (c.lamport, c.author)) if active else None
 
+    def claimants(self, tid: str, now: float) -> list[Claim]:
+        """Who works on the task: its holder, and up to MAX_SHARED - 1 agents who joined it."""
+        h = self.holder(tid, now)
+        if not h:
+            return []
+        out, seen = [h], {h.author}
+        for c in sorted((c for c in self.claims[tid] if c.join and c.active(now)), key=lambda c: (c.lamport, c.author)):
+            if len(out) == MAX_SHARED:
+                break
+            if c.author not in seen:
+                out.append(c)
+                seen.add(c.author)
+        return out
+
+    def works_on(self, tid: str, author: str, now: float) -> bool:
+        return any(c.author == author for c in self.claimants(tid, now))
+
     def patches_for(self, tid: str, verdict: str | None = "any") -> list[Patch]:
         ps = [p for p in self.patches.values() if p.task == tid]
         if verdict != "any":
@@ -206,7 +229,7 @@ class State:
     def ready_to_resolve(self) -> list[Sketch]:
         return [k for k in self.sketches.values()
                 if k.kind == "sketch" and k.verdict == "accepted" and not k.outcome and k.child_ids
-                and all(self.done(c) for c in k.child_ids)]
+                and all(self.done(c) for c in k.child_ids) and self.deps_ok(self.tasks[k.task])]
 
     def best(self, tid: str) -> float | None:
         task = self.tasks[tid]
@@ -227,12 +250,14 @@ class State:
             return "accepted"
         if task.cancelled:
             return "cancelled"
-        if self.patches_for(tid, None) or any(k.verdict is None for k in self.sketches_for(tid)):
+        if any(k.verdict is None for k in self.sketches_for(tid)):
             return "review"
         if self.active_sketch(tid):
             return "sketched"
-        if not self.deps_ok(task):
+        if not self.deps_ok(task):  # a patch written ahead waits here until its dependencies are in
             return "blocked"
+        if self.patches_for(tid, None):
+            return "review"
         if task.mode == "exclusive" and self.holder(tid, now):
             return "claimed"
         return "open"
@@ -242,8 +267,23 @@ class State:
 
     def held_by(self, author: str, now: float) -> list[Task]:
         return [t for t in self.tasks.values()
-                if t.mode == "exclusive" and self.status(t.id, now) in ("claimed", "review")
-                and (h := self.holder(t.id, now)) and h.author == author]
+                if t.mode == "exclusive" and (s := self.status(t.id, now)) in ("claimed", "review", "blocked")
+                and self.works_on(t.id, author, now)
+                and not (s == "blocked" and any(p.author == author for p in self.patches_for(t.id, None)))]
+
+    def joinable(self, author: str, now: float) -> list[Task]:
+        """Tasks held by others with room for one more, the hardest first: stuck, then the most failures, then
+        the biggest, then the one held longest."""
+        ts = [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "claimed"
+              and len(cl := self.claimants(t.id, now)) < MAX_SHARED and all(c.author != author for c in cl)]
+        return sorted(ts, key=lambda t: (not self.stalled(t.id), -self.failures_since_progress(t.id),
+                                         SIZES.get(t.size, 1), self.holder(t.id, now).ts, t.id))
+
+    def preparable(self, now: float) -> list[Task]:
+        """Blocked tasks nobody is preparing, the closest to unblocking first."""
+        ts = [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "blocked"
+              and not self.holder(t.id, now) and not self.patches_for(t.id, None)]
+        return sorted(ts, key=lambda t: (sum(not self.done(d) for d in t.deps), t.lamport, t.id))
 
     def exclusive_done(self) -> bool:
         ex = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled]
@@ -351,7 +391,8 @@ class State:
             ttl = ev.get("ttl")
             if not isinstance(ttl, int) or not MIN_TTL <= ttl <= MAX_TTL:
                 return "ttl out of range"
-            self.claims[task.id].append(Claim(task.id, ev["author"], ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"]))
+            self.claims[task.id].append(Claim(task.id, ev["author"], ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"],
+                                              join=ev.get("join") is True))
         elif t == "task.heartbeat":
             c = self._my_claim(ev)
             if c is None:

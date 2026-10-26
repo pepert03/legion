@@ -34,6 +34,7 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
     h = st.holder(t.id, now)
     return {"id": t.id, "key": t.key, "title": t.title, "mode": t.mode, "status": st.status(t.id, now),
             "holder": h.name if h else None, "holder_author": h.author if h else None,
+            "working": [c.name for c in st.claimants(t.id, now)],
             "zone": t.zone, "accept": t.accept, "metric": t.metric, "goal": t.goal, "best": st.best(t.id),
             "deps": [st.tasks[d].key for d in t.deps], "size": t.size, "body": t.body,
             "parent": st.tasks[t.parent].key if t.parent else None, "depth": t.depth,
@@ -122,7 +123,7 @@ def status_table(st: S.State, now: float) -> str:
     for t in tree_order(st):
         d = task_dict(st, t, now)
         status = d["status"] + (f" {d['children_done']}/{d['children']}" if d["status"] == "sketched" else "")
-        holder = d["holder"] if d["status"] in ("claimed", "review") else "-"
+        holder = " + ".join(d["working"]) if d["status"] in ("claimed", "review", "blocked") else "-"
         rows.append((d["id"], "  " * t.depth + d["key"], d["mode"][:4], status, holder or "-",
                      "-" if d["best"] is None else f"{d['best']:g}", ",".join(d["deps"]) or "-"))
     widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
@@ -511,25 +512,33 @@ def cmd_status(args):
 def cmd_claim(args):
     c = Ctx()
     now = time.time()
+    join = False
     if args.task:
         t = c.task(args.task)
         if t.mode != "exclusive":
             raise Fail("competitive tasks aren't claimed: work on it and send it with submit", 2)
-        if not c.holder_is_me(t.id) and c.st.status(t.id, now) != "open":
-            raise Fail(f"task {t.key} is not available ({c.st.status(t.id, now)})", 3)
+        status = c.st.status(t.id, now)
+        join = status == "claimed" and t in c.st.joinable(c.me, now)
+        if not c.holder_is_me(t.id) and status != "open" and not join and t not in c.st.preparable(now):
+            raise Fail(f"task {t.key} is not available ({status})", 3)
     else:
         held = c.st.held_by(c.me, now)
         if held:
             t = held[0]
         else:
-            free = c.st.claimable(now)
+            def options():
+                return c.st.claimable(now), c.st.joinable(c.me, now) or c.st.preparable(now)
+            free, helped = options()
             deadline = now + (args.wait or 0) * 60
-            while not free and not c.st.exclusive_done() and time.time() < deadline:
+            while not free and not helped and not c.st.exclusive_done() and time.time() < deadline:
                 time.sleep(min(30, max(1, deadline - time.time())))  # someone may release, or a dependency land
                 c.sync()
                 now = time.time()
-                free = c.st.claimable(now)
-            if not free:
+                free, helped = options()
+            if not free and helped:
+                t = helped[0]  # nothing open: don't wait, help with the hardest task, or prepare a blocked one
+                join = c.st.status(t.id, now) == "claimed"
+            elif not free:
                 if c.st.exclusive_done():
                     out(args, {"won": False, "task": None, "done": True}, "Every exclusive task is done.")
                     return 4
@@ -539,17 +548,28 @@ def cmd_claim(args):
                     f"Nothing is open right now, but these are unfinished: {', '.join(waiting)} "
                     "(claimed, in review or blocked). Run `python -m legion claim --wait` again.")
                 return 5
-            # Deterministic spread: each agent prefers a different order, so they collide less.
-            t = min(free, key=lambda t: hashlib.sha256((c.me + t.id).encode()).hexdigest())
+            else:
+                # Deterministic spread: each agent prefers a different order, so they collide less.
+                t = min(free, key=lambda t: hashlib.sha256((c.me + t.id).encode()).hexdigest())
     if not c.holder_is_me(t.id):
-        c.emit("task.claimed", task=t.id, ttl=args.ttl)
+        c.emit("task.claimed", task=t.id, ttl=args.ttl, **({"join": True} if join else {}))
         c.sync()
         time.sleep(float(os.environ.get("LEGION_CLAIM_SETTLE", "1.0")))
         c.sync()
     if c.holder_is_me(t.id):
         d = task_dict(c.st, t, time.time())
-        out(args, {"won": True, "task": d},
-            f"The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
+        others = [n for n in d["working"] if n != c.ident.name]
+        if others:
+            how = (f"You join {', '.join(others)} on this task: it's the hardest one under way. Try your own "
+                   "route (read their reports first with `python -m legion log`); the first patch accepted wins.\n")
+        elif d["status"] == "blocked":
+            how = (f"This task is blocked by {', '.join(d['deps'])}: prepare it. Split it with `sketch` into "
+                   "subtasks that don't need them (others can take those right away), or write the patch: it's "
+                   "reviewed once they are accepted.\n")
+        else:
+            how = ""
+        out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
+            f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
         return 0
     h = c.st.holder(t.id, time.time())

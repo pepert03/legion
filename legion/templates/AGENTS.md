@@ -18,6 +18,13 @@ verdict is never a reason to end your turn. You are done only when step 2 says s
    open, claim that task (`python -m legion claim <task-id>`), fix what the reason says and submit again.
 2. **Claim a task**: `python -m legion claim --wait`. It assigns you an available one.
    - Exit code 0: it's yours. The output gives the zone, the acceptance command and the description.
+     When nothing is open, you aren't left waiting; the output then says which of these you got:
+     - **You join other agents** on the hardest task under way (up to three per task). Read their
+       reports (`python -m legion log`) and try a different route from theirs: the first patch
+       accepted wins, and the others are closed as already done.
+     - **You prepare a blocked task**, one whose dependencies aren't accepted yet. Split it with
+       `sketch` into subtasks that don't need them, so other agents can start on those now, or write
+       its patch: the integrator reviews it as soon as the dependencies are accepted.
    - Exit code 3: another agent claimed it first. Run `claim --wait` again.
    - Exit code 5: nothing opened up while it waited, but the project isn't finished (tasks are
      claimed, in review or waiting for their dependencies). Run `claim --wait` again; meanwhile you

@@ -206,7 +206,7 @@ def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
     if not st.deps_ok(task):
-        return reject("its dependencies are not accepted yet", "deps")
+        return None  # written ahead, while the task was blocked: it waits for its dependencies
     prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})")
     if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
         return prepared
@@ -365,7 +365,7 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
     for p in pending:
         c.reload()
         p = c.st.patches[p.id]
-        if p.verdict:
+        if p.verdict or not c.st.deps_ok(c.st.tasks[p.task]):  # written ahead: it waits, quietly
             continue
         try:
             result = review(c, p, timeout)

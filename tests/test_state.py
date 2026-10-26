@@ -302,3 +302,44 @@ def test_a_project_can_allow_its_own_verifier_in_subtasks():
     st = log.state()
     assert len(st.sketches_for(t)) == 1
     assert "must start with one of" in st.ignored[0][1]
+
+
+CEL, DAN = Identity.generate("cel"), Identity.generate("dan")
+
+
+def test_idle_agents_join_the_hardest_task_up_to_a_limit():
+    log, easy = project(size="S")
+    hard = S.task_id(log.add(BOSS, "task.created", key="h", title="H", zone=["h"], accept="true", size="L"))
+    log.add(ANA, "task.claimed", task=easy, ttl=600)
+    log.add(BEA, "task.claimed", task=hard, ttl=600)
+    st = log.state()
+    assert [t.id for t in st.joinable(CEL.author, 1001)] == [hard, easy]  # the biggest first
+    log.add(CEL, "task.claimed", task=hard, ttl=600, join=True)
+    log.add(DAN, "task.claimed", task=hard, ttl=600, join=True)
+    log.add(BOSS, "task.claimed", task=hard, ttl=600, join=True)  # a fourth: no room
+    st = log.state()
+    assert [c.author for c in st.claimants(hard, 1001)] == [BEA.author, CEL.author, DAN.author]
+    assert st.works_on(hard, CEL.author, 1001) and not st.works_on(hard, BOSS.author, 1001)
+    assert hard not in [t.id for t in st.joinable(BOSS.author, 1001)]
+    assert [t.id for t in st.held_by(CEL.author, 1001)] == [hard]
+
+
+def test_a_claim_that_doesnt_join_still_loses_the_race():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(BEA, "task.claimed", task=tid, ttl=600)
+    assert [c.author for c in log.state().claimants(tid, 1001)] == [ANA.author]
+
+
+def test_a_blocked_task_can_be_prepared_and_its_patch_waits():
+    log, a = project()
+    b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true", deps=[a]))
+    assert [t.id for t in log.state().preparable(1001)] == [b]
+    log.add(ANA, "task.claimed", task=b, ttl=600)
+    p = log.add(ANA, "patch.submitted", task=b, commit="c", branch="legion/t/b-1")
+    st = log.state()
+    assert st.status(b, 1001) == "blocked" and st.preparable(1001) == []
+    assert st.held_by(ANA.author, 1001) == []  # its patch waits: ANA moves on
+    q = log.add(BEA, "patch.submitted", task=a, commit="c", branch="legion/t/a-1")
+    log.add(BOSS, "patch.accepted", patch=q["id"])
+    assert log.state().status(b, 1001) == "review" and log.state().patches[p["id"]].verdict is None

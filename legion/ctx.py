@@ -84,5 +84,5 @@ class Ctx:
             raise Fail("only an integrator can use this command")
 
     def holder_is_me(self, tid: str) -> bool:
-        h = self.st.holder(tid, time.time())
-        return bool(h and h.author == self.me)
+        """Whether I work on the task: I hold it, or joined whoever does."""
+        return self.st.works_on(tid, self.me, time.time())

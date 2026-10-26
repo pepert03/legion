@@ -58,11 +58,13 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     tasks = []
     for t in st.tasks.values():
         status = st.status(t.id, now)
-        h = st.holder(t.id, now) if status in ("claimed", "review") else None
+        working = st.claimants(t.id, now) if status in ("claimed", "review", "blocked") else []
+        h = working[0] if working else None
         kids = st.children(t.id)
         tasks.append({"id": t.id, "key": t.key, "title": t.title, "status": status, "mode": t.mode,
                       "depth": t.depth, "parent": t.parent, "deps": t.deps, "size": t.size,
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
+                      "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
                       "children": len(kids), "children_done": sum(st.done(k.id) for k in kids)})
 
@@ -90,8 +92,9 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
             if p.verdict == "accepted" and p.task not in agents[p.author]["done"]:
                 agents[p.author]["done"].append(p.task)
     for t in tasks:
-        if t["holder"] in agents:
-            agents[t["holder"]]["holds"].append(t["id"])
+        for who in t["working"]:  # the holder, and whoever joined it
+            if who in agents:
+                agents[who]["holds"].append(t["id"])
     # Competitive tasks aren't claimed: whoever has a patch there waiting for its verdict is working on it.
     for p in st.patches.values():
         if p.verdict is None and p.author in agents and st.tasks.get(p.task) and \
