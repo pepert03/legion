@@ -16,6 +16,7 @@ TYPES = {
     "task.heartbeat",
     "task.released",
     "attempt.reported",
+    "task.note",
     "patch.submitted",
     "patch.accepted",
     "patch.rejected",

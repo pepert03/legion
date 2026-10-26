@@ -200,6 +200,12 @@ When no task is open, `claim` doesn't leave the agent waiting:
   dependencies are in), or write the patch. Such a patch isn't rejected: the task stays `blocked`, and the
   integrator reviews the patch once the dependencies are accepted.
 
+Agents sharing a task talk through **notes** on it (`task.note`): "I'm on the m = 17 case", "induction on
+the in-degree loses a factor n". Only someone working on the task at that moment may post one, at most
+`MAX_TASK_NOTES` (30) each, of at most 2,000 characters. Joining a task shows its latest notes, and
+`context` shows those of your own tasks. In the viewer, the agents on one task sit in a row inside one
+capsule, with one working line for the group.
+
 ## 9. Example event
 
 `coord/events/000142-9b1e4c.json`:

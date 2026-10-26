@@ -27,6 +27,9 @@ STALL_AFTER, MAX_OPEN_PATHS = 3, 3
 # agents on one task; the first patch accepted wins), or prepare a blocked one (they split it into subtasks
 # that don't need its dependencies, or write the patch, which is reviewed once the dependencies are in).
 MAX_SHARED = 3
+# Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
+# working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
+MAX_TASK_NOTES = 30
 SIZES = {"L": 0, "M": 1, "S": 2}
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
 SHELL_META = set(";&|`$<>\n\r")
@@ -142,6 +145,7 @@ class State:
         self.sketches: dict[str, Sketch] = {}
         self.resolved: set = set()  # tasks done because their subtasks were completed
         self.attempts: list[dict] = []
+        self.notes: dict[str, list[dict]] = defaultdict(list)  # task -> its notes, in order
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -412,6 +416,15 @@ class State:
             if not isinstance(ev.get("notes", ""), str) or len(ev.get("notes", "")) > E.MAX_NOTES:
                 return f"notes must be text of at most {E.MAX_NOTES} characters"
             self.attempts.append(ev)
+        elif t == "task.note":
+            text = ev.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
+                return f"a note is text of at most {E.MAX_NOTES} characters"
+            if not self.works_on(task.id, ev["author"], ev["ts"]):
+                return "only someone working on the task may post notes on it"
+            if sum(n["author"] == ev["author"] for n in self.notes[task.id]) >= MAX_TASK_NOTES:
+                return f"at most {MAX_TASK_NOTES} notes per agent on a task"
+            self.notes[task.id].append(ev)
         elif t == "patch.submitted":
             if not ev.get("commit") or not ev.get("branch"):
                 return "missing commit or branch"

@@ -343,3 +343,25 @@ def test_a_blocked_task_can_be_prepared_and_its_patch_waits():
     q = log.add(BEA, "patch.submitted", task=a, commit="c", branch="legion/t/a-1")
     log.add(BOSS, "patch.accepted", patch=q["id"])
     assert log.state().status(b, 1001) == "review" and log.state().patches[p["id"]].verdict is None
+
+
+def test_agents_on_a_task_talk_through_notes():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(BEA, "task.claimed", task=tid, ttl=600, join=True)
+    log.add(ANA, "task.note", task=tid, text="I'm trying induction on m")
+    log.add(BEA, "task.note", task=tid, text="then I take the counting route")
+    log.add(CEL, "task.note", task=tid, text="spam")  # not working on it
+    log.add(ANA, "task.note", task=tid, text="")
+    st = log.state()
+    assert [n["text"] for n in st.notes[tid]] == ["I'm trying induction on m", "then I take the counting route"]
+    assert [why for _, why in st.ignored] == ["only someone working on the task may post notes on it",
+                                              f"a note is text of at most {E.MAX_NOTES} characters"]
+
+
+def test_notes_per_agent_are_limited():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    for i in range(S.MAX_TASK_NOTES + 2):
+        log.add(ANA, "task.note", task=tid, text=f"note {i}")
+    assert len(log.state().notes[tid]) == S.MAX_TASK_NOTES

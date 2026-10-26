@@ -95,6 +95,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "task.heartbeat": f"renews {key}",
         "task.released": f"releases {key}",
         "attempt.reported": f"reports {ev.get('outcome')} on {key}: {notes}",
+        "task.note": f"notes on {key}: {ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",
         "patch.submitted": f"submits patch {ev['id'][:8]} for {key}",
         "patch.accepted": f"accepts patch {ev.get('patch', '')[:8]} for {key}"
                           + (f" (metric {ev['metric']:g})" if isinstance(ev.get("metric"), (int, float)) else ""),
@@ -561,7 +562,10 @@ def cmd_claim(args):
         others = [n for n in d["working"] if n != c.ident.name]
         if others:
             how = (f"You join {', '.join(others)} on this task: it's the hardest one under way. Try your own "
-                   "route (read their reports first with `python -m legion log`); the first patch accepted wins.\n")
+                   "route (read their reports first with `python -m legion log`); the first patch accepted wins. "
+                   f"Say which route you take with `python -m legion note {t.id} \"...\"`.\n")
+            if c.st.notes.get(t.id):
+                how += "Their notes so far:\n" + "\n".join(notes_text(c.st, t.id)) + "\n"
         elif d["status"] == "blocked":
             how = (f"This task is blocked by {', '.join(d['deps'])}: prepare it. Split it with `sketch` into "
                    "subtasks that don't need them (others can take those right away), or write the patch: it's "
@@ -730,6 +734,25 @@ def cmd_report(args):
     print(f"Next: {KEEP_GOING}")
 
 
+def cmd_note(args):
+    c = Ctx()
+    t = c.task(args.task)
+    if args.text:
+        if not c.holder_is_me(t.id):
+            raise Fail(f"you don't work on {t.key}: only the agents working on a task post notes on it", 3)
+        c.emit("task.note", task=t.id, text=args.text)
+        c.sync()
+        print(f"Note posted on {t.key}; the other agents on it see it in `context` and `note {t.id}`.")
+        return
+    notes = c.st.notes.get(t.id, [])
+    out(args, {"task": t.key, "notes": [{"name": n["name"], "ts": n["ts"], "text": n["text"]} for n in notes]},
+        "\n\n".join(f"[{n['lamport']}] {n['name']}: {n['text']}" for n in notes) or f"No notes on {t.key} yet.")
+
+
+def notes_text(st: S.State, tid: str, last: int = 5) -> list[str]:
+    return [f"  [{n['lamport']}] {n['name']}: {n['text'].strip()}" for n in st.notes.get(tid, [])[-last:]]
+
+
 def cmd_submit(args):
     c = Ctx()
     t = c.task(args.task)
@@ -880,6 +903,11 @@ def cmd_context(args):
     lines += ["", "## Tasks", status_table(st, now)]
     held = st.held_by(c.me, now)
     lines += ["", "## Your claims", ", ".join(f"{t.id} ({t.key})" for t in held) if held else "(none)"]
+    talk = [t for t in held if st.notes.get(t.id)]
+    if talk:
+        lines += ["", "## Notes on your tasks (the latest; all of them with `note <task-id>`)"]
+        for t in talk:
+            lines += [f"{t.key}:"] + notes_text(st, t.id)
     mine = sorted((p for p in st.patches.values() if p.author == c.me), key=lambda p: p.lamport)
     lines += ["", "## Your patches"]
     for p in mine[-10:]:
@@ -1157,6 +1185,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--outcome", choices=["success", "failure"], required=True)
     s.add_argument("--notes", required=True)
     s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("note", help="talk with the other agents on a task: post a note, or read them")
+    s.add_argument("task")
+    s.add_argument("text", nargs="?", help="what to tell them; without it, shows the task's notes")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_note)
 
     s = sub.add_parser("submit", help="submit your current branch as a patch")
     s.add_argument("task")

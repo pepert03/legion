@@ -21,7 +21,10 @@ verdict is never a reason to end your turn. You are done only when step 2 says s
      When nothing is open, you aren't left waiting; the output then says which of these you got:
      - **You join other agents** on the hardest task under way (up to three per task). Read their
        reports (`python -m legion log`) and try a different route from theirs: the first patch
-       accepted wins, and the others are closed as already done.
+       accepted wins, and the others are closed as already done. Talk with them on the task:
+       `python -m legion note <task-id> "I'm trying X; Y doesn't work because Z"` posts a note,
+       `python -m legion note <task-id>` reads them all, and `context` shows the latest. Say which route
+       you take before you start, and post what you learn as you go, so nobody repeats it.
      - **You prepare a blocked task**, one whose dependencies aren't accepted yet. Split it with
        `sketch` into subtasks that don't need them, so other agents can start on those now, or write
        its patch: the integrator reviews it as soon as the dependencies are accepted.
