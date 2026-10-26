@@ -117,10 +117,12 @@ def test_an_agent_that_only_joined_shows_up():
     assert any(a["name"] == "jose#1" for a in viz.snapshot(evs, len(evs))["agents"])
 
 
-def test_an_agent_silent_for_minutes_with_nothing_held_leaves_the_graph(monkeypatch):
+def test_an_agent_silent_for_hours_with_nothing_held_leaves_the_graph(monkeypatch):
     evs, tid = project_events()
+    evs.append(E.create(ANA, "task.heartbeat", 4, task=tid))  # ana's claim is renewed: still hers past the threshold
+    evs[2] = E.create(ANA, "task.claimed", 3, task=tid, ttl=3 * 3600)
     luis = Identity.generate("luis")
-    evs.append(E.create(luis, "agent.joined", 4))
+    evs.append(E.create(luis, "agent.joined", 5))
     now = evs[-1]["ts"]
     monkeypatch.setattr(viz.time, "time", lambda: now + viz.GONE_SECONDS + 1)
     agents = {a["name"]: a for a in viz.snapshot(evs, None)["agents"]}
