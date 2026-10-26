@@ -1123,7 +1123,7 @@ def cmd_integrate(args):
     c.require_integrator()
     integrator.REVIEWERS = max(1, args.reviewers)
     integrator.FRESH = integrator.FRESH or args.fresh
-    deadline = time.time() + args.timeout
+    deadline = time.time() + args.timeout if args.timeout else float("inf")  # 0: integrate until stopped
     last_status, last_role = None, None
     log = lambda m: print(m, flush=True)  # noqa: E731
     integrator.beat = lambda: integrator.keep_leases(c, args.lease)  # keeps the leases through long checks
@@ -1376,7 +1376,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("integrate", help="review pending patches (integrator)")
     s.add_argument("--loop", type=float, default=0, help="repeat every N seconds")
     s.add_argument("--until-done", action="store_true")
-    s.add_argument("--timeout", type=float, default=3600)
+    s.add_argument("--timeout", type=float, default=0,
+                   help="with --loop, stop after this many seconds (default 0: keep integrating until stopped)")
     s.add_argument("--cmd-timeout", type=int, default=600)
     s.add_argument("--lease", type=int, default=int(os.environ.get("LEGION_LEASE", "300")),
                    help="seconds the integration lease lasts without renewal, so how long a takeover can take; "
