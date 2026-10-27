@@ -748,12 +748,20 @@ def hold_shards(c: Ctx, ttl: int, most: int) -> list[str]:
 
 
 def keep_leases(c: Ctx, ttl: int) -> None:
-    """Renew every lease this integrator holds that's past half its time: while a long check runs."""
-    now = time.time()
-    for lease in [l for l in c.st.leases if l.author == c.me and l.active(now) and now - l.last_beat > ttl / 2]:
+    """While a long check runs: renew every lease this integrator holds once it's a third through, and take the
+    project's back if it lapsed anyway and nobody else holds it. It syncs only when it has something to publish:
+    a sync can take minutes (Radicle through WSL), and syncing on every beat is what let the lease lapse."""
+    now, emitted = time.time(), False
+    mine = [l for l in c.st.leases if l.author == c.me and not l.released]
+    for lease in [l for l in mine if l.active(now) and now - l.last_beat > ttl / 3]:
         shard = lease.task.partition(":")[2] or None
         c.emit("integrator.renew", **({"shard": shard} if shard else {}))
-    c.sync()
+        emitted = True
+    if any(l.task == S.LEASE for l in mine) and not c.st.leader(now):
+        c.emit("integrator.lease", ttl=ttl)  # it was ours and lapsed mid-check: nobody took it, so take it again
+        emitted = True
+    if emitted:
+        c.sync()
 
 
 def release_lease(c: Ctx, project_only: bool = False) -> None:

@@ -202,3 +202,20 @@ def test_a_verified_patch_goes_in_before_a_sketch_moves_main(project):
     c.emit("project.policy", spot_check=0)
     assert integrator.accept_verified(c, [].append, False, lambda tid: True) == 1  # before anything moves main
     assert verdicts(tids)["a"] == ["accepted"] and runs(repo, "0") == 0
+
+
+def test_keeping_the_lease_renews_early_retakes_a_lapsed_one_and_syncs_only_then(project, monkeypatch):
+    repo, tids, patch = project
+    c = as_(repo, "boss")
+    assert integrator.hold_lease(c, 300)[0]
+    syncs = []
+    monkeypatch.setattr(c, "sync", lambda: syncs.append(1) or c.reload())
+    integrator.keep_leases(c, 300)
+    assert syncs == []  # fresh lease: nothing to publish, no sync
+    real = integrator.time.time
+    monkeypatch.setattr(integrator.time, "time", lambda: real() + 120)  # past a third of the lease
+    integrator.keep_leases(c, 300)
+    assert syncs == [1] and [e["type"] for e in c.st.events][-1] == "integrator.renew"
+    monkeypatch.setattr(integrator.time, "time", lambda: real() + 1000)  # it lapsed during a long check
+    integrator.keep_leases(c, 300)
+    assert [e["type"] for e in c.st.events][-1] == "integrator.lease"
