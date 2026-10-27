@@ -291,7 +291,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `report <task> --outcome success\|failure --notes` | report what you tried |
 | `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
 | `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones |
-| `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) |
+| `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) and be a subtask (`--parent TASK`) |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |
 | `save <task> --notes "..."` / `start <task> --from <id>` | publish unfinished work on a task / carry on from someone's saved work |
 | `submit <task>` | check zone and acceptance, and publish your branch as a patch |

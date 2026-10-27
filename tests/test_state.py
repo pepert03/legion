@@ -603,6 +603,27 @@ def test_a_proposed_task_carries_its_contract_and_waits_for_its_dependencies():
         "a dependency is a task, or the key of a task another open proposal creates"]
 
 
+def test_a_subtask_can_be_voted_inside_its_parents_zone():
+    log, crowd = trusted_crowd(4)  # a majority is 3
+    uc = S.task_id(log.add(BOSS, "task.created", key="uc", title="upper constant", zone=["uc/"], accept="true"))
+    spec = dict(key="uc/tail", title="t", zone=["uc/Tail.lean"], accept="true", parent=uc)
+    prop = log.add(crowd[0], "proposal.made", kind="task.created", payload=spec)
+    for who in crowd[1:3]:
+        log.add(who, "proposal.voted", proposal=prop["id"], yes=True)
+    st = log.state()
+    tail = st.find_task("uc/tail")
+    assert (tail.parent, tail.depth, tail.sketch) == (uc, 1, None) and [t.key for t in st.children(uc)] == ["uc/tail"]
+    assert not st.done(uc) and st.status(uc, 2000.0) != "sketched"  # the parent still needs its own proof
+    for payload in (dict(spec, key="uc/out", zone=["elsewhere.lean"]),   # leaves the parent's zone
+                    dict(spec, key="other", zone=["uc/x.lean"]),         # doesn't carry its key
+                    dict(spec, key="uc/s", sketch="abc")):               # pretends to come from a sketch
+        log.add(crowd[0], "proposal.made", kind="task.created", payload=payload)
+    assert [err for _, err in log.state().ignored[-3:]] == [
+        "a subtask must carry its parent's key and stay inside its zone",
+        "a subtask must carry its parent's key and stay inside its zone",
+        "a voted subtask has a parent, not a sketch or a path"]
+
+
 def test_saved_work_is_kept_per_author_for_whoever_takes_the_task_next():
     log, tid = project()
     log.add(ANA, "task.claimed", task=tid, ttl=600)

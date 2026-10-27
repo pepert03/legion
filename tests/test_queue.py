@@ -424,6 +424,32 @@ def test_saved_work_lets_the_next_agent_carry_on(project, capsys):
     assert (repo / "a.txt").read_text() == "stage 1\n" and "luis" in capsys.readouterr().out
 
 
+def test_saved_work_on_another_task_brings_only_this_zone(project, capsys):
+    """Work saved on a broad task (upper-constant) that a narrower task (one of its files) now asks for: whoever
+    takes the narrow one is told, and `start --from` brings just its files, so the patch stays in its zone."""
+    from legion.cli import main
+    repo, tids, patch = project
+    big = S.task_id(make_project.add(make_project.people["boss"], "task.created", key="big", title="both",
+                                     zone=["a.txt", "b.txt"], accept="python check.py a"))
+    as_(repo, "luis")
+    main(["claim", big])
+    main(["start", big])
+    for k in "ab":
+        (repo / f"{k}.txt").write_text(f"{k} from luis\n")
+    git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", "both files")
+    main(["save", big, "--notes", "b.txt is finished"])
+    git(repo, "checkout", "-q", "main")
+    as_(repo, "marta")
+    capsys.readouterr()
+    main(["claim", tids["b"]])
+    save = Ctx(sync=False).st.saves(big)[0]
+    shown = capsys.readouterr().out
+    assert "Saved work on other tasks" in shown and f"[{save['id'][:8]}] luis#1 on big: b.txt" in shown
+    main(["start", tids["b"], "--from", save["id"][:8]])
+    assert (repo / "b.txt").read_text() == "b from luis\n" and (repo / "a.txt").read_text().strip() == "todo"
+    assert git(repo, "diff", "--name-only", "legion/main", "HEAD") == "b.txt"
+
+
 def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
     from legion.cli import main
     repo, tids, patch = project
@@ -459,3 +485,12 @@ def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
     main(["start", "next"])  # the agent works with the contract in its clone, and git leaves it out of commits
     assert (repo / "legion_contracts" / "next" / "test_next.py").read_text() == CONTRACT
     assert git(repo, "status", "--porcelain") == ""
+    # A subtask by vote: the key carries its parent's, and it hangs under it once voted in.
+    main(["propose", "task", "--parent", "voted", "--key", "part", "--title", "Part", "--zone", "v.txt",
+          "--accept", "python check.py v"])
+    pid = max(Ctx(sync=False).st.proposals, key=lambda p: Ctx(sync=False).st.proposals[p]["ev"]["lamport"])
+    for who in ("marta", "boss"):
+        as_(repo, who)
+        main(["vote", pid[:8], "yes"])
+    st = Ctx(sync=False).st
+    assert st.find_task("voted/part").parent == st.find_task("voted").id

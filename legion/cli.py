@@ -653,6 +653,12 @@ def cmd_claim(args):
             how += ("Work in progress on this task is saved: don't start from zero. Read what each one says, and "
                     "build on the one that's furthest along with `start --from <id>`:\n"
                     + "\n".join(saves_text(c.st, t.id, c.me)) + "\n")
+        other = [(w, files) for w, files in elsewhere(c, t) if w["author"] != c.me]
+        if other:
+            how += ("Saved work on other tasks already has files of this task's zone: don't write them again. "
+                    "`start --from <id>` brings in just those files:\n"
+                    + "\n".join(f"  [{w['id'][:8]}] {w['name']} on {c.st.tasks[w['task']].key}: {', '.join(files)}"
+                                for w, files in other) + "\n")
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
@@ -703,21 +709,8 @@ def cmd_start(args):
                        f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
         on.append(f"{c.st.tasks[dep].key} ({p.id[:8]})")
     built = f", on top of the patches in review of {', '.join(on)}" if on else ""
-    if args.from_:  # someone's unfinished work on this task: carry on from it
-        found = [w for w in c.st.saved[t.id] if w["id"].startswith(args.from_)]
-        if len(found) != 1:
-            raise Fail(f"no single saved work on {t.key} matches {args.from_}: `claim` and `note {t.id}` list them")
-        w = found[0]
-        if not coordgit.fetch_patch(c.repo, w["branch"]) or not coordgit.has_commit(c.repo, w["commit"]):
-            raise Fail(f"{w['name']}'s saved work ({w['id'][:8]}) hasn't reached this clone yet: run "
-                       "`python -m legion context` in a minute and `start` again")
-        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {w['name']}'s saved work ({w['id'][:8]})",
-                         w["commit"], env=coordgit.author_env(c.ident))
-        if m.returncode:
-            coordgit.run(c.repo, "merge", "--abort")
-            raise Fail(f"{w['name']}'s saved work doesn't merge with the current main: "
-                       f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
-        built += f", with {w['name']}'s saved work ({w['id'][:8]})"
+    if args.from_:  # someone's unfinished work: carry on from it
+        built += carry_on(c, t, args.from_)
     print(f"You are on {branch}, created from {main}{built}. Work inside the zone: {', '.join(t.zone)}")
     if on:
         print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
@@ -725,6 +718,58 @@ def cmd_start(args):
     if put_contract(c.repo, t):
         print(f"The task's contract is in {S.contract_dir(t.key)}/ ({', '.join(t.contract)}): your patch must pass "
               "it as it is. Legion writes it before every check, and git ignores it here.")
+
+
+def carry_on(c: Ctx, t: S.Task, ref: str) -> str:
+    """Bring saved work into the new branch. Saved on this task, it's merged whole; saved on another one (work
+    that outgrew its task, say), only its files inside this task's zone come, so the patch can still be sent."""
+    found = [w for ws in c.st.saved.values() for w in ws if w["id"].startswith(ref) or w["commit"].startswith(ref)]
+    if len(found) != 1:
+        raise Fail(f"no single saved work matches {ref}: `claim` and `note <task-id>` list them")
+    w = found[0]
+    if not coordgit.fetch_patch(c.repo, w["branch"]) or not coordgit.has_commit(c.repo, w["commit"]):
+        raise Fail(f"{w['name']}'s saved work ({w['id'][:8]}) hasn't reached this clone yet: run "
+                   "`python -m legion context` in a minute and `start` again")
+    env = coordgit.author_env(c.ident)
+    if w["task"] == t.id:
+        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {w['name']}'s saved work ({w['id'][:8]})",
+                         w["commit"], env=env)
+        if m.returncode:
+            coordgit.run(c.repo, "merge", "--abort")
+            raise Fail(f"{w['name']}'s saved work doesn't merge with the current main: "
+                       f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
+        return f", with {w['name']}'s saved work ({w['id'][:8]})"
+    files = zone_files(c, w["commit"], t.zone)
+    if files:  # only what this branch doesn't have already
+        files = [f for f in git(c.repo, "diff", "--name-only", "HEAD", w["commit"], "--", *files).splitlines() if f]
+    if not files:
+        raise Fail(f"{w['name']}'s saved work ({w['id'][:8]}, on {c.st.tasks[w['task']].key}) brings nothing new to "
+                   f"this task's zone ({', '.join(t.zone)})")
+    git(c.repo, "checkout", w["commit"], "--", *files)
+    git(c.repo, "commit", "-q", "-m", f"Bring {', '.join(files)} from {w['name']}'s saved work on "
+        f"{c.st.tasks[w['task']].key} ({w['id'][:8]})", env=env)
+    return f", with {', '.join(files)} from {w['name']}'s saved work on {c.st.tasks[w['task']].key} ({w['id'][:8]})"
+
+
+def zone_files(c: Ctx, commit: str, zone: list) -> list[str]:
+    """The files a saved commit changed, compared to the main it started from, that lie inside a zone."""
+    base = coordgit.run(c.repo, "merge-base", commit, coordgit.base_ref(c.repo)).stdout.decode().strip()
+    changed = git(c.repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base or commit + "^", commit)
+    return [f for f in changed.splitlines() if f and S.in_zone(f, zone)]
+
+
+def elsewhere(c: Ctx, t: S.Task) -> list[tuple[dict, list[str]]]:
+    """Saved work on other tasks that touches this task's zone: what `start --from` can bring in."""
+    found = []
+    for tid, ws in c.st.saved.items():
+        if tid == t.id or c.st.done(tid):
+            continue
+        for w in c.st.saves(tid):
+            if coordgit.has_commit(c.repo, w["commit"]):
+                files = zone_files(c, w["commit"], t.zone)
+                if files:
+                    found.append((w, files))
+    return found
 
 
 def put_contract(repo, t: S.Task) -> bool:
@@ -934,7 +979,8 @@ def cmd_verify(args):
 def proposal_line(st: S.State, pid: str, now: float) -> str:
     prop = st.proposals[pid]
     ev, kind = prop["ev"], prop["ev"]["kind"]
-    what = {"task.created": lambda p: f"new task {p.get('key')}: {p.get('title')}",
+    what = {"task.created": lambda p: (f"new {'subtask' if p.get('parent') else 'task'} {p.get('key')}: "
+                                       f"{p.get('title')}"),
             "project.policy": lambda p: "policy: " + ", ".join(f"{k}={v}" for k, v in p.items()),
             "project.described": lambda p: "new description: " + str(p.get("description", ""))[:120],
             "digest.published": lambda p: "new digest"}[kind](ev["payload"])
@@ -969,8 +1015,15 @@ def cmd_propose(args):
             raise Fail("a task needs --key, --title, --zone and --accept")
         # A dependency is a task, or the key of one an open proposal creates (this task then waits for it).
         deps = [c.st.find_task(d).id if c.st.find_task(d) else d for d in args.deps or []]
-        payload = {"key": args.key, "title": args.title, "zone": args.zone, "accept": args.accept,
+        key = args.key
+        parent = c.task(args.parent) if args.parent else None
+        if parent and not key.startswith(parent.key + "/"):  # a subtask's key carries its parent's, as in sketches
+            key = f"{parent.key}/{key}"
+        payload = {"key": key, "title": args.title, "zone": args.zone, "accept": args.accept,
                    "body": args.body or "", "size": args.size, "mode": args.mode, "deps": deps}
+        if parent:
+            payload["parent"] = parent.id
+        args.key = key
         if args.contract:
             payload["contract"] = {}
             for f in args.contract:
@@ -1667,6 +1720,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--accept")
     s.add_argument("--body")
     s.add_argument("--deps", nargs="*", help="tasks, or keys of tasks other open proposals create")
+    s.add_argument("--parent", help="make it a subtask of this task: its zone must lie inside the parent's, and the "
+                                    "parent still counts as done only when its own acceptance command passes")
     s.add_argument("--contract", action="append", metavar="FILE",
                    help="a test file that pins what the task's patch must do (repeatable); legion writes it in "
                         f"{S.CONTRACT_DIR}/<key>/ before every check, and the acceptance command must run it")

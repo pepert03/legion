@@ -332,9 +332,13 @@ class State:
                 return f"a proposal is a kind ({', '.join(sorted(PROPOSABLE))}) and its payload"
             if ev["kind"] == "task.created":
                 payload = ev["payload"]
-                if payload.get("parent") or payload.get("sketch"):
-                    return "subtasks come from sketches, not votes"
-                err = contract_error(payload)
+                if payload.get("sketch") or payload.get("path"):
+                    return "a voted subtask has a parent, not a sketch or a path"
+                # A subtask by vote, like a path's: inside its parent's zone and key, and it doesn't replace the
+                # parent, which still counts as done only when its own acceptance command passes.
+                err = payload.get("parent") and self._subtask_error(self.tasks.get(payload["parent"]),
+                                                                    payload.get("key") or "", payload.get("zone") or [])
+                err = err or contract_error(payload)
                 if err:
                     return err
                 # A dependency is a task, or one that another open proposal creates: this one waits for it.
@@ -776,7 +780,7 @@ class State:
             if not self.took_part(task.id, ev["author"], ev["ts"]):
                 return "only someone who works on the task, or has, may save work on it"
             self.saved[task.id].append({k: ev[k] for k in ("id", "author", "name", "commit", "branch", "ts", "lamport")}
-                                       | {"notes": ev.get("notes", "")})
+                                       | {"task": task.id, "notes": ev.get("notes", "")})
         elif t == "patch.submitted":
             if not ev.get("commit") or not ev.get("branch"):
                 return "missing commit or branch"
@@ -879,10 +883,16 @@ class State:
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
-            sketch = self.sketches.get(ev.get("sketch") or ev.get("path"))
-            if not parent or not sketch or sketch.task != parent.id or sketch.verdict != "accepted":
-                return "a subtask needs a parent and an accepted sketch or path of that parent"
-            if not key.startswith(parent.key + "/") or not all(in_zone(z.rstrip("/"), parent.zone) for z in zone):
+            voted = ev.get("id") == self._by_vote and not ev.get("sketch") and not ev.get("path")
+            if not voted:
+                sketch = self.sketches.get(ev.get("sketch") or ev.get("path"))
+                if not parent or not sketch or sketch.task != parent.id or sketch.verdict != "accepted":
+                    return "a subtask needs a parent and an accepted sketch or path of that parent"
+            if voted:
+                err = self._subtask_error(parent, key, zone)
+                if err:
+                    return err
+            elif not key.startswith(parent.key + "/") or not all(in_zone(z.rstrip("/"), parent.zone) for z in zone):
                 return "a subtask must carry its parent's key and stay inside its zone"
             depth = parent.depth + 1
         tid = task_id(ev)
@@ -892,6 +902,15 @@ class State:
                                depth, contract=dict(ev.get("contract") or {}))
         if sketch:
             sketch.child_ids.append(tid)
+        return None
+
+    def _subtask_error(self, parent: Task | None, key: str, zone: list) -> str | None:
+        if parent is None or parent.cancelled:
+            return "a subtask needs a parent task"
+        if not key.startswith(parent.key + "/") or not zone or not all(in_zone(z.rstrip("/"), parent.zone) for z in zone):
+            return "a subtask must carry its parent's key and stay inside its zone"
+        if parent.depth + 1 > MAX_DEPTH:
+            return f"can't split more than {MAX_DEPTH} levels deep"
         return None
 
     def _integrators(self, ev: dict) -> str | None:

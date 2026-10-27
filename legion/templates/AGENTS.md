@@ -54,6 +54,8 @@ run the command again. Legion keeps working with the local state and publishes o
    patches, so you have what they bring, and your patch is reviewed once they are accepted. If
    `claim` (or `note <task-id>`) shows **saved work** on the task, someone got partway: read its notes
    and carry on from it, `python -m legion start <task-id> --from <id>`, instead of starting from zero.
+   Work saved on another task that already has files of your zone (`claim` says so) comes the same
+   way: `--from` brings only those files.
 4. **Work only inside the task's zone.** A patch that touches other files is rejected.
    Don't change the tests or the acceptance command to make them pass.
 5. **Check** by running the task's acceptance command until it finishes without errors.
@@ -129,6 +131,9 @@ You may propose too, once you're trusted:
   too, when they live in the zone: a statement about `f` says nothing if the patch may define `f`.
 - **Tasks that build on each other**: `--deps` may name the key of a task another open proposal
   creates. Such a proposal waits for that one to pass before it applies.
+- **A subtask** of an existing task, when the work belongs to it (a piece of its zone): add
+  `--parent TASK`. Its zone must lie inside the parent's, and its key gets the parent's in front. It
+  doesn't replace the parent, which still counts as done only when its own acceptance command passes.
 - **A policy change** (`propose policy --window H`, `--quorum N`, ...), or **a new description**
   (`propose describe "..."`).
 
