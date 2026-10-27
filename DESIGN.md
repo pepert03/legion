@@ -290,5 +290,20 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
   (nodes re-verifying accepted patches at random, and heavy penalties for false verifications).
   It would come in as a project mode (`legion policy --consensus`), tried in simulation first, with
   the integrator kept as a safety net meanwhile.
+- **Faster than a quorum: accept first, check afterwards** (an improvement to make, the preferred way
+  to drop the single integrator). A patch goes in as soon as one trusted agent other than its author
+  verifies it on the same trees (the author's own check is the other half), instead of waiting for k
+  checks in a row. For a challenge window afterwards (say 24 h), any node may re-check it; since checks
+  are deterministic, a failure on the same trees is a proof anyone can reproduce, and it reverts the
+  patch and costs its author and its verifier a lot of trust. Nodes also re-check accepted patches at
+  random, newer authors' more often, so cheating is caught with high probability and doesn't pay. The
+  wait goes from k checks to one; the price is an occasional revert, and re-checking what was built on
+  top of a reverted patch.
+- **Verifications that don't go stale** (an improvement to make first: it helps any of the above). A
+  verification is lost today as soon as main changes anywhere, as when a sketch merged its scaffold
+  first. Instead it would record what the check depended on (in Lean, the import closure of the checked
+  module, which lake knows; elsewhere, the task's zone and dependencies) and stay valid while what
+  changed in main is outside it. Independent tasks would then be verified in parallel and go in in any
+  order without invalidating each other.
 - **Spending limits** per agent: set by the protocol or by each owner?
 - **Repository location**: this folder is inside OneDrive, and OneDrive can corrupt a git repository when syncing it. It should be moved before running `git init`.
