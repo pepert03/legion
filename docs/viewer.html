@@ -69,6 +69,8 @@
   .row .who { flex: 1; min-width: 0; }
   .row .who div { font-style: italic; color: var(--ink2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row:hover .who > span { text-decoration: underline; text-decoration-color: var(--ink3); text-underline-offset: 3px; }
+  .row .trusted { margin-left: 6px; font-size: 11px; font-variant: small-caps; letter-spacing: .06em; padding: 0 5px;
+    border-radius: 3px; border: 1px solid var(--accepted); color: var(--accepted); }
   .person { display: grid; grid-template-columns: 1fr auto; align-items: baseline; padding: 5px 0; border-bottom: 1px solid #efebe3; }
   .person:last-child { border-bottom: 0; }
   .person .sub { font-style: italic; color: var(--ink3); font-size: 13px; }
@@ -143,7 +145,7 @@
   <h1 id="project">&nbsp;</h1>
   <div class="meta" id="meta"></div>
 </div>
-<button class="icon-btn" id="openLog" title="Agents, people and activity" aria-label="Agents, people and activity">
+<button class="icon-btn" id="openLog" title="Agents and activity" aria-label="Agents and activity">
   <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
     <path d="M4 5.5h12M4 10h12M4 14.5h7.5"/>
   </svg>
@@ -243,7 +245,7 @@ const KIND_ORDER = ["claude", "codex", "deepseek", "gemini", "cursor", "opencode
 function kindOf(a) {
   // What the agent said it is; failing that, its name (an agent called "codex-ana" is most likely Codex).
   const k = ([...(a.kinds || []), ...(a.models || [])].join(" ") || a.name || "").toLowerCase();
-  if (isIntegrator(a) || k.includes("human") || k.includes("humano")) return a.leader === false && isIntegrator(a) ? "standby" : "human";
+  if (isIntegrator(a) || a.role === "founder" || k.includes("human") || k.includes("humano")) return a.leader === false && isIntegrator(a) ? "standby" : "human";
   if (k.includes("gpt")) return "codex";
   for (const kind of KIND_ORDER) if (k.includes(kind)) return kind;
   if (k.includes("llama")) return "meta";
@@ -613,18 +615,15 @@ function eventList(items, withName) {
 function viewLog() {
   const offline = data.agents.filter((a) => a.gone).length;
   const list = data.agents.filter((a) => !a.gone).sort((x, y) => (y.holds.length - x.holds.length) || (y.active - x.active) || x.name.localeCompare(y.name));
-  const people = Object.entries(data.people || {}).sort((x, y) => y[1].score - x[1].score);
-  const agentsOf = (p) => data.agents.filter((a) => !isIntegrator(a) && nameParts(a).owner === p).length;
+
   return [
-    people.length ? [h("h2", { class: "caps" }, "People"),
-      ...people.map(([p, t]) => h("div", { class: "person" },
-        h("div", {}, p, h("span", { class: "sub" }, `  ${agentsOf(p)} agent${agentsOf(p) === 1 ? "" : "s"}`)), scoreNode(t)))] : null,
     h("h2", { class: "caps" }, "Agents"),
     ...list.map((a) => {
       const doing = a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "checking" : "working on"} ${taskKey(a.holds[0])}`
         : isIntegrator(a) ? (a.leader ? "integrating: holds the lease" : "standing by to take over") : a.last || "no activity";
       return h("div", { class: "row", onclick: () => openPop("item", a.id) }, discImg(a),
-        h("div", { class: "who" }, nameNode(a), h("div", {}, doing)), scoreNode(a.trust));
+        h("div", { class: "who" }, nameNode(a), a.trusted ? h("span", { class: "trusted" }, "trusted") : null,
+          h("div", {}, doing)), scoreNode(a.trust));
     }),
     offline ? h("p", { class: "empty" }, `and ${offline} offline (nothing published for more than 2 hours)`) : null,
     h("h2", { class: "caps" }, "Activity"),
@@ -642,7 +641,7 @@ async function history(id) {
 function trustBlock(a) {
   const t = a.trust;
   if (!t) return null;
-  const person = (data.people || {})[nameParts(a).owner];
+
   const color = t.level === "high" ? P.accepted : t.level === "low" ? P.cancelled : t.level === "new" ? P.ink3 : P.ink;
   return [
     h("h2", { class: "caps" }, "Trust"),
@@ -652,8 +651,8 @@ function trustBlock(a) {
         h("div", { style: "font-style:italic;color:var(--ink2)" },
           t.level === "new" ? "Not enough evidence yet." : { high: "Reliable so far.", fair: "Mixed record.", low: "Often rejected." }[t.level]),
         h("div", { class: "bar", style: `color:${color}` }, h("i", { style: `width:${t.score}%` })),
-        person && person !== t ? h("div", { class: "sub", style: "font-style:italic;color:var(--ink3);font-size:13px;margin-top:6px" },
-          `${nameParts(a).owner}, across all their agents: ${person.score}`) : null)),
+        a.trusted ? h("div", { class: "sub", style: "font-style:italic;color:var(--ink3);font-size:13px;margin-top:6px" },
+          "Trusted: its verifications let patches in, and it finalizes them.") : null)),
     t.breakdown.length ? h("ul", { class: "because" }, ...t.breakdown.map((b) =>
       h("li", { class: b.effect }, `${b.label}${b.count > 1 ? ` ×${b.count}` : ""}`))) : null,
   ];
@@ -748,10 +747,16 @@ function viewGoal() {
     h("div", { class: "head" }, h("div", { class: "orb", style: "border:1px solid var(--ink)" }),
       h("div", {}, h("div", { class: "name" }, data.project || "Project"), h("div", { class: "sub" }, "the main goal"))),
     data.description ? h("p", { class: "desc" }, data.description) : null,
+    data.mode === "open" ? h("p", { class: "desc", style: "font-style:italic" },
+      `No integrator: a patch goes in as soon as ${Math.max(1, data.policy.quorum)} trusted agent${data.policy.quorum > 1 ? "s" : ""} ` +
+      `other than its author verif${data.policy.quorum > 1 ? "y" : "ies"} it. For ${Math.round(data.policy.window / 3600)} h ` +
+      "after that, agents audit it, and two who see it fail revert it.") : null,
     h("div", { class: "nums" },
       h("div", {}, h("b", {}, g.done), h("span", { class: "caps" }, "done")),
       h("div", {}, h("b", {}, g.total - g.done), h("span", { class: "caps" }, "to do")),
-      h("div", {}, h("b", {}, data.agents.filter((a) => !isIntegrator(a)).length), h("span", { class: "caps" }, "agents"))),
+      h("div", {}, h("b", {}, data.agents.filter((a) => !isIntegrator(a)).length), h("span", { class: "caps" }, "agents")),
+      data.mode === "open" ? h("div", {}, h("b", {}, data.agents.filter((a) => a.trusted).length),
+        h("span", { class: "caps" }, "trusted")) : null),
   ];
 }
 

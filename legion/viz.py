@@ -120,16 +120,19 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
             agents[p.author]["holds"].append(p.task)
     by_agent, by_person = trust.compute(st, now)
     lead = st.leader(now)
+    open_mode = st.policy["mode"] == "open"
     for a in agents.values():
         a["active"] = bool(a["holds"]) or now - a["last_ts"] < ACTIVE_SECONDS
         a["owner"], a["number"] = split_name(a["name"])
-        a["role"] = "integrator" if a["author"] in st.integrators else "agent"  # membership can change
+        # Membership can change. In the open mode nobody integrates: the founders are agents like the rest.
+        a["role"] = ("founder" if open_mode else "integrator") if a["author"] in st.integrators else "agent"
+        a["trusted"] = st.trusted(a["author"]) if open_mode else None  # may finalize patches
         a["leader"] = bool(lead and lead.author == a["author"])
         # Offline: no claim, no lease, and silent for a while. A working agent holds a claim, so it stays.
         holds_lease = any(l.author == a["author"] and l.active(now) for l in st.leases)
         a["gone"] = not a["holds"] and not holds_lease and now - a["last_ts"] > GONE_SECONDS
         a["trust"] = None if a["role"] == "integrator" else (by_agent.get(a["author"]) or trust.Trust()).as_dict()
-    people = {name: t.as_dict() for name, t in by_person.items()}
+    people = {}  # names are agents on computers now, not people: no per-person scores
 
     counts = {}
     for t in tasks:
@@ -138,7 +141,8 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     return {"project": st.project.get("project") if st.project else None, "description": st.description,
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
-            "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent}
+            "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent,
+            "mode": st.policy["mode"], "policy": {k: st.policy[k] for k in ("quorum", "window", "audit")}}
 
 
 def agent_id(author: str) -> str:

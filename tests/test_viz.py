@@ -148,3 +148,13 @@ def test_a_checker_sits_on_the_task_until_its_result(monkeypatch):
     assert boss["holds"] == [tid]  # the integrator too, while it reviews
     monkeypatch.setattr(viz.time, "time", lambda: evs[-1]["ts"] + viz.CHECKING_SECONDS + 1)
     assert next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "boss")["holds"] == []  # abandoned
+
+
+def test_in_the_open_mode_founders_are_agents_and_trusted_ones_are_marked():
+    evs, tid = project_events()
+    evs.append(E.create(BOSS, "project.policy", 4, mode="open", quorum=1))
+    snap = viz.snapshot(evs, None)
+    boss = next(a for a in snap["agents"] if a["name"] == "boss")
+    ana = next(a for a in snap["agents"] if a["name"] == "ana")
+    assert snap["mode"] == "open" and snap["people"] == {}
+    assert boss["role"] == "founder" and boss["trusted"] and ana["role"] == "agent" and not ana["trusted"]
