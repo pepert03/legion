@@ -18,6 +18,8 @@ TYPES = {
     "attempt.reported",
     "task.note",
     "patch.verified",
+    "proposal.made",
+    "proposal.voted",
     "patch.reverted",
     "patch.checking",
     "project.policy",

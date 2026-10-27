@@ -49,6 +49,12 @@ FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accept
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
 # Rejections any node can confirm with git alone; the others need failing verifications behind them.
 PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout"}
+# In the open mode, what only founders publish can also pass by a vote: a trusted agent proposes it, and it applies
+# once enough trusted owners active in the last ACTIVE_DAYS say yes (each owner counts once): a majority, two
+# thirds for the policy, and never fewer than MIN_YES (or all the active ones, if they are fewer). While fewer than
+# FOUNDERS_UNTIL trusted owners aren't founders, a founder's no blocks it. It lapses after ACTIVE_DAYS.
+PROPOSABLE = {"task.created", "project.policy", "project.described", "digest.published"}
+ACTIVE_DAYS, MIN_YES, FOUNDERS_UNTIL = 7, 3, 5
 TRUSTED_AFTER = 2  # accepted patches, and never a false verification, to be trusted without being a founder
 
 
@@ -192,6 +198,10 @@ class State:
         self.verifications: dict[str, list[dict]] = defaultdict(list)  # patch -> patch.verified events
         self.accepted_count: dict[str, int] = defaultdict(int)  # author -> its accepted patches
         self.falsified: set[str] = set()  # authors of a reverted patch, and whoever verified it as passing
+        self.last_seen: dict[str, float] = {}  # author -> its latest event: who is active, for votes
+        self.names: dict[str, str] = {}
+        self.proposals: dict[str, dict] = {}  # id -> {"ev", "votes": {owner: yes?}, "status", "reason"}
+        self._by_vote: str | None = None  # the proposal being applied right now
         self.policy: dict = dict(POLICY)
         self.integrator_names: dict[str, str] = {}
 
@@ -265,6 +275,62 @@ class State:
             if not ev.get("merge_commit"):
                 return "a revert needs its commit"
             return self.backed(p, ev.get("verified_by"), "fail", tree=p.tree)
+        return None
+
+    def active_owners(self, now: float) -> set[str]:
+        """Trusted owners with an event in the last ACTIVE_DAYS: who a vote is counted among."""
+        return {owner(self.names[a]) for a, ts in self.last_seen.items()
+                if now - ts <= ACTIVE_DAYS * 86400 and self.trusted(a)}
+
+    def votes_needed(self, kind: str, now: float) -> int:
+        active = len(self.active_owners(now))
+        share = active * 2 // 3 + (1 if active * 2 % 3 else 0) if kind == "project.policy" else active // 2 + 1
+        return max(share, min(MIN_YES, active), 1)
+
+    def _proposal(self, ev: dict) -> str | None:
+        if self.policy["mode"] != "open":
+            return "proposals and votes are for the open mode (with an integrator, the founders decide)"
+        if not self.trusted(ev["author"]):
+            return "only a trusted agent may propose or vote"
+        me = owner(ev["name"])
+        if ev["type"] == "proposal.made":
+            if ev.get("kind") not in PROPOSABLE or not isinstance(ev.get("payload"), dict):
+                return f"a proposal is a kind ({', '.join(sorted(PROPOSABLE))}) and its payload"
+            if ev["kind"] == "task.created" and (ev["payload"].get("parent") or ev["payload"].get("sketch")):
+                return "subtasks come from sketches, not votes"
+            self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "status": "open", "reason": ""}
+            return self._tally(ev["id"], ev["ts"])
+        prop = self.proposals.get(ev.get("proposal"))
+        if prop is None:
+            return "unknown proposal"
+        if prop["status"] != "open" or ev["ts"] - prop["ev"]["ts"] > ACTIVE_DAYS * 86400:
+            return "the proposal is closed"
+        if not isinstance(ev.get("yes"), bool):
+            return "a vote is yes: true or false"
+        prop["votes"][me] = ev["yes"]
+        return self._tally(prop["ev"]["id"], ev["ts"])
+
+    def _tally(self, pid: str, now: float) -> None:
+        prop = self.proposals[pid]
+        kind = prop["ev"]["kind"]
+        founders = {owner(self.names.get(a, "")) for a in self.integrators}
+        others = self.active_owners(now) - founders
+        if len(others) < FOUNDERS_UNTIL and any(prop["votes"].get(f) is False for f in founders):
+            prop["status"], prop["reason"] = "vetoed", "a founder said no"
+            return None
+        yes = sum(1 for o, v in prop["votes"].items() if v)
+        if yes < self.votes_needed(kind, now):
+            return None
+        # It passes: apply it as if a founder had published it, the same way on every node. The task's id and
+        # everything else come from the proposal itself.
+        ev = dict(prop["ev"]["payload"], type=kind, author=prop["ev"]["author"], name=prop["ev"]["name"],
+                  lamport=prop["ev"]["lamport"], ts=now, id=prop["ev"]["id"])
+        self._by_vote = ev["id"]
+        try:
+            err = self.apply(ev)
+        finally:
+            self._by_vote = None
+        prop["status"], prop["reason"] = ("failed", err) if err else ("passed", "")
         return None
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
@@ -506,7 +572,9 @@ class State:
             return None
         if self.project is None:
             return "the project is not started"
-        if t in E.INTEGRATOR_ONLY and ev["author"] not in self.integrators:
+        if t in ("proposal.made", "proposal.voted"):
+            return self._proposal(ev)
+        if t in E.INTEGRATOR_ONLY and ev["author"] not in self.integrators and ev.get("id") != self._by_vote:
             open_ok = (self.policy["mode"] == "open" and t in FINALIZE and self.trusted(ev["author"])
                        and (t != "task.created" or ev.get("sketch") or ev.get("path")))
             if not open_ok:
@@ -859,7 +927,11 @@ def build(events: list[dict], trusted=None) -> State:
     for ev in sorted(events, key=lambda e: (e.get("lamport", 0) if isinstance(e.get("lamport"), int) else 0,
                                             str(e.get("id", "")))):
         known = trusted is True or (trusted is not None and id(ev) in trusted)
-        err = (None if known else E.check(ev)) or st.apply(ev)
+        err = None if known else E.check(ev)
+        if not err:  # who acts now is active now: a vote counts its own author among the active owners
+            st.names[ev["author"]] = ev["name"]
+            st.last_seen[ev["author"]] = max(st.last_seen.get(ev["author"], 0), ev["ts"])
+            err = st.apply(ev)
         if err:
             st.ignored.append((ev, err))
             continue

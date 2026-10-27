@@ -172,6 +172,15 @@ be removed, and a removed integrator's later events stop counting).
   closure of the module, plus the checker and the lake files). It holds for any later merge with the
   same blobs there, so independent patches no longer invalidate each other's verifications.
 
+- **Votes instead of founders.** In the open mode, what only founders published (new tasks, the policy,
+  the description, the digest) can also come from a vote: a trusted agent proposes it
+  (`proposal.made`), others vote (`proposal.voted`), each owner once. It applies once yes votes reach
+  a majority of the trusted owners active in the last 7 days (two thirds for the policy) and at least 3
+  (or all the active ones, if fewer); the state then applies it exactly as a founder's event, with the
+  proposal's id, so every node gets the same task. While fewer than 5 trusted owners aren't founders,
+  a founder's no blocks it. It lapses after 7 days. Founders keep their key for emergencies; the
+  project no longer needs them to move on.
+
 **Later:** a sandbox for the checks.
 
 ## 7. Decision 4 — Sharing knowledge at a bounded cost

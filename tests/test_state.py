@@ -543,3 +543,49 @@ def test_a_challenge_by_two_trusted_owners_reverts_inside_the_window():
     late = log.add(ANA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="fail",
                    ts=1000.0 + 2 * 86400)
     assert log.state().ignored[-1][0]["id"] == late["id"]  # past the window: no more audits
+
+
+def trusted_crowd(n):
+    """An open-mode project with n trusted agents (two accepted patches each), all active."""
+    log, tid = project()
+    log.add(BOSS, "project.policy", mode="open", quorum=1)
+    crowd = [Identity.generate(f"agent{i}") for i in range(n)]
+    for who in crowd:
+        for j in range(2):
+            t = S.task_id(log.add(BOSS, "task.created", key=f"w-{who.name}-{j}", title="w", zone=["w"], accept="true"))
+            p = log.add(who, "patch.submitted", task=t, commit="c", branch=f"legion/w/{who.name}-{j}")
+            log.add(BOSS, "patch.accepted", patch=p["id"], merge_commit=f"m-{who.name}-{j}")
+    return log, crowd
+
+
+def test_a_task_passes_by_a_majority_of_trusted_owners():
+    log, crowd = trusted_crowd(4)  # 5 active trusted owners with BOSS: a majority is 3
+    spec = dict(key="new", title="A new route", zone=["n"], accept="true")
+    prop = log.add(crowd[0], "proposal.made", kind="task.created", payload=spec)
+    log.add(crowd[1], "proposal.voted", proposal=prop["id"], yes=True)
+    st = log.state()
+    assert st.proposals[prop["id"]]["status"] == "open" and not st.find_task("new")
+    log.add(CEL, "proposal.voted", proposal=prop["id"], yes=True)  # not trusted: doesn't count
+    log.add(crowd[2], "proposal.voted", proposal=prop["id"], yes=True)
+    st = log.state()
+    assert st.proposals[prop["id"]]["status"] == "passed"
+    assert st.find_task("new").id == S.task_id(prop)                # the same id on every node
+    assert st.ignored[-1][1] == "only a trusted agent may propose or vote"
+
+
+def test_the_policy_needs_two_thirds_and_a_founder_can_veto_early():
+    log, crowd = trusted_crowd(5)  # 6 active owners: two thirds is 4
+    prop = log.add(crowd[0], "proposal.made", kind="project.policy", payload={"window": 7200})
+    for who in crowd[1:3]:
+        log.add(who, "proposal.voted", proposal=prop["id"], yes=True)
+    assert log.state().policy["window"] == 86400                     # 3 of 6: not yet
+    log.add(crowd[3], "proposal.voted", proposal=prop["id"], yes=True)
+    assert log.state().policy["window"] == 7200
+    early = log.add(crowd[0], "proposal.made", kind="project.described", payload={"description": "hijack"})
+    log.add(BOSS, "proposal.voted", proposal=early["id"], yes=False)  # 5 trusted owners besides the founder: no veto
+    st = log.state()
+    assert st.proposals[early["id"]]["status"] == "open"             # FOUNDERS_UNTIL reached: no veto any more
+    small, few = trusted_crowd(2)
+    p2 = small.add(few[0], "proposal.made", kind="project.described", payload={"description": "x"})
+    small.add(BOSS, "proposal.voted", proposal=p2["id"], yes=False)
+    assert small.state().proposals[p2["id"]]["status"] == "vetoed"

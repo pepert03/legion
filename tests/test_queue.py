@@ -321,3 +321,22 @@ def test_open_mode_audits_catch_a_false_pass_and_revert_it(project):
     assert git(repo, "show", f"{st.main_tip}:a.txt") == "todo"
     assert make_project.people["luis"].author in st.falsified and not st.trusted(make_project.people["luis"].author) \
         or make_project.people["luis"].author in st.integrators  # a founder stays trusted, but is marked
+
+
+def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    as_(repo, "luis")
+    main(["propose", "task", "--key", "voted", "--title", "Born of a vote", "--zone", "v.txt",
+          "--accept", "python check.py v"])
+    pid = next(iter(Ctx(sync=False).st.proposals))
+    assert Ctx(sync=False).st.proposals[pid]["status"] == "open"
+    as_(repo, "marta")
+    main(["vote", pid[:8], "yes"])
+    assert Ctx(sync=False).st.proposals[pid]["status"] == "open"       # 3 active owners: at least 3 yes
+    as_(repo, "boss")
+    main(["vote", pid[:8], "yes"])
+    st = Ctx(sync=False).st
+    assert st.proposals[pid]["status"] == "passed" and st.find_task("voted").title == "Born of a vote"
+    assert "passed" in capsys.readouterr().out
