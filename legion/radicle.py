@@ -495,9 +495,24 @@ def publish_main(repo) -> None:
         rgit(repo, "push", "-q", "rad", "refs/legion/main:refs/heads/main", check=False, timeout=120)
 
 
+LOOSE_OBJECTS = 300
+
+
+def tidy(repo) -> None:
+    """Pack loose objects and refs before a push. On Windows the push runs in WSL, which reads the repository
+    through /mnt/c one file at a time: with thousands of loose objects (every event and merge makes some) a
+    push took three minutes, and packed, twenty seconds. The packing itself runs on this side, and is quick."""
+    count = subprocess.run(["git", "count-objects"], cwd=repo, capture_output=True, text=True).stdout.split()
+    if count and count[0].isdigit() and int(count[0]) > LOOSE_OBJECTS:
+        subprocess.run(["git", "repack", "-d", "-q"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "prune-packed", "-q"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "pack-refs", "--all"], cwd=repo, capture_output=True)
+
+
 def publish(repo, who: str) -> None:
     """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
     the node announces them to the network."""
+    tidy(repo)
     specs = publish_specs(repo, who)
     for i in range(0, len(specs), 200):  # keeps the command line short with many patches
         for attempt in range(3):

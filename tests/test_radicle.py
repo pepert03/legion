@@ -137,3 +137,19 @@ def test_judged_patches_are_never_fetched_or_published_again(tmp_path):
     assert radicle.publish_specs(repo, "me") == ["refs/legion/patches/t-2/b-1:refs/legion/patches/t-2/b-1"]
     subprocess.run(["git", "-C", str(repo), "update-ref", "refs/legion/patches/t-1/a-1", "HEAD"], check=True)
     assert radicle.publish_specs(repo, "me") == ["refs/legion/patches/t-2/b-1:refs/legion/patches/t-2/b-1"]
+
+
+def test_tidy_packs_loose_objects_and_refs(tmp_path, monkeypatch):
+    import subprocess
+    from legion import radicle
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for i in range(6):
+        (repo / f"f{i}").write_text(str(i))
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", str(i)],
+                       check=True)
+    monkeypatch.setattr(radicle, "LOOSE_OBJECTS", 5)
+    radicle.tidy(repo)
+    loose = subprocess.run(["git", "-C", str(repo), "count-objects"], capture_output=True, text=True).stdout.split()[0]
+    assert loose == "0" and not list((repo / ".git" / "refs" / "heads").iterdir())
