@@ -98,13 +98,6 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
             return None  # the event arrived before the commit: gossip will bring it on a later sync
         return reject("the commit is not on its branch", "missing")
     head = onto or tip or git(repo, "rev-parse", main + "^{commit}")
-    base = git(repo, "merge-base", head, commit)
-    files = [f for f in git(repo, "diff", "--name-only", base, commit).splitlines() if f]
-    if not files:
-        return reject("it changes nothing", "empty")
-    outside = [f for f in files if not S.in_zone(f, allowed)]
-    if outside:
-        return reject(f"touches files outside its zone ({', '.join(allowed)}): {', '.join(outside)}", "zone")
     # The merge runs on git objects (no worktree, no stash) and commands run on a plain copy of the files
     # in a short temporary path, so Windows' 260-character limit never gets in the way.
     # No container yet: with code from strangers this needs a sandbox.
@@ -114,6 +107,14 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     if m.returncode:
         raise coordgit.GitError(f"git merge-tree failed: {m.stderr.decode('utf-8', 'replace').strip()}")
     tree = m.stdout.decode().split()[0]
+    # What the patch changes is what merging it changes in main: a branch built on a dependency's patch carries
+    # that patch too, and once it's in main it isn't this patch's change.
+    files = [f for f in git(repo, "diff", "--name-only", head, tree).splitlines() if f]
+    if not files:
+        return reject("it changes nothing", "empty")
+    outside = [f for f in files if not S.in_zone(f, allowed)]
+    if outside:
+        return reject(f"touches files outside its zone ({', '.join(allowed)}): {', '.join(outside)}", "zone")
     merged = git(repo, "commit-tree", tree, "-p", head, "-p", commit, "-m", msg, env=coordgit.author_env(c.ident))
     return merged, head
 

@@ -676,7 +676,25 @@ def cmd_start(args):
                    "Commit or discard your changes, or use --force to discard them.")
     if args.force:
         coordgit.run(c.repo, "clean", "-qfd")
-    print(f"You are on {branch}, created from {main}. Work inside the zone: {', '.join(t.zone)}")
+    # Dependencies still in review: build on their patches, so what this task needs from them is here.
+    on = []
+    for dep in c.st.deps_in_review(t):
+        p = c.st.review_patch(dep)
+        if not coordgit.fetch_patch(c.repo, p.branch) or not coordgit.has_commit(c.repo, p.commit):
+            raise Fail(f"the patch in review for {c.st.tasks[dep].key} ({p.id[:8]}) hasn't reached this clone yet: "
+                       "run `python -m legion context` in a minute and `start` again")
+        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {c.st.tasks[dep].key} (patch "
+                         f"{p.id[:8]}, in review)", p.commit, env=coordgit.author_env(c.ident))
+        if m.returncode:
+            coordgit.run(c.repo, "merge", "--abort")
+            raise Fail(f"the patches in review of this task's dependencies conflict with each other: "
+                       f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
+        on.append(f"{c.st.tasks[dep].key} ({p.id[:8]})")
+    built = f", on top of the patches in review of {', '.join(on)}" if on else ""
+    print(f"You are on {branch}, created from {main}{built}. Work inside the zone: {', '.join(t.zone)}")
+    if on:
+        print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
+              "waits for its dependency again.")
 
 
 def cmd_peer(args):

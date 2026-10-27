@@ -326,6 +326,17 @@ class State:
     def deps_ok(self, task: Task) -> bool:
         return all(self.done(d) for d in task.deps)
 
+    def deps_in_review(self, task: Task) -> list[str]:
+        """The dependencies not done yet, if every one of them has a patch waiting for its verdict: the task can
+        be worked on now, on top of those patches (empty if some dependency has none)."""
+        pending = [d for d in task.deps if not self.done(d)]
+        return pending if pending and all(self.patches_for(d, None) for d in pending) else []
+
+    def review_patch(self, tid: str):
+        """The patch of a task in review to build on: its latest one waiting for a verdict."""
+        waiting = self.patches_for(tid, None)
+        return waiting[-1] if waiting else None
+
     def status(self, tid: str, now: float) -> str:
         task = self.tasks[tid]
         if task.mode == "exclusive" and self.done(tid):
@@ -336,9 +347,12 @@ class State:
             return "review"
         if self.active_sketch(tid):
             return "sketched"
-        if not self.deps_ok(task):  # a patch written ahead waits here until its dependencies are in
-            return "blocked"
-        if self.patches_for(tid, None):
+        if not self.deps_ok(task):
+            # Its dependencies are in review: workable now, on top of their patches, so nobody waits for the
+            # verdicts. A patch written for it waits here until they are accepted.
+            if not self.deps_in_review(task) or self.patches_for(tid, None):
+                return "blocked"
+        elif self.patches_for(tid, None):
             return "review"
         if task.mode == "exclusive" and self.holder(tid, now):
             return "claimed"

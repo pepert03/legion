@@ -479,3 +479,18 @@ def test_who_took_part_may_talk_reply_and_mention():
     st = log.state()
     assert st.mentions("bea") == [] and st.notes[tid][-1]["reply"] == q["id"]
     assert st.ignored[-1][1] == "a reply answers a note on the same task"
+
+
+def test_a_task_opens_while_its_dependencies_are_in_review():
+    log, a = project()
+    b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true", deps=[a]))
+    assert log.state().status(b, 1001) == "blocked"            # a has nothing in review yet
+    pa = log.add(ANA, "patch.submitted", task=a, commit="c", branch="legion/t/a-1")
+    st = log.state()
+    assert st.status(b, 1001) == "open" and b in [t.id for t in st.claimable(1001)]
+    assert st.review_patch(a).id == pa["id"]
+    log.add(BEA, "task.claimed", task=b, ttl=600)
+    log.add(BEA, "patch.submitted", task=b, commit="d", branch="legion/t/b-1")
+    assert log.state().status(b, 1001) == "blocked"            # b's own patch waits for a's verdict
+    log.add(BOSS, "patch.rejected", patch=pa["id"], reason="tests fail", code="tests")
+    assert log.state().status(b, 1001) == "blocked"            # a's patch is gone: b waits for a again

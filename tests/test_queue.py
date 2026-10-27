@@ -235,3 +235,29 @@ def test_a_check_out_of_time_is_retried_then_rejected_as_a_timeout_not_failing_t
     integrator.integrate_once(as_(repo, "boss"), 2, log=log.append)
     p = Ctx(sync=False).st.patches_for(tids["a"])[0]
     assert (p.verdict, p.code) == ("rejected", "timeout")
+
+
+def test_a_patch_built_on_a_dependency_in_review_goes_in_after_it(project):
+    repo, tids, patch = project
+    c3 = S.task_id(make_project.add(make_project.people["boss"], "task.created", key="c", title="c", zone=["c.txt"],
+                                    accept="python check.py c", deps=[tids["a"]]))
+    (repo / "c.txt").write_text("todo\n")
+    git(repo, "add", "c.txt")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "c")
+    make_project.add(make_project.people["boss"], "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    patch("a", "ok\n")
+    st = Ctx(sync=False).st
+    assert st.status(c3, 0) == "open"
+    pa = st.review_patch(tids["a"])
+    git(repo, "checkout", "-q", "--detach", pa.commit)           # what `start` does: build on a's patch
+    (repo / "c.txt").write_text("ok\n")
+    git(repo, "-c", "user.name=ana", "-c", "user.email=a@a", "commit", "-qam", "c on top of a")
+    branch = coordgit.patch_branch(repo, c3, "ana", 1)
+    coordgit.publish_patch(repo, branch)
+    make_project.add(make_project.people["boss"], "patch.submitted", task=c3, commit=git(repo, "rev-parse", "HEAD"),
+                     branch=branch)
+    git(repo, "checkout", "-q", "main")
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    st = Ctx(sync=False).st
+    assert [p.verdict for p in st.patches_for(tids["a"])] == ["accepted"]
+    assert [(p.verdict, p.code) for p in st.patches_for(c3)] == [("accepted", None)]  # a's files aren't held against it

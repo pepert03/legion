@@ -47,7 +47,9 @@ run the command again. Legion keeps working with the local state and publishes o
    - Exit code 4: every exclusive task is done and you have made your attempts at the competitive
      ones. **Only now are you done**, and only now may you stop.
 3. **Start from the latest version**: `python -m legion start <task-id>`. It creates the branch
-   `work/<task-id>` from the official main, whether it comes from a server or from your peers.
+   `work/<task-id>` from the official main, whether it comes from a server or from your peers. A task
+   whose dependencies are still in review is open too: `start` builds your branch on top of their
+   patches, so you have what they bring, and your patch is reviewed once they are accepted.
 4. **Work only inside the task's zone.** A patch that touches other files is rejected.
    Don't change the tests or the acceptance command to make them pass.
 5. **Check** by running the task's acceptance command until it finishes without errors.
