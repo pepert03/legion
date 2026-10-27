@@ -329,6 +329,8 @@ let data = null, live = true, playTimer = null, selected = null, popMode = null,
 const nodes = new Map(), agents = new Map(), neighbours = new Map();
 let structureSig = "", userMoved = false, refitTimer = null, marks = [], marksTotal = -1, fittedCount = 0;
 
+const LABEL_PX = 9;  // on-screen radius (px) from which a node's label shows
+
 function radius(n) {
   if (n.id === GOAL) return 17;
   const base = { S: 6, M: 7.5, L: 9.5 }[n.size] || 7;
@@ -339,7 +341,7 @@ function applySnapshot(d) {
   const now = performance.now();
   const quiet = lastIndex >= 0 && Math.abs(d.index - lastIndex) > 3;  // a jump in history: no ripples everywhere
   let structural = false;
-  if (!nodes.has(GOAL)) { nodes.set(GOAL, { id: GOAL, depth: -1, fx: 0, fy: 0, x: 0, y: 0, ripples: [] }); structural = true; }
+  if (!nodes.has(GOAL)) { nodes.set(GOAL, { id: GOAL, depth: -1, x: 0, y: 0, ripples: [] }); structural = true; }
   const goal = nodes.get(GOAL);
   const exclusive = d.tasks.filter((t) => t.mode === "exclusive" && t.status !== "cancelled");
   Object.assign(goal, { label: d.project || "project", children: d.tasks.filter((t) => !t.parent).length,
@@ -413,11 +415,13 @@ function agentTargets(t, R) {
                                       end: { x: n.x + ux * (d0 + Math.min(ids.length - 1, GROUP_SHOWN) * step),
                                              y: n.y + uy * (d0 + Math.min(ids.length - 1, GROUP_SHOWN) * step) } });
   }
+  // Agents with no task orbit the main node, wherever it is (dragged, or on its way back to the centre).
+  const g = nodes.get(GOAL) || { x: 0, y: 0 };
   idle.sort().forEach((id, i) => {
     const integ = isIntegrator(agents.get(id).a);
     const R = integ ? 27 : 38 + (i % 2) * 7;
     const ang = (i / Math.max(idle.length, 1)) * Math.PI * 2 + t / (integ ? 26000 : 16000);
-    out.set(id, { x: Math.cos(ang) * R, y: Math.sin(ang) * R, working: false });
+    out.set(id, { x: g.x + Math.cos(ang) * R, y: g.y + Math.sin(ang) * R, working: false });
   });
   return out;
 }
@@ -490,7 +494,9 @@ function drawNode(n, ctx, scale) {
     ctx.beginPath(); ctx.arc(n.x, n.y, r + 4.5, 0, Math.PI * 2); ctx.strokeStyle = P.ink; ctx.lineWidth = 0.6;
     ctx.setLineDash([1, 1.6]); ctx.stroke(); ctx.setLineDash([]);
   }
-  if (scale > 0.75 || active || n.id === hover || n.depth === 0) {
+  // A label shows once its node is big enough on screen: zooming out, small nodes lose theirs first, big ones
+  // later, so labels don't pile up on each other. Hovering or selecting a node always shows it.
+  if (r * scale >= LABEL_PX || n.id === hover || n.id === selected) {
     ctx.font = `italic ${Math.max(3.2, 11.5 / scale)}px ${SERIF}`;
     ctx.textAlign = "center"; ctx.textBaseline = "top";
     ctx.fillStyle = n.status === "accepted" ? P.ink2 : P.ink;
@@ -941,12 +947,19 @@ async function init() {
     .maxZoom(4).minZoom(0.3)
     .onNodeHover((n) => { hover = n ? n.id : null; el.style.cursor = n ? "pointer" : null; })
     .onNodeClick((n, ev) => { const ag = pickAgent(ev); openPop("item", ag || n.id); })
+    // A dragged node is let go: tasks settle back into the layout, and the main node springs back to the centre.
+    .onNodeDragEnd((n) => { n.fx = undefined; n.fy = undefined; Graph.d3ReheatSimulation(); })
     .onBackgroundClick((ev) => { const ag = pickAgent(ev); ag ? openPop("item", ag) : closePop(); });
   Graph.d3Force("charge").strength((n) => (n.id === GOAL ? -380 : -85 - (n.children || 0) * 22)).distanceMax(400);
   Graph.d3Force("link").distance((l) => (l.kind === "dep" ? 60 : l.source.id === GOAL ? 64 : 30)).strength((l) => (l.kind === "dep" ? 0.04 : 0.6));
   Graph.d3Force("radial", d3.forceRadial((n) => (n.id === GOAL ? 0 : 70 + n.depth * 44), 0, 0).strength(0.18));
   Graph.d3Force("collide", d3.forceCollide((n) => radius(n) + 7));
   Graph.d3Force("center", null);
+  // The main node always comes back to the centre: a spring, not a pin, so dragging it away is undone smoothly.
+  Graph.d3Force("home", () => {
+    const g = nodes.get(GOAL);
+    if (g && g.fx == null) { g.vx = (g.vx || 0) - g.x * 0.12; g.vy = (g.vy || 0) - g.y * 0.12; }
+  });
   const fitSize = () => { Graph.width(el.clientWidth).height(el.clientHeight); renderTimeline(); };
   fitSize(); new ResizeObserver(fitSize).observe(el);
 
