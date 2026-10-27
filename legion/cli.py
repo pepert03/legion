@@ -38,6 +38,7 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "working": [c.name for c in st.claimants(t.id, now)],
             "zone": t.zone, "accept": t.accept, "metric": t.metric, "goal": t.goal, "best": st.best(t.id),
             "deps": [st.tasks[d].key for d in t.deps], "size": t.size, "body": t.body,
+            "contract": sorted(t.contract),
             "parent": st.tasks[t.parent].key if t.parent else None, "depth": t.depth,
             "children_done": sum(st.done(c.id) for c in st.children(t.id)),
             "children": len(st.children(t.id)),
@@ -63,6 +64,9 @@ def task_text(t: dict) -> str:
              f"  mode:        {t['mode']}",
              f"  zone:        {', '.join(t['zone'])}",
              f"  acceptance:  {t['accept']}"]
+    if t.get("contract"):
+        lines.append(f"  contract:    {', '.join(t['contract'])} in {S.contract_dir(t['key'])}/ "
+                     "(`start` writes it; the patch must pass it unchanged)")
     if t["metric"]:
         lines.append(f"  metric:      {t['metric']} (goal: {t['goal']}, best: {t['best']})")
     if t["deps"]:
@@ -698,6 +702,25 @@ def cmd_start(args):
     if on:
         print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
               "waits for its dependency again.")
+    if put_contract(c.repo, t):
+        print(f"The task's contract is in {S.contract_dir(t.key)}/ ({', '.join(t.contract)}): your patch must pass "
+              "it as it is. Legion writes it before every check, and git ignores it here.")
+
+
+def put_contract(repo, t: S.Task) -> bool:
+    """Write the task's contract into this clone, where its acceptance command finds it, kept out of commits."""
+    exclude = integrator.common_dir(repo) / "info" / "exclude"
+    line = f"/{S.CONTRACT_DIR}/"
+    try:
+        have = exclude.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        have = []
+    if line not in have:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with open(exclude, "a", encoding="utf-8") as f:
+            f.write(("\n" if have and have[-1] else "") + line + "\n")
+    integrator.write_contract(repo, t)
+    return bool(t.contract)
 
 
 def cmd_peer(args):
@@ -891,10 +914,27 @@ def proposal_line(st: S.State, pid: str, now: float) -> str:
             "project.policy": lambda p: "policy: " + ", ".join(f"{k}={v}" for k, v in p.items()),
             "project.described": lambda p: "new description: " + str(p.get("description", ""))[:120],
             "digest.published": lambda p: "new digest"}[kind](ev["payload"])
+    if kind == "task.created":
+        p = ev["payload"]
+        what += (f"; contract: {', '.join(p['contract'])} (read it: `proposals --show {pid[:8]}`)"
+                 if p.get("contract") else "; NO contract: its acceptance command alone decides it")
+        if p.get("deps"):
+            what += f"; after {', '.join(st.tasks[d].key if d in st.tasks else d for d in p['deps'])}"
     yes = sum(1 for v in prop["votes"].values() if v)
     no = sum(1 for v in prop["votes"].values() if v is False)
     return (f"[{pid[:8]}] {what} (by {ev['name']}; {yes} yes, {no} no, {st.votes_needed(kind, now)} needed; "
             f"{prop['status']}{': ' + prop['reason'] if prop['reason'] else ''})")
+
+
+def proposal_text(st: S.State, pid: str, now: float) -> str:
+    """All of a proposal, for whoever votes on it: what it would publish, and a task's contract in full."""
+    payload = dict(st.proposals[pid]["ev"]["payload"])
+    contract = payload.pop("contract", None) or {}
+    lines = [proposal_line(st, pid, now), ""]
+    lines += [f"{k}: {v}" for k, v in payload.items()]
+    for name, text in contract.items():
+        lines += ["", f"--- contract: {S.contract_dir(payload.get('key', ''))}/{name} ---", text.rstrip()]
+    return "\n".join(lines)
 
 
 def cmd_propose(args):
@@ -903,9 +943,21 @@ def cmd_propose(args):
     if args.what == "task":
         if not (args.key and args.title and args.zone and args.accept):
             raise Fail("a task needs --key, --title, --zone and --accept")
+        # A dependency is a task, or the key of one an open proposal creates (this task then waits for it).
+        deps = [c.st.find_task(d).id if c.st.find_task(d) else d for d in args.deps or []]
         payload = {"key": args.key, "title": args.title, "zone": args.zone, "accept": args.accept,
-                   "body": args.body or "", "size": args.size, "mode": args.mode,
-                   "deps": [c.task(d).id for d in args.deps or []]}
+                   "body": args.body or "", "size": args.size, "mode": args.mode, "deps": deps}
+        if args.contract:
+            payload["contract"] = {}
+            for f in args.contract:
+                try:
+                    payload["contract"][Path(f).name] = Path(f).read_text(encoding="utf-8")
+                except OSError as e:
+                    raise Fail(f"can't read the contract file {f}: {e}")
+            where = S.contract_dir(args.key)
+            if where not in args.accept:
+                raise Fail(f"the acceptance command must run the contract, which legion writes in {where}/ "
+                           f"(e.g. python -m unittest discover -s {where} -p 'test_*.py')")
         if args.mode == "competitive":
             if not args.metric:
                 raise Fail("a competitive task needs --metric")
@@ -947,6 +999,12 @@ def cmd_vote(args):
 def cmd_proposals(args):
     c = Ctx(sync=not args.no_sync)
     now = time.time()
+    if args.show:
+        pid = find_proposal(c.st, args.show)
+        out(args, {"id": pid, **{k: v for k, v in c.st.proposals[pid].items() if k != "ev"},
+                   "kind": c.st.proposals[pid]["ev"]["kind"], "payload": c.st.proposals[pid]["ev"]["payload"]},
+            proposal_text(c.st, pid, now))
+        return
     rows = sorted(c.st.proposals, key=lambda pid: c.st.proposals[pid]["ev"]["lamport"])
     if not args.all:
         rows = [pid for pid in rows if c.st.proposals[pid]["status"] == "open"]
@@ -1037,6 +1095,7 @@ def cmd_submit(args):
         outside = [f for f in files if not S.in_zone(f, t.zone)]
         if outside:
             raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}", 5)
+        put_contract(repo, t)  # the contract as the task states it, whatever this clone has
         code, output = integrator.run_cmd(t.accept, repo, args.timeout)
         if code != 0:
             raise Fail(f"the acceptance command fails, not submitting:\n{integrator.tail(output)}", 6)
@@ -1517,7 +1576,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--zone", nargs="+")
     s.add_argument("--accept")
     s.add_argument("--body")
-    s.add_argument("--deps", nargs="*")
+    s.add_argument("--deps", nargs="*", help="tasks, or keys of tasks other open proposals create")
+    s.add_argument("--contract", action="append", metavar="FILE",
+                   help="a test file that pins what the task's patch must do (repeatable); legion writes it in "
+                        f"{S.CONTRACT_DIR}/<key>/ before every check, and the acceptance command must run it")
     s.add_argument("--size", default="M", choices=["S", "M", "L"])
     s.add_argument("--mode", default="exclusive", choices=["exclusive", "competitive"])
     s.add_argument("--metric")
@@ -1533,8 +1595,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("answer", choices=["yes", "no"])
     s.set_defaults(func=cmd_vote)
 
-    s = sub.add_parser("proposals", help="the proposals waiting for votes (--all: every one)")
+    s = sub.add_parser("proposals", help="the proposals waiting for votes (--all: every one; --show ID: all of one)")
     s.add_argument("--all", action="store_true")
+    s.add_argument("--show", metavar="ID", help="one proposal in full, a task's contract included")
     s.add_argument("--no-sync", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_proposals)

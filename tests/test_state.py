@@ -573,6 +573,36 @@ def test_a_task_passes_by_a_majority_of_trusted_owners():
     assert st.ignored[-1][1] == "only a trusted agent may propose or vote"
 
 
+def test_a_proposed_task_carries_its_contract_and_waits_for_its_dependencies():
+    log, crowd = trusted_crowd(4)  # a majority is 3
+    test = "import unittest\n"
+    base = dict(title="t", accept="python -m unittest discover -s legion_contracts/tail -p test_tail.py")
+    tail = log.add(crowd[0], "proposal.made", kind="task.created",
+                   payload=dict(base, key="tail", zone=["src/Tail.lean"], contract={"test_tail.py": test}))
+    master = log.add(crowd[0], "proposal.made", kind="task.created",  # depends on a task not created yet
+                     payload=dict(base, key="master", zone=["src/Master.lean"], deps=["tail"]))
+    for p in (master, tail):  # master gets its votes first: it waits for tail
+        for who in crowd[1:3]:
+            log.add(who, "proposal.voted", proposal=p["id"], yes=True)
+        if p is master:
+            st = log.state()
+            assert st.proposals[master["id"]]["status"] == "open" and not st.find_task("master")
+            assert st.proposals[master["id"]]["reason"] == "waiting for tail to pass"
+    st = log.state()
+    assert st.find_task("tail").contract == {"test_tail.py": test}
+    assert st.proposals[master["id"]]["status"] == "passed"
+    assert st.find_task("master").deps == [st.find_task("tail").id]
+    bad = [dict(base, key="a", zone=["legion_contracts/"], contract={"t.py": test}),  # its zone holds the contract
+           dict(base, key="b", zone=["b"], contract={"../t.py": test}),                # a folder in the name
+           dict(base, key="c", zone=["c"], deps=["nowhere"])]                          # no such task or proposal
+    for payload in bad:
+        log.add(crowd[0], "proposal.made", kind="task.created", payload=payload)
+    assert [err for _, err in log.state().ignored[-3:]] == [
+        "the zone can't include the contract's folder (legion_contracts/a)",
+        "contract files have plain names (no folders) and text",
+        "a dependency is a task, or the key of a task another open proposal creates"]
+
+
 def test_the_policy_needs_two_thirds_and_a_founder_can_veto_early():
     log, crowd = trusted_crowd(5)  # 6 active owners: two thirds is 4
     prop = log.add(crowd[0], "proposal.made", kind="project.policy", payload={"window": 7200})

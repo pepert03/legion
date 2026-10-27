@@ -19,6 +19,14 @@ PATCH_PREFIXES = ("legion/", "refs/legion/patches/")  # never main or anyone els
 # live in SKETCH_DIR/<parent-id>/, and the parent only counts as done if it passes its own test.
 SKETCH_DIR = "legion_sketches"
 MAX_CHILDREN, MAX_DEPTH = 8, 3
+# A task may carry its contract: test files (a sketch's tests, but in the task itself) that pin what its patch
+# must do. They live in the task's event, so whoever votes on a proposed task reads them, and legion writes them
+# into CONTRACT_DIR/<key>/ before every run of its acceptance command: outside the zone, so no patch can change
+# them, and not in main, so they need no merge to exist.
+CONTRACT_DIR = "legion_contracts"
+MAX_CONTRACT, MAX_CONTRACT_FILES = 16000, 5  # characters in all, files
+CONTRACT_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}")
+SAFE_KEY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 # Paths: when a task stops advancing, anyone may open new routes towards it (subtasks of any kind). A task is
 # stuck after STALL_AFTER failures (failed reports, rejected patches, failed sketches) since its last progress,
 # and holds at most MAX_OPEN_PATHS paths that aren't finished, so being stuck doesn't turn into a flood.
@@ -86,6 +94,7 @@ class Task:
     sketch: str | None = None
     depth: int = 0
     cancelled: bool = False
+    contract: dict = field(default_factory=dict)  # file name -> text, written to contract_dir(key) for each check
 
 
 @dataclass
@@ -147,6 +156,30 @@ class Patch:
 
 def task_id(ev: dict) -> str:
     return "t-" + ev["id"][:8]
+
+
+def contract_dir(key: str) -> str:
+    return f"{CONTRACT_DIR}/{key}"
+
+
+def contract_error(ev: dict) -> str | None:
+    """Why a task's contract isn't acceptable, if it isn't."""
+    contract = ev.get("contract")
+    if contract is None:
+        return None
+    if not isinstance(contract, dict) or not contract or len(contract) > MAX_CONTRACT_FILES:
+        return f"a contract is 1 to {MAX_CONTRACT_FILES} files, by name"
+    if not all(isinstance(k, str) and CONTRACT_FILE.fullmatch(k) and ".." not in k and isinstance(v, str)
+               for k, v in contract.items()):
+        return "contract files have plain names (no folders) and text"
+    if sum(len(v) for v in contract.values()) > MAX_CONTRACT:
+        return f"a contract has at most {MAX_CONTRACT} characters"
+    key = ev.get("key") or ""
+    if not SAFE_KEY.fullmatch(key) or ".." in key:
+        return "a task with a contract needs a key of plain words, which names its folder"
+    if any(in_zone(contract_dir(key), [z]) or in_zone(z.rstrip("/"), [contract_dir(key)]) for z in ev.get("zone") or []):
+        return f"the zone can't include the contract's folder ({contract_dir(key)})"
+    return None
 
 
 def in_zone(path: str, zone: list) -> bool:
@@ -296,8 +329,20 @@ class State:
         if ev["type"] == "proposal.made":
             if ev.get("kind") not in PROPOSABLE or not isinstance(ev.get("payload"), dict):
                 return f"a proposal is a kind ({', '.join(sorted(PROPOSABLE))}) and its payload"
-            if ev["kind"] == "task.created" and (ev["payload"].get("parent") or ev["payload"].get("sketch")):
-                return "subtasks come from sketches, not votes"
+            if ev["kind"] == "task.created":
+                payload = ev["payload"]
+                if payload.get("parent") or payload.get("sketch"):
+                    return "subtasks come from sketches, not votes"
+                err = contract_error(payload)
+                if err:
+                    return err
+                # A dependency is a task, or one that another open proposal creates: this one waits for it.
+                coming = {p["ev"]["payload"].get("key") for p in self.proposals.values()
+                          if p["status"] == "open" and p["ev"]["kind"] == "task.created"}
+                deps = payload.get("deps") or []
+                if not isinstance(deps, list) or not all(isinstance(d, str) and (self.find_task(d) or d in coming)
+                                                         for d in deps):
+                    return "a dependency is a task, or the key of a task another open proposal creates"
             self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "status": "open", "reason": ""}
             return self._tally(ev["id"], ev["ts"])
         prop = self.proposals.get(ev.get("proposal"))
@@ -321,6 +366,10 @@ class State:
         yes = sum(1 for o, v in prop["votes"].items() if v)
         if yes < self.votes_needed(kind, now):
             return None
+        waiting = [d for d in prop["ev"]["payload"].get("deps") or [] if kind == "task.created" and not self.find_task(d)]
+        if waiting:  # voted in, but a task it depends on comes from a proposal that hasn't passed yet
+            prop["reason"] = f"waiting for {', '.join(waiting)} to pass"
+            return None
         # It passes: apply it as if a founder had published it, the same way on every node. The task's id and
         # everything else come from the proposal itself.
         ev = dict(prop["ev"]["payload"], type=kind, author=prop["ev"]["author"], name=prop["ev"]["name"],
@@ -331,6 +380,10 @@ class State:
         finally:
             self._by_vote = None
         prop["status"], prop["reason"] = ("failed", err) if err else ("passed", "")
+        if not err and kind == "task.created":  # the proposals that were waiting for this task
+            for other, p in list(self.proposals.items()):
+                if p["status"] == "open" and p["reason"].startswith("waiting for"):
+                    self._tally(other, now)
         return None
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
@@ -793,12 +846,16 @@ class State:
             return "mode must be exclusive or competitive"
         if ev.get("mode") == "competitive" and not ev.get("metric"):
             return "a competitive task needs a metric"
-        deps = ev.get("deps") or []
-        if any(d not in self.tasks for d in deps):
+        found = [self.find_task(d) if isinstance(d, str) else None for d in ev.get("deps") or []]  # by id or key
+        if not all(found):
             return "unknown dependency"
+        deps = [t.id for t in found]
         key = ev.get("key") or task_id(ev)
         if any(x.key == key for x in self.tasks.values()):
             return f"a task with key {key} already exists"
+        err = contract_error(ev)
+        if err:
+            return err
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
@@ -812,7 +869,7 @@ class State:
         self.tasks[tid] = Task(tid, key, ev["title"], zone, ev["accept"], ev.get("mode", "exclusive"),
                                ev.get("metric"), ev.get("goal", "min"), deps, ev.get("size", "M"),
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
-                               depth)
+                               depth, contract=dict(ev.get("contract") or {}))
         if sketch:
             sketch.child_ids.append(tid)
         return None

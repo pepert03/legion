@@ -194,7 +194,7 @@ def resolve_parents(c: Ctx, timeout: int, log=print, mine=lambda tid: True) -> i
         head = git(c.repo, "rev-parse", coordgit.base_ref(c.repo) + "^{commit}")
         scratch = []
         try:
-            code, out = run_cmd(task.accept, place(c.repo, head, "parent", scratch), timeout)
+            code, out = run_cmd(task.accept, write_contract(place(c.repo, head, "parent", scratch), task), timeout)
         finally:
             for tmp in scratch:
                 remove_tree(tmp)
@@ -251,6 +251,18 @@ def place(repo, commit: str, name: str, scratch: list) -> Path:
     return checkout(repo, commit, common_dir(repo) / "legion-review" / name)
 
 
+def write_contract(folder: Path, task: S.Task) -> Path:
+    """Put the task's contract where its acceptance command expects it, replacing whatever was there: a patch
+    can't bring its own version, and a contract left by another task's check doesn't linger."""
+    shutil.rmtree(Path(folder) / S.CONTRACT_DIR, ignore_errors=True)
+    if task.contract:
+        where = Path(folder) / S.contract_dir(task.key)
+        where.mkdir(parents=True, exist_ok=True)
+        for name, text in task.contract.items():
+            (where / name).write_text(text, encoding="utf-8", newline="")
+    return Path(folder)
+
+
 @dataclass
 class Job:
     """A patch ready to check: merged on top of `head`, a main that may include the patches ahead of it."""
@@ -290,7 +302,7 @@ def check(repo, job: Job, name: str, timeout: int) -> tuple:
         baseline = None
         if job.baseline:
             baseline, _ = measure(job.task.metric, place(repo, job.head, name, scratch), timeout)
-        wt = place(repo, job.merged, name, scratch)
+        wt = write_contract(place(repo, job.merged, name, scratch), job.task)
         code, out = run_cmd(job.task.accept, wt, timeout)
         value, mout = measure(job.task.metric, wt, timeout) if code == 0 and job.task.metric else (None, "")
         return code, out, value, mout, baseline
@@ -346,7 +358,7 @@ def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
     cmd = c.st.policy.get("reads")
     if not cmd:
         return ["*"]
-    code, out = run_cmd(f'{cmd} "{job.task.accept}"', folder, 300)
+    code, out = run_cmd(f'{cmd} "{job.task.accept}"', write_contract(folder, job.task), 300)
     paths = sorted({line.strip() for line in out.splitlines() if line.strip()})
     if code != 0 or not paths or "*" in paths:
         return ["*"]

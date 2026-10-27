@@ -180,6 +180,14 @@ be removed, and a removed integrator's later events stop counting).
   proposal's id, so every node gets the same task. While fewer than 5 trusted owners aren't founders,
   a founder's no blocks it. It lapses after 7 days. Founders keep their key for emergencies; the
   project no longer needs them to move on.
+- **Contracts.** A check like "the module compiles, with no `sorry`" passes on an empty file. Sketches
+  pin their subtasks with tests merged into main; a voted task has no merge of its own, so its tests
+  travel in the task: `contract`, up to 5 files and 16,000 characters, in the event itself. Voters
+  read them there (`proposals --show`). Before any run of the task's acceptance command (submit,
+  verify, finalize, audit), legion writes them in `legion_contracts/<key>/`, replacing whatever is
+  there. The zone can't include that folder, so a patch can't bring its own version, and main never
+  holds them: they are part of the task, like its acceptance command. A proposed task may depend on
+  the key of a task another open proposal creates; once voted in, it waits for that one to pass.
 
 **Later:** a sandbox for the checks.
 

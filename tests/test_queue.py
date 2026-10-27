@@ -121,6 +121,46 @@ def test_a_review_folder_keeps_its_builds_and_nothing_else(project):
     assert not (dest / "stray.txt").exists() and (dest / "a.txt").read_text().strip() == "todo"
 
 
+CONTRACT = '''import pathlib, unittest
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+class Contract(unittest.TestCase):
+    def test_statement(self):
+        self.assertEqual((ROOT / "a.txt").read_text().strip(), "proved")
+'''
+
+
+def test_a_contract_decides_the_patch_and_no_patch_can_change_it(project):
+    """A check that passes on anything (an empty file) no longer lets a patch in: its contract decides."""
+    repo, tids, _ = project
+    boss, ana = make_project.people["boss"], Identity.generate("ana#1")
+    accept = "python -m unittest discover -s legion_contracts/pinned -p test_*.py"
+    tid = S.task_id(make_project.add(boss, "task.created", key="pinned", title="p", zone=["a.txt"], accept=accept,
+                                     contract={"test_pinned.py": CONTRACT}))
+
+    def send(files, n):
+        git(repo, "checkout", "-q", "--detach", "main")
+        for path, text in files.items():
+            (repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / path).write_text(text)
+        git(repo, "add", "-A")
+        git(repo, "-c", "user.name=ana", "-c", "user.email=a@a", "commit", "-qm", f"try {n}")
+        branch = coordgit.patch_branch(repo, tid, ana.short, n)
+        coordgit.publish_patch(repo, branch)
+        make_project.add(ana, "patch.submitted", task=tid, commit=git(repo, "rev-parse", "HEAD"), branch=branch)
+        git(repo, "checkout", "-q", "main")
+
+    weak = "import unittest\nclass T(unittest.TestCase):\n    def test(self): pass\n"
+    send({"a.txt": "nothing\n"}, 1)                                                   # fails the contract
+    send({"a.txt": "nothing\n", "legion_contracts/pinned/test_pinned.py": weak}, 2)   # brings its own contract
+    integrator.integrate_once(Ctx(), 60, log=lambda *_: None)
+    st = Ctx(sync=False).st
+    assert [(p.verdict, p.code) for p in st.patches_for(tid)] == [("rejected", "tests"), ("rejected", "zone")]
+    send({"a.txt": "proved\n"}, 3)
+    integrator.integrate_once(Ctx(), 60, log=lambda *_: None)
+    assert [p.verdict for p in Ctx(sync=False).st.patches_for(tid)][-1] == "accepted"
+    assert "legion_contracts" not in git(repo, "ls-tree", "-r", "--name-only", Ctx(sync=False).st.main_tip)
+
+
 def as_(repo, who):
     identity.bind(repo, make_project.people[who])
     return Ctx()
@@ -340,3 +380,21 @@ def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
     st = Ctx(sync=False).st
     assert st.proposals[pid]["status"] == "passed" and st.find_task("voted").title == "Born of a vote"
     assert "passed" in capsys.readouterr().out
+    # With a contract, after the task above: voters read the contract in full before they vote.
+    (repo.parent / "test_next.py").write_text(CONTRACT)
+    main(["propose", "task", "--key", "next", "--title", "Pinned", "--zone", "n.txt", "--deps", "voted",
+          "--accept", "python -m unittest discover -s legion_contracts/next -p test_*.py",
+          "--contract", str(repo.parent / "test_next.py")])
+    pid = next(p for p in Ctx(sync=False).st.proposals if Ctx(sync=False).st.proposals[p]["status"] == "open")
+    main(["proposals", "--show", pid[:8], "--no-sync"])
+    shown = capsys.readouterr().out
+    assert "contract: test_next.py" in shown and "legion_contracts/next/test_next.py" in shown
+    assert 'assertEqual((ROOT / "a.txt")' in shown
+    for who in ("marta", "luis"):
+        as_(repo, who)
+        main(["vote", pid[:8], "yes"])
+    st = Ctx(sync=False).st
+    assert st.find_task("next").deps == [st.find_task("voted").id]
+    main(["start", "next"])  # the agent works with the contract in its clone, and git leaves it out of commits
+    assert (repo / "legion_contracts" / "next" / "test_next.py").read_text() == CONTRACT
+    assert git(repo, "status", "--porcelain") == ""
