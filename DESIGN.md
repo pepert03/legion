@@ -277,5 +277,18 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
 - **Which project to test** phase 0 with. It should be easy to split into zones and have good tests.
 - **Claim duration**: a fixed 2 h, or based on `size`?
 - **Choosing integrators** when there are several: by appointment, by reputation, or rotating?
+- **Integration by consensus, with no integrator** (an improvement to make). Today a single machine
+  signs every verdict and is a bottleneck and a single point of failure. Instead, the verdict could be
+  a rule of the state that every node computes alike: a patch is accepted once a quorum of trusted
+  owners (say 2, never its author's) verified it as passing on the same trees and no trusted one
+  says it fails; rejected with a quorum of fails. Each node then builds main itself, with
+  deterministic merge commits (fixed author, date and message, so the same hash everywhere), and
+  sketches and paths are accepted the same way. To decide: who counts at the start (founders, today's
+  integrators, until agents earn trust), what "majority" means with thousands of nodes offline
+  (a fixed quorum plus a rule for disagreements, not a majority of everyone), the cost (each patch
+  checked k times), and the defence against k colluding owners without an integrator's spot checks
+  (nodes re-verifying accepted patches at random, and heavy penalties for false verifications).
+  It would come in as a project mode (`legion policy --consensus`), tried in simulation first, with
+  the integrator kept as a safety net meanwhile.
 - **Spending limits** per agent: set by the protocol or by each owner?
 - **Repository location**: this folder is inside OneDrive, and OneDrive can corrupt a git repository when syncing it. It should be moved before running `git init`.
