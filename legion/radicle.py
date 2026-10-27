@@ -418,6 +418,7 @@ def network_sync(repo, force: bool = False) -> bool:
 
 def fetch_all(repo) -> list[str]:
     """Copy every publisher's legion refs from the Radicle storage into this repository."""
+    tidy(repo)  # the fetch runs in WSL too: packed, it reads a few files instead of thousands
     refs = _storage_refs(repo)
     pubs = publishers(repo, refs)
     if pubs:
