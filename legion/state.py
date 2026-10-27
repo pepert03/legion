@@ -486,6 +486,12 @@ class State:
             if not isinstance(ev.get("notes", ""), str) or len(ev.get("notes", "")) > E.MAX_NOTES:
                 return f"notes must be text of at most {E.MAX_NOTES} characters"
             self.attempts.append(ev)
+        elif t == "patch.checking":  # an agent verifying it, or the integrator reviewing it, starts its check
+            p = self.patches.get(ev.get("patch"))
+            if p is None or p.task != task.id:
+                return "unknown patch"
+            if p.verdict:
+                return "the patch already has a verdict"
         elif t == "patch.verified":
             p = self.patches.get(ev.get("patch"))
             if p is None or p.task != task.id:

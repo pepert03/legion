@@ -19,6 +19,7 @@ from . import state as S
 from . import trust
 
 PAGE = Path(__file__).parent / "templates" / "viz.html"
+CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
 ACTIVE_SECONDS = 600  # an agent counts as active if it published something in the last 10 minutes
 GONE_SECONDS = 7200   # and it leaves the graph after 2 hours without publishing, holding nothing
 
@@ -96,6 +97,22 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         for who in t["working"]:  # the holder, and whoever joined it
             if who in agents:
                 agents[who]["holds"].append(t["id"])
+    # Whoever is checking a patch (an agent verifying it, the integrator reviewing it) sits on its task too,
+    # from patch.checking until its own verification, or the patch's verdict.
+    checking = {}
+    for ev in evs:
+        t = ev["type"]
+        if t == "patch.checking":
+            checking[(ev["author"], ev.get("patch"))] = (ev.get("task"), ev["ts"])
+        elif t == "patch.verified":
+            checking.pop((ev["author"], ev.get("patch")), None)
+        elif t in ("patch.accepted", "patch.rejected"):
+            checking = {k: v for k, v in checking.items() if k[1] != ev.get("patch")}
+    for (who, _), (tid, ts) in checking.items():
+        if who in agents and now - ts < CHECKING_SECONDS:
+            agents[who].setdefault("checking", []).append(tid)
+            if tid not in agents[who]["holds"]:
+                agents[who]["holds"].append(tid)
     # Competitive tasks aren't claimed: whoever has a patch there waiting for its verdict is working on it.
     for p in st.patches.values():
         if p.verdict is None and p.author in agents and st.tasks.get(p.task) and \
@@ -165,7 +182,10 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
     else:
         patches = {p.id for p in st.patches.values() if p.task == node}
         mine = [e for e in evs if e.get("task") == node or e.get("patch") in patches]
-    return [item(e, st) for e in mine][-80:]  # short version: a test's whole output doesn't fit in a timeline
+    # The latest 80 events (short versions: a test's whole output doesn't fit in a timeline), and every note: a
+    # task's conversation is read whole, so it doesn't share that budget.
+    keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine if e["type"] == "task.note"}
+    return [item(e, st) for e in mine if e["id"] in keep]
 
 
 def logo_dirs(repo: Path) -> list[Path]:

@@ -96,6 +96,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "task.heartbeat": f"renews {key}",
         "task.released": f"releases {key}",
         "attempt.reported": f"reports {ev.get('outcome')} on {key}: {notes}",
+        "patch.checking": f"checks patch {str(ev.get('patch', ''))[:8]} for {key}",
         "patch.verified": f"verifies patch {str(ev.get('patch', ''))[:8]} for {key}: {ev.get('outcome')}",
         "project.policy": "sets how patches are verified",
         "task.note": f"notes on {key}: {ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",

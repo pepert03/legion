@@ -362,10 +362,25 @@ def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
     return decide(c, job, check(c.repo, job, "0", timeout))
 
 
+def announce_checks(c: Ctx, jobs: list[Job]) -> None:
+    """Say which patches are being checked, and by whom, before the checks start (patch.checking): the viewer
+    puts the checker on the task's node meanwhile, and the task's history records it. Telling is not worth
+    holding a check back for, so a failure here is ignored."""
+    try:
+        for job in jobs:
+            c.emit("patch.checking", task=job.task.id, patch=job.patch.id)
+        if jobs:
+            c.sync()
+    except (Fail, coordgit.GitError):
+        pass
+
+
 def check_all(c: Ctx, jobs: list[Job], timeout: int, ready: dict | None = None) -> list:
     """Check the jobs at once, each in its reviewer's folder, while this thread keeps the lease. A job that
     raised gives back its exception. `ready` holds the results already known (from verifications)."""
     ready = ready or {}
+
+    announce_checks(c, [j for j in jobs if j.patch.id not in ready])
 
     def one(i, job):
         if job.patch.id in ready:
@@ -647,6 +662,7 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
         if len(have) >= max(1, need):
             skip("verified enough already")
             continue
+        announce_checks(c, [job])
         code, out, value = check(c.repo, job, "verify", timeout)[:3]
         outcome = "pass" if code == 0 and (not job.task.metric or value is not None) else "fail"
         c.emit("patch.verified", task=job.task.id, patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,

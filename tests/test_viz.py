@@ -130,3 +130,21 @@ def test_an_agent_silent_for_hours_with_nothing_held_leaves_the_graph(monkeypatc
     assert not agents["ana"]["gone"]       # silent too, but it holds a claim: it's working
     monkeypatch.setattr(viz.time, "time", lambda: now + 10)
     assert not {a["name"]: a for a in viz.snapshot(evs, None)["agents"]}["luis"]["gone"]
+
+
+def test_a_checker_sits_on_the_task_until_its_result(monkeypatch):
+    evs, tid = project_events()
+    p = E.create(ANA, "patch.submitted", 4, task=tid, commit="c" * 40, branch="legion/t/a-1")
+    luis = Identity.generate("luis")
+    evs += [p, E.create(luis, "patch.checking", 5, task=tid, patch=p["id"])]
+    luis_now = lambda: next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "luis")  # noqa: E731
+    assert luis_now()["holds"] == [tid] and luis_now()["checking"] == [tid]
+    assert any(i["text"].startswith("checks patch") for i in viz.history(evs, tid, None))  # in the task's history
+    evs.append(E.create(luis, "patch.verified", 6, task=tid, patch=p["id"], base_tree="a" * 40, tree="b" * 40,
+                        outcome="pass"))
+    assert luis_now()["holds"] == []  # its result is in: back off the node
+    evs.append(E.create(BOSS, "patch.checking", 7, task=tid, patch=p["id"]))
+    boss = next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "boss")
+    assert boss["holds"] == [tid]  # the integrator too, while it reviews
+    monkeypatch.setattr(viz.time, "time", lambda: evs[-1]["ts"] + viz.CHECKING_SECONDS + 1)
+    assert next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "boss")["holds"] == []  # abandoned

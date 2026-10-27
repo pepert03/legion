@@ -18,6 +18,7 @@ TYPES = {
     "attempt.reported",
     "task.note",
     "patch.verified",
+    "patch.checking",
     "project.policy",
     "patch.submitted",
     "patch.accepted",

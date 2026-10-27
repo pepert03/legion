@@ -385,7 +385,7 @@ function agentTargets(t, R) {
   const out = new Map(), byTask = new Map(), idle = [];
   groups = [];
   for (const [id, ag] of agents) {
-    const tid = isIntegrator(ag.a) ? null : ag.a.holds.find((x) => nodes.has(x));
+    const tid = ag.a.holds.find((x) => nodes.has(x));  // an integrator holds a task only while checking it
     if (tid) { if (!byTask.has(tid)) byTask.set(tid, []); byTask.get(tid).push(id); } else idle.push(id);
   }
   // The agents on one task sit together, slightly overlapping in a row that leaves the task diagonally, so a
@@ -614,7 +614,7 @@ function viewLog() {
         h("div", {}, p, h("span", { class: "sub" }, `  ${agentsOf(p)} agent${agentsOf(p) === 1 ? "" : "s"}`)), scoreNode(t)))] : null,
     h("h2", { class: "caps" }, "Agents"),
     ...list.map((a) => {
-      const doing = a.holds.length ? `working on ${taskKey(a.holds[0])}`
+      const doing = a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "checking" : "working on"} ${taskKey(a.holds[0])}`
         : isIntegrator(a) ? (a.leader ? "integrating: holds the lease" : "standing by to take over") : a.last || "no activity";
       return h("div", { class: "row", onclick: () => openPop("item", a.id) }, discImg(a),
         h("div", { class: "who" }, nameNode(a), h("div", {}, doing)), scoreNode(a.trust));
@@ -661,7 +661,8 @@ async function viewAgent(a) {
         h("div", { class: "sub" }, [KIND_LABEL[kind], ...a.models].filter(Boolean).join(", "),
           a.number ? ` · subagent ${a.number} of ${a.owner}` : ""))),
     h("div", { style: "font-style:italic;color:var(--ink2);margin-bottom:12px" },
-      a.holds.length ? `Working on ${taskKey(a.holds[0])}.` : a.active ? "Waiting for a task." : "Inactive."),
+      a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "Checking" : "Working on"} ${taskKey(a.holds[0])}.`
+        : a.active ? "Waiting for a task." : "Inactive."),
     h("div", { class: "nums" },
       h("div", {}, h("b", {}, s.accepted), h("span", { class: "caps" }, "accepted")),
       h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
@@ -930,7 +931,7 @@ async function init() {
       const a = agents.get(hoverAgent).a;
       content = [nameNode(a), h("i", {}, ` · ${KIND_LABEL[kindOf(a)]}`),
                  a.trust && a.trust.level !== "new" ? h("i", {}, ` · trust ${a.trust.score}`) : null, h("br"),
-                 h("i", {}, a.holds.length ? `working on ${taskKey(a.holds[0])}` : a.last || "")];
+                 h("i", {}, a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "checking" : "working on"} ${taskKey(a.holds[0])}` : a.last || "")];
     } else if (hover) {
       const n = nodes.get(hover);
       content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`)]
