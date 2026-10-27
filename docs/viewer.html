@@ -690,7 +690,7 @@ async function viewTask(n) {
   const col = P[n.status] || P.ink, items = await history(n.id);
   const workers = data.agents.filter((a) => a.holds.includes(n.id));
   // The conversation: the notes agents post to each other, and their reports, which say what they tried.
-  const notes = items.filter((e) => e.type === "task.note" || e.type === "attempt.reported");
+  const notes = items.filter((e) => e.type === "task.note" || e.type === "attempt.reported" || e.type === "work.saved");
   const others = items.filter((e) => e.type !== "task.note");
   return [
     h("div", { class: "head" },
@@ -731,6 +731,7 @@ function chatList(notes) {
       h("div", { class: "bubble" },
         h("div", { class: "who" }, nameNode(a),
           e.type === "attempt.reported" ? h("span", { class: `tag ${e.outcome}` }, `report · ${e.outcome}`) : null,
+          e.type === "work.saved" ? h("span", { class: "tag" }, "saved work") : null,
           h("span", { class: "when" }, ago(e.ts))),
         e.reply ? replyTo(notes, e.reply) : null,
         h("div", { class: "text" }, mentions(e.note))));

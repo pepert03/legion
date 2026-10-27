@@ -82,7 +82,8 @@ class Ctx:
                     coordgit.publish_radicle(self.repo, self.ident)
                 except coordgit.GitError as e:
                     self._sync_failed(e)
-            coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict})
+            coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
+                                   | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws})
             peers = coordgit.peers(self.repo)
             if "network" in self.unreachable:
                 print("legion: warning: couldn't reach the Radicle network; working with what the local "

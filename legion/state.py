@@ -220,6 +220,7 @@ class State:
         self.resolved: set = set()  # tasks done because their subtasks were completed
         self.attempts: list[dict] = []
         self.notes: dict[str, list[dict]] = defaultdict(list)  # task -> its notes, in order
+        self.saved: dict[str, list[dict]] = defaultdict(list)  # task -> work in progress published on it, in order
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -393,7 +394,15 @@ class State:
                 or any(a.get("task") == tid and a["author"] == author for a in self.attempts)
                 or any(p.author == author for p in self.patches_for(tid))
                 or any(v["author"] == author for p in self.patches_for(tid) for v in self.verifications.get(p.id, ()))
-                or any(k.author == author for k in self.sketches.values() if k.task == tid))
+                or any(k.author == author for k in self.sketches.values() if k.task == tid)
+                or any(w["author"] == author for w in self.saved[tid]))
+
+    def saves(self, tid: str) -> list[dict]:
+        """The work in progress others can build on: each author's latest save on the task, newest first."""
+        latest = {}
+        for w in self.saved[tid]:
+            latest[w["author"]] = w
+        return sorted(latest.values(), key=lambda w: -w["lamport"])
 
     def mentions(self, name: str) -> list[dict]:
         """Notes that name this agent (@ana#2, or @ana for all of ana's) and that it hasn't answered since:
@@ -757,6 +766,17 @@ class State:
             if ev.get("reply") is not None and not any(n["id"] == ev["reply"] for n in self.notes[task.id]):
                 return "a reply answers a note on the same task"
             self.notes[task.id].append(ev)
+        elif t == "work.saved":
+            # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
+            # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.
+            if not isinstance(ev.get("commit"), str) or not ev["commit"] or not valid_branch(ev.get("branch")):
+                return "missing commit, or the branch is outside the patch namespace"
+            if not isinstance(ev.get("notes", ""), str) or len(ev.get("notes", "")) > E.MAX_NOTES:
+                return f"notes must be text of at most {E.MAX_NOTES} characters"
+            if not self.took_part(task.id, ev["author"], ev["ts"]):
+                return "only someone who works on the task, or has, may save work on it"
+            self.saved[task.id].append({k: ev[k] for k in ("id", "author", "name", "commit", "branch", "ts", "lamport")}
+                                       | {"notes": ev.get("notes", "")})
         elif t == "patch.submitted":
             if not ev.get("commit") or not ev.get("branch"):
                 return "missing commit or branch"

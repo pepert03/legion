@@ -17,6 +17,7 @@ TYPES = {
     "task.released",
     "attempt.reported",
     "task.note",
+    "work.saved",
     "patch.verified",
     "proposal.made",
     "proposal.voted",

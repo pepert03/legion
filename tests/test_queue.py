@@ -1,6 +1,7 @@
 """The integrator's merge queue and its persistent review folders, on a real repository."""
 
 import subprocess
+import time
 
 import pytest
 
@@ -159,6 +160,19 @@ def test_a_contract_decides_the_patch_and_no_patch_can_change_it(project):
     integrator.integrate_once(Ctx(), 60, log=lambda *_: None)
     assert [p.verdict for p in Ctx(sync=False).st.patches_for(tid)][-1] == "accepted"
     assert "legion_contracts" not in git(repo, "ls-tree", "-r", "--name-only", Ctx(sync=False).st.main_tip)
+
+
+def test_a_check_that_runs_no_test_fails_and_quotes_mean_the_same_everywhere(tmp_path):
+    """On Windows `-p 'test_*.py'` reached unittest with its quotes and matched nothing: the check passed having
+    checked nothing. Single quotes now work there too, and a run of zero tests is a failure."""
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "test_c.py").write_text("import unittest\nclass T(unittest.TestCase):\n"
+                                              "    def test(self): self.fail('the contract ran')\n")
+    for pattern in ("'test_*.py'", "test_*.py", '"test_*.py"'):
+        code, out = integrator.run_cmd(f"python -m unittest discover -s c -p {pattern}", tmp_path, 60)
+        assert code == 1 and "the contract ran" in out
+    code, out = integrator.run_cmd("python -m unittest discover -s c -p nothing_*.py", tmp_path, 60)
+    assert code == 5 and "no test ran" in out
 
 
 def as_(repo, who):
@@ -361,6 +375,53 @@ def test_open_mode_audits_catch_a_false_pass_and_revert_it(project):
     assert git(repo, "show", f"{st.main_tip}:a.txt") == "todo"
     assert make_project.people["luis"].author in st.falsified and not st.trusted(make_project.people["luis"].author) \
         or make_project.people["luis"].author in st.integrators  # a founder stays trusted, but is marked
+
+
+def test_an_old_patch_is_audited_once_by_each_node(project):
+    """Patches accepted before verdicts recorded their tree: `verify` audited the same one again and again,
+    minutes of checking each time, for an event the state then refused."""
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    boss = as_(repo, "boss")
+    job = integrator.plan(boss, boss.st.patches_for(tids["a"])[0])
+    boss.emit("patch.accepted", patch=job.patch.id, task=tids["a"], merge_commit=job.merged, base=job.head)
+    boss.sync()
+    open_mode(repo, audit=1)
+    assert Ctx(sync=False).st.patches_for(tids["a"])[0].tree is None
+    job, outcome = integrator.verify_one(as_(repo, "marta"), 60)
+    assert (job.task.key, outcome) == ("a", "pass")
+    marta = as_(repo, "marta")
+    assert integrator.audit_job(marta, time.time()) is None
+
+
+def test_saved_work_lets_the_next_agent_carry_on(project, capsys):
+    """An agent that stops halfway saves its branch; whoever takes the task next sees it and starts from it,
+    instead of the work staying in a clone nobody else can read."""
+    from legion.cli import main
+    repo, tids, patch = project
+    tid = tids["a"]
+
+    def commit(text):
+        (repo / "a.txt").write_text(text)
+        git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", text.strip())
+
+    as_(repo, "luis")
+    main(["claim", tid])
+    main(["start", tid])
+    commit("stage 1\n")
+    main(["save", tid, "--notes", "stage 1 compiles; stage 2 left"])
+    commit("stage 2, broken\n")
+    capsys.readouterr()
+    main(["release", tid])
+    assert "nobody else can see" in capsys.readouterr().out  # the second commit wasn't saved
+    git(repo, "checkout", "-q", "main")
+    as_(repo, "marta")
+    main(["claim", tid])
+    shown = capsys.readouterr().out
+    save = Ctx(sync=False).st.saves(tid)[0]
+    assert "Work in progress on this task is saved" in shown and save["id"][:8] in shown and "stage 2 left" in shown
+    main(["start", tid, "--from", save["id"][:8]])
+    assert (repo / "a.txt").read_text() == "stage 1\n" and "luis" in capsys.readouterr().out
 
 
 def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):

@@ -33,6 +33,14 @@ def tail(text: str, n: int = 15) -> str:
 
 
 PYTHON = re.compile(r"^(python3?|py)(?=\s|$)")
+# cmd.exe doesn't know single quotes: `-p 'test_*.py'` reached unittest with the quotes, matched no file, and
+# passed having run nothing. A command means the same on every node, so on Windows they become double quotes.
+SINGLE_QUOTED = re.compile(r"'([^'\"]*)'")
+NO_TESTS = re.compile(r"^Ran 0 tests", re.M)
+
+
+def portable(cmd: str) -> str:
+    return SINGLE_QUOTED.sub(r'"\1"', cmd) if os.name == "nt" else cmd
 
 
 # Called every BEAT_EVERY seconds while a check runs, so a long one (a Lean build takes minutes) doesn't let
@@ -43,14 +51,17 @@ BEAT_EVERY = 30
 
 def run_cmd(cmd: str, cwd, timeout: int) -> tuple[int | None, str]:
     # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
-    cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', cmd.strip(), count=1)
+    cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', portable(cmd.strip()), count=1)
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          encoding="utf-8", errors="replace")
     deadline = time.time() + timeout
     while True:
         try:
             out, err = p.communicate(timeout=max(0.1, min(BEAT_EVERY, deadline - time.time())))
-            return p.returncode, (out or "") + (err or "")
+            out = (out or "") + (err or "")
+            if p.returncode == 0 and "unittest" in cmd and NO_TESTS.search(out):
+                return 5, out + "\nlegion: no test ran, so nothing was checked\n"  # as Python 3.12 does
+            return p.returncode, out
         except subprocess.TimeoutExpired:
             if time.time() >= deadline:
                 p.kill()
@@ -741,9 +752,12 @@ def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
 def audit_job(c: Ctx, now: float) -> Job | None:
     """An accepted patch, still inside its challenge window, to check again: chosen at random (by this node's
     key, so different nodes audit different ones), with the project's audit share."""
+    def audited(p):  # by this node already. A patch accepted before verdicts recorded the tree has none to compare
+        return any(v["author"] == c.me and (v["tree"] == p.tree or p.tree is None and v["ts"] >= (p.accepted_ts or 0))
+                   for v in c.st.verifications[p.id])
+
     for p in sorted((p for p in c.st.patches.values() if c.st.challengeable(p, now) and p.author != c.me
-                     and p.merge_commit and not any(v["author"] == c.me and v["tree"] == p.tree
-                                                    for v in c.st.verifications[p.id])),
+                     and p.merge_commit and not audited(p)),
                     key=lambda p: hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest()):
         draw = int(hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest(), 16) / 16 ** 64
         if draw >= c.st.policy["audit"] or not coordgit.has_commit(c.repo, p.merge_commit):

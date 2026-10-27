@@ -106,6 +106,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "patch.checking": f"checks patch {str(ev.get('patch', ''))[:8]} for {key}",
         "patch.verified": f"verifies patch {str(ev.get('patch', ''))[:8]} for {key}: {ev.get('outcome')}",
         "project.policy": "sets how patches are verified",
+        "work.saved": f"saves work in progress on {key} ({str(ev.get('commit', ''))[:8]}): {ev.get('notes', '')[:200]}",
         "task.note": f"notes on {key}: {ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",
         "patch.submitted": f"submits patch {ev['id'][:8]} for {key}",
         "patch.accepted": f"accepts patch {ev.get('patch', '')[:8]} for {key}"
@@ -648,6 +649,10 @@ def cmd_claim(args):
             how += ("The agents who were on it before left these notes: read them all (`python -m legion note "
                     f"{t.id}`), build on them, and answer the ones you can (`--reply <id>`):\n"
                     + "\n".join(notes_text(c.st, t.id)) + "\n")
+        if [w for w in c.st.saves(t.id) if w["author"] != c.me]:
+            how += ("Work in progress on this task is saved: don't start from zero. Read what each one says, and "
+                    "build on the one that's furthest along with `start --from <id>`:\n"
+                    + "\n".join(saves_text(c.st, t.id, c.me)) + "\n")
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
@@ -698,6 +703,21 @@ def cmd_start(args):
                        f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
         on.append(f"{c.st.tasks[dep].key} ({p.id[:8]})")
     built = f", on top of the patches in review of {', '.join(on)}" if on else ""
+    if args.from_:  # someone's unfinished work on this task: carry on from it
+        found = [w for w in c.st.saved[t.id] if w["id"].startswith(args.from_)]
+        if len(found) != 1:
+            raise Fail(f"no single saved work on {t.key} matches {args.from_}: `claim` and `note {t.id}` list them")
+        w = found[0]
+        if not coordgit.fetch_patch(c.repo, w["branch"]) or not coordgit.has_commit(c.repo, w["commit"]):
+            raise Fail(f"{w['name']}'s saved work ({w['id'][:8]}) hasn't reached this clone yet: run "
+                       "`python -m legion context` in a minute and `start` again")
+        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {w['name']}'s saved work ({w['id'][:8]})",
+                         w["commit"], env=coordgit.author_env(c.ident))
+        if m.returncode:
+            coordgit.run(c.repo, "merge", "--abort")
+            raise Fail(f"{w['name']}'s saved work doesn't merge with the current main: "
+                       f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
+        built += f", with {w['name']}'s saved work ({w['id'][:8]})"
     print(f"You are on {branch}, created from {main}{built}. Work inside the zone: {', '.join(t.zone)}")
     if on:
         print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
@@ -836,6 +856,8 @@ def cmd_release(args):
     c.emit("task.released", task=t.id)
     c.sync()
     print(f"You released {t.key}.")
+    if unsaved(c, t):
+        print(SAVE_HINT.format(tid=t.id))
 
 
 def cmd_report(args):
@@ -844,6 +866,8 @@ def cmd_report(args):
     c.emit("attempt.reported", task=t.id, outcome=args.outcome, notes=args.notes)
     c.sync()
     print(f"Report published on {t.key}.")
+    if args.outcome == "failure" and unsaved(c, t):
+        print(SAVE_HINT.format(tid=t.id))
     print(f"Next: {KEEP_GOING}")
 
 
@@ -957,7 +981,7 @@ def cmd_propose(args):
             where = S.contract_dir(args.key)
             if where not in args.accept:
                 raise Fail(f"the acceptance command must run the contract, which legion writes in {where}/ "
-                           f"(e.g. python -m unittest discover -s {where} -p 'test_*.py')")
+                           f"(e.g. python -m unittest discover -s {where} -p test_*.py)")
         if args.mode == "competitive":
             if not args.metric:
                 raise Fail("a competitive task needs --metric")
@@ -1057,9 +1081,12 @@ def cmd_note(args):
         print(f"Note posted on {t.key}; the agents who took part see it in `context` and `note {t.id}`, and anyone "
               "you @mention sees it first.")
         return
+    saves = saves_text(c.st, t.id)
     out(args, {"task": t.key, "notes": [{"id": n["id"], "name": n["name"], "ts": n["ts"], "text": n["text"],
-                                         "reply": n.get("reply")} for n in notes]},
-        "\n\n".join(note_line(n, notes) for n in notes) or f"No notes on {t.key} yet.")
+                                         "reply": n.get("reply")} for n in notes],
+               "saved": [{k: w[k] for k in ("id", "name", "commit", "ts", "notes")} for w in c.st.saves(t.id)]},
+        ("\n\n".join(note_line(n, notes) for n in notes) or f"No notes on {t.key} yet.")
+        + (f"\n\nSaved work (build on it with `start {t.id} --from <id>`):\n" + "\n".join(saves) if saves else ""))
 
 
 def note_line(n: dict, notes: list[dict]) -> str:
@@ -1071,6 +1098,62 @@ def note_line(n: dict, notes: list[dict]) -> str:
 def notes_text(st: S.State, tid: str, last: int = 5) -> list[str]:
     notes = st.notes.get(tid, [])
     return ["  " + note_line(n, notes) for n in notes[-last:]]
+
+
+def saves_text(st: S.State, tid: str, me: str | None = None) -> list[str]:
+    lines = []
+    for w in st.saves(tid):
+        if w["author"] == me:
+            continue
+        hours = max(0, time.time() - w["ts"]) / 3600
+        age = f"{hours * 60:.0f} min" if hours < 1 else f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.0f} days"
+        lines.append(f"  [{w['id'][:8]}] {w['name']}, {age} ago (commit {w['commit'][:8]}): "
+                     + (w["notes"].replace("\n", " ") or "(no notes)"))
+    return lines
+
+
+def cmd_save(args):
+    """Publish unfinished work on a task, so it isn't lost when you stop: whoever takes the task next builds on it."""
+    c = Ctx()
+    t = c.task(args.task)
+    repo = c.repo
+    if git(repo, "status", "--porcelain", "--untracked-files=no"):
+        raise Fail("you have uncommitted changes: commit what you want to save (`git commit -am \"...\"`), then save", 5)
+    coordgit.refresh_base(repo)
+    main = coordgit.base_ref(repo)
+    files = [f for f in git(repo, "diff", "--name-only", git(repo, "merge-base", "HEAD", main), "HEAD").splitlines() if f]
+    if not files:
+        raise Fail(f"your branch has nothing that {main} doesn't: nothing to save", 5)
+    outside = [f for f in files if not S.in_zone(f, t.zone)]
+    if outside:  # whoever builds on it couldn't submit them
+        raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}", 5)
+    head = git(repo, "rev-parse", "HEAD")
+    mine = [w for w in c.st.saved[t.id] if w["author"] == c.me]
+    if mine and mine[-1]["commit"] == head:
+        print(f"Already saved: {mine[-1]['id'][:8]} is this commit.")
+        return
+    branch = coordgit.patch_branch(repo, t.id, f"wip-{c.ident.short}", len(mine) + 1)
+    coordgit.publish_patch(repo, branch)
+    ev = c.emit("work.saved", task=t.id, commit=head, branch=branch, notes=args.notes or "")
+    c.sync()
+    out(args, {"saved": ev["id"], "branch": branch, "files": files},
+        f"Saved {len(files)} file(s) on {t.key} as {ev['id'][:8]} (commit {head[:8]}). Whoever takes the task "
+        f"next sees it and can build on it: `python -m legion start {t.id} --from {ev['id'][:8]}`.")
+
+
+def unsaved(c: Ctx, t: S.Task) -> bool:
+    """This clone holds commits on the task's branch that no save or patch has published."""
+    branch = f"work/{t.id}"
+    tip = coordgit.rev(c.repo, branch)
+    if not tip or coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, coordgit.base_ref(c.repo)).returncode == 0:
+        return False
+    published = [w["commit"] for w in c.st.saved[t.id]] + [p.commit for p in c.st.patches_for(t.id)]
+    return not any(coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, x).returncode == 0
+                   for x in published if coordgit.has_commit(c.repo, x))
+
+
+SAVE_HINT = ("You have commits on work/{tid} that nobody else can see: publish them with `python -m legion save "
+             "{tid} --notes \"what's done, what's left\"`, or whoever takes the task next starts from zero.")
 
 
 def cmd_submit(args):
@@ -1511,7 +1594,14 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("start", help="create your work branch from the latest main")
     s.add_argument("task")
     s.add_argument("--force", action="store_true", help="discard uncommitted changes")
+    s.add_argument("--from", dest="from_", metavar="SAVE", help="build on someone's saved work on the task")
     s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("save", help="publish your unfinished work on a task, so whoever takes it next builds on it")
+    s.add_argument("task")
+    s.add_argument("--notes", help="what's done and what's left (2000 characters at most)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_save)
 
     s = sub.add_parser("peer", help="git peers to sync with (p2p mode, no origin)")
     s.add_argument("action", choices=["add", "remove", "list"])

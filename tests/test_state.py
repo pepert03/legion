@@ -603,6 +603,21 @@ def test_a_proposed_task_carries_its_contract_and_waits_for_its_dependencies():
         "a dependency is a task, or the key of a task another open proposal creates"]
 
 
+def test_saved_work_is_kept_per_author_for_whoever_takes_the_task_next():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    first = log.add(ANA, "work.saved", task=tid, commit="c1", branch=f"refs/legion/patches/{tid}/wip-ana-1", notes="stage 1")
+    log.add(ANA, "work.saved", task=tid, commit="c2", branch=f"refs/legion/patches/{tid}/wip-ana-2", notes="stage 2")
+    log.add(BEA, "work.saved", task=tid, commit="c3", branch=f"refs/legion/patches/{tid}/wip-bea-1")  # never on it
+    log.add(ANA, "work.saved", task=tid, commit="c4", branch="refs/heads/main")                        # not a patch ref
+    st = log.state()
+    assert [(w["name"], w["commit"], w["notes"]) for w in st.saves(tid)] == [("ana", "c2", "stage 2")]
+    assert [w["id"] for w in st.saved[tid]][0] == first["id"]
+    assert [err for _, err in st.ignored[-2:]] == [
+        "only someone who works on the task, or has, may save work on it",
+        "missing commit, or the branch is outside the patch namespace"]
+
+
 def test_the_policy_needs_two_thirds_and_a_founder_can_veto_early():
     log, crowd = trusted_crowd(5)  # 6 active owners: two thirds is 4
     prop = log.add(crowd[0], "proposal.made", kind="project.policy", payload={"window": 7200})
