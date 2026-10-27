@@ -73,6 +73,26 @@ def test_a_patch_republished_by_several_nodes_is_fetched_once(network):
     assert git(alice, "rev-parse", "refs/legion/patches/t-1/bob-1") == git(bob, "rev-parse", "HEAD")
 
 
+def test_a_new_main_goes_out_with_the_command_that_published_it(network):
+    """The push runs before the state says main moved: the sync pushes again, or a founder's `main publish`
+    with no command after it would leave the commit on its own computer."""
+    from legion.ctx import Ctx
+    alice, bob = network["z6MkAlice"], network["z6MkBob"]
+    boss = Identity.generate("boss")
+    (alice / "f.txt").write_text("x")
+    git(alice, "add", "f.txt")
+    git(alice, "commit", "-qm", "main")
+    tip = git(alice, "rev-parse", "HEAD")
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p", integrators=[boss.author]))
+    coordgit.append(alice, boss, E.create(boss, "main.updated", 2, commit=tip))
+    c = object.__new__(Ctx)
+    c.repo, c.ident, c.unreachable = alice, boss, []
+    c.sync()
+    coordgit.sync(bob, boss)
+    assert coordgit.state(bob).main_tip == tip
+    assert coordgit.has_commit(bob, tip)  # bob can start from it without waiting for alice's next command
+
+
 def test_host_path_is_unchanged_off_windows(monkeypatch):
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     assert radicle.host_path("/home/x/repo") == "/home/x/repo"

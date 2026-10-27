@@ -71,15 +71,17 @@ class Ctx:
         try:
             self.unreachable = coordgit.sync(self.repo, self.ident)
         except coordgit.GitError as e:
-            if self.strict:
-                raise
-            # A slow network, or another process on the same Radicle node: carry on with the local state, and
-            # what this command records goes out with the next sync. An agent mustn't stop over it.
-            print(f"legion: warning: couldn't sync ({str(e).strip()[-200:]}); working with the local state, "
-                  "and your events go out on the next command", file=sys.stderr)
+            self._sync_failed(e)
         self.reload()
         if coordgit.is_p2p(self.repo):
-            coordgit.update_main(self.repo, self.st.main_tip)
+            # The push went out before the state said where main is now: when that moves what this node offers
+            # as main (it published a main, or finalized a patch), push again, or the commit would wait for
+            # this node's next command, and a founder's `main publish` may have none after it.
+            if coordgit.update_main(self.repo, self.st.main_tip) and coordgit.is_radicle(self.repo):
+                try:
+                    coordgit.publish_radicle(self.repo, self.ident)
+                except coordgit.GitError as e:
+                    self._sync_failed(e)
             coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict})
             peers = coordgit.peers(self.repo)
             if "network" in self.unreachable:
@@ -88,6 +90,14 @@ class Ctx:
             elif peers and len(self.unreachable) == len(peers):
                 print(f"legion: warning: couldn't reach any peer ({', '.join(peers)}); "
                       "working with what you have locally", file=sys.stderr)
+
+    def _sync_failed(self, e: Exception) -> None:
+        if self.strict:
+            raise e
+        # A slow network, or another process on the same Radicle node: carry on with the local state, and
+        # what this command records goes out with the next sync. An agent mustn't stop over it.
+        print(f"legion: warning: couldn't sync ({str(e).strip()[-200:]}); working with the local state, "
+              "and your events go out on the next command", file=sys.stderr)
 
     def emit(self, type: str, **payload) -> dict:
         """Validate the event against the current state and, if valid, append it to the local coord."""

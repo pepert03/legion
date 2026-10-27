@@ -345,21 +345,33 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
     try:
         radicle.fetch_all(repo)
         merge_coords(repo, ident, peers(repo))
+    except radicle.RadError as e:
+        raise GitError(str(e))
+    publish_radicle(repo, ident)
+    return failed
+
+
+def publish_radicle(repo, ident: Identity) -> None:
+    from . import radicle
+    try:
         radicle.publish(repo, radicle_who(ident))
     except radicle.RadError as e:
         raise GitError(str(e))
-    return failed
 
 
 def has_commit(repo, sha: str | None) -> bool:
     return bool(sha) and run(repo, "cat-file", "-e", sha + "^{commit}").returncode == 0
 
 
-def update_main(repo, tip: str | None) -> None:
-    """Point legion/main at the main the integrator signed, if we already have that commit."""
-    if has_commit(repo, tip):
-        git(repo, "update-ref", MAIN, tip)
-        git(repo, "update-ref", PUB + "main", tip)
+def update_main(repo, tip: str | None) -> bool:
+    """Point legion/main at the main the integrator signed, if we already have that commit. True if what
+    this node offers as main moved."""
+    if not has_commit(repo, tip):
+        return False
+    moved = rev(repo, PUB + "main") != tip
+    git(repo, "update-ref", MAIN, tip)
+    git(repo, "update-ref", PUB + "main", tip)
+    return moved
 
 
 def prune_patches(repo, judged: set[str]) -> None:
