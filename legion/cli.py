@@ -96,6 +96,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "task.heartbeat": f"renews {key}",
         "task.released": f"releases {key}",
         "attempt.reported": f"reports {ev.get('outcome')} on {key}: {notes}",
+        "patch.reverted": f"reverts patch {str(ev.get('patch', ''))[:8]} for {key}: {reason}",
         "patch.checking": f"checks patch {str(ev.get('patch', ''))[:8]} for {key}",
         "patch.verified": f"verifies patch {str(ev.get('patch', ''))[:8]} for {key}: {ev.get('outcome')}",
         "project.policy": "sets how patches are verified",
@@ -839,9 +840,15 @@ def cmd_verify(args):
     by_agent, _ = trust.compute(c.st, now)
     mine = by_agent.get(c.me) or trust.Trust()
     counts = c.me in integrator.trusted_verifiers(c.st, now)
+    log = lambda m: print(m, flush=True)  # noqa: E731
+    open_mode = c.st.policy["mode"] == "open"
+    if open_mode:  # no integrator: first finalize what the others already verified
+        integrator.finalize(c, log, timeout=args.timeout)
     why = {}
     try:
         done = integrator.verify_one(c, args.timeout, why=why)
+        if open_mode and done:
+            integrator.finalize(c, log, timeout=args.timeout)  # this verification may be the one that was missing
     except Fail as e:
         if "already verified on that tree" not in str(e):
             raise
@@ -862,22 +869,39 @@ def cmd_verify(args):
             f"Checking patch {job.patch.id[:8]} for {job.task.key} ran out of time ({args.timeout} s); nothing signed. "
             "Give it longer with --timeout if this machine is busy.")
         return 0
-    note = "" if counts else (f" Your verifications don't count towards a quorum yet (trust {mine.score}, "
-                              f"{c.st.policy['verifier_trust']} needed); correct ones raise it.")
-    out(args, {"verified": job.patch.id, "task": job.task.key, "outcome": outcome, "counts": counts},
-        f"Verified patch {job.patch.id[:8]} for {job.task.key}: {outcome}.{note}")
+    if open_mode:
+        note = "" if counts else (" Your verifications don't count yet: they do once you have "
+                                  f"{S.TRUSTED_AFTER} patches accepted and no false verification.")
+    else:
+        note = "" if counts else (f" Your verifications don't count towards a quorum yet (trust {mine.score}, "
+                                  f"{c.st.policy['verifier_trust']} needed); correct ones raise it.")
+    what = "Audited" if why.get("audit") else "Verified"
+    out(args, {"verified": job.patch.id, "task": job.task.key, "outcome": outcome, "counts": counts,
+               "audit": bool(why.get("audit"))},
+        f"{what} patch {job.patch.id[:8]} for {job.task.key}: {outcome}.{note}")
     return 0
 
 
 def cmd_policy(args):
     c = Ctx()
     change = {k: v for k, v in (("quorum", args.quorum), ("verifier_trust", args.verifier_trust),
-                                ("spot_check", args.spot_check)) if v is not None}
+                                ("spot_check", args.spot_check), ("mode", args.mode), ("reads", args.reads),
+                                ("audit", args.audit),
+                                ("window", int(args.window * 3600) if args.window is not None else None))
+              if v is not None}
     if change:
         c.require_integrator()
         c.emit("project.policy", **change)
         c.sync()
     p = c.st.policy
+    if p["mode"] == "open":
+        out(args, p, f"Open mode, no integrator: any trusted agent finalizes a patch as soon as "
+                     f"{max(1, p['quorum'])} trusted owner(s) other than its author verified it. For "
+                     f"{p['window'] / 3600:g} h after that, anyone may audit it, and two trusted owners who see it fail "
+                     f"revert it; each node audits {p['audit']:.0%} of them. "
+                     + (f"Verifications record what `{p['reads']}` says the check reads." if p["reads"] else
+                        "Verifications hold only for the exact tree (no `reads` command set)."))
+        return
     out(args, p, f"Verification: a patch is accepted without the integrator's check when {p['quorum']} trusted "
                  f"people verify it (trust {p['verifier_trust']} or more); the integrator still checks "
                  f"{p['spot_check']:.0%} of those itself." if p["quorum"] else
@@ -1167,15 +1191,43 @@ Rules:
     print("Digest published.")
 
 
+def open_loop(c, args, log) -> int:
+    """The open mode has no integrator: this node finalizes what the others verified, and verifies itself."""
+    deadline = time.time() + args.timeout if args.timeout else float("inf")
+    log("Open mode: finalizing what's verified, and verifying, like every trusted node.")
+    while True:
+        try:
+            c.sync()
+            integrator.finalize(c, log, keep_branches=args.keep_branches, timeout=args.cmd_timeout)
+            done = integrator.verify_one(c, args.cmd_timeout)
+            if done:
+                log(f"verified {done[0].patch.id[:8]} for {done[0].task.key}: {done[1]}")
+                integrator.finalize(c, log, keep_branches=args.keep_branches, timeout=args.cmd_timeout)
+        except (coordgit.GitError, Fail) as e:
+            if not args.loop:
+                raise
+            log(f"This pass failed ({str(e).strip()[-300:]}); trying again in {args.loop:g} s.")
+        if not args.loop or time.time() > deadline:
+            return 0
+        time.sleep(args.loop)
+
+
 def cmd_integrate(args):
     c = Ctx()
     c.strict = True
-    c.require_integrator()
+    if c.st.policy["mode"] == "open":
+        if not c.st.trusted(c.me):
+            raise Fail(f"in the open mode any trusted agent finalizes ({S.TRUSTED_AFTER} accepted patches and no "
+                       "false verification), and you aren't one yet: `python -m legion verify` still helps")
+    else:
+        c.require_integrator()
     integrator.REVIEWERS = max(1, args.reviewers)
     integrator.FRESH = integrator.FRESH or args.fresh
     deadline = time.time() + args.timeout if args.timeout else float("inf")  # 0: integrate until stopped
     last_status, last_role = None, None
     log = lambda m: print(m, flush=True)  # noqa: E731
+    if c.st.policy["mode"] == "open":
+        return open_loop(c, args, log)
     integrator.beat = lambda: integrator.keep_leases(c, args.lease)  # keeps the leases through long checks
     integrator.BEAT_EVERY = max(1, min(30, args.lease // 3))  # often enough for a short lease not to lapse
     try:
@@ -1382,6 +1434,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--quorum", type=int, help="trusted verifications that let a patch in unchecked (0: off)")
     s.add_argument("--verifier-trust", type=int, help="trust score a verifier needs to count")
     s.add_argument("--spot-check", type=float, help="share of verified patches the integrator checks anyway")
+    s.add_argument("--mode", choices=["integrator", "open"],
+                   help="open: no integrator; trusted agents finalize on verifications, and challenges revert")
+    s.add_argument("--window", type=float, help="open mode: hours an accepted patch can be challenged (default 24)")
+    s.add_argument("--audit", type=float, help="open mode: share of accepted patches each node checks again")
+    s.add_argument("--reads", help="the command that lists the files an acceptance command reads, e.g. "
+                                   "'python check.py --reads' (verifications then survive changes elsewhere)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_policy)
 

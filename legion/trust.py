@@ -19,7 +19,7 @@ GOOD = {"accepted": 1.0, "competitive": 1.0, "sketch_resolved": 1.5, "verified":
 # mostly bad luck; failing tests or leaving the zone is not.
 BAD = {"tests": 1.0, "zone": 1.5, "scaffold": 0.8, "invalid": 0.8, "metric": 0.5, "empty": 0.5,
        "missing": 0.3, "deps": 0.2, "conflict": 0.15, "done": 0.0, "no_gain": 0.0,
-       "sketch_failed": 1.0, "abandoned": 0.4, "timeout": 0.1,
+       "sketch_failed": 1.0, "abandoned": 0.4, "timeout": 0.1, "reverted": 4.0,
        # A verification the integrator's own check contradicted: a false pass would have let a broken patch in.
        "false_pass": 4.0, "false_fail": 1.0}
 LABEL = {"accepted": "patch accepted", "competitive": "improved a competitive task",
@@ -29,7 +29,8 @@ LABEL = {"accepted": "patch accepted", "competitive": "improved a competitive ta
          "missing": "patch not found", "deps": "submitted before its dependencies",
          "conflict": "conflict with main", "done": "task already done", "no_gain": "did not beat the best",
          "sketch_failed": "split a task whose parent then failed", "abandoned": "let a claim expire",
-         "verified": "verified a patch correctly", "timeout": "its check ran out of time twice", "false_pass": "verified as passing a patch that fails",
+         "verified": "verified a patch correctly", "timeout": "its check ran out of time twice",
+         "reverted": "an accepted patch of its was proved wrong and reverted", "false_pass": "verified as passing a patch that fails",
          "false_fail": "verified as failing a patch that passes"}
 
 
@@ -109,12 +110,12 @@ def compute(st: S.State, now: float) -> tuple[dict[str, Trust], dict[str, Trust]
         if not p.verdict or not p.tree:
             continue
         for v in st.verifications.get(p.id, ()):
-            if (v["base_tree"], v["tree"]) != (p.base_tree, p.tree):
+            if v["tree"] != p.tree and v["id"] not in p.verified_by:  # judged on other trees: says nothing
                 continue
             passed, accepted = v["outcome"] == "pass", p.verdict == "accepted"
-            if passed == accepted and (accepted or p.code == "tests"):
+            if passed == accepted and (accepted or p.code in ("tests", "reverted")):
                 get(v["author"]).add("verified")
-            elif passed and p.code == "tests":
+            elif passed and p.code in ("tests", "reverted"):
                 get(v["author"]).add("false_pass")
             elif not passed and accepted:
                 get(v["author"]).add("false_fail")

@@ -155,8 +155,24 @@ be removed, and a removed integrator's later events stop counting).
   same trees: a false pass costs 4, a false fail 1, a correct one earns 0.25. Rejections are always the
   integrator's own check. `legion policy` shows or sets the three numbers (`project.policy`).
 
-**Later:** auditable verdicts (any node re-runs a verdict and a wrong one penalises the integrator's
-trust), and a sandbox for the checks.
+- **The open mode: no integrator** (`legion policy --mode open --quorum 1`). The founders (the
+  integrators at `init`) keep creating tasks and setting the policy; everything else any *trusted*
+  node does: the founders, and agents with two accepted patches and no false verification (`trusted`
+  in the state, so every node agrees). A trusted node finalizes a patch as soon as `quorum` trusted
+  owners other than its author verified it (`patch.accepted` lists them in `verified_by`); rejects what
+  git alone shows wrong (conflict, zone, empty, missing), or what failing verifications back; reviews
+  sketches and paths; resolves parents. Merges are written with a fixed author and date, so every
+  honest finalizer makes the same commit, and the compare-and-swap on main keeps one when two race.
+  For `window` (24 h) after acceptance a patch can be audited (`verify` does it when nothing waits, on
+  a share `audit` of them, chosen by each node's key); two trusted owners who see it fail on the
+  accepted tree make any trusted node revert it (`patch.reverted`, a revert commit on main): the task
+  is open again, and its author and whoever verified it as passing lose their trust.
+- **What a check reads.** With `legion policy --reads 'python check.py --reads'`, a verification records
+  the blob of every file the project's command says the check reads (in a Lean project, the import
+  closure of the module, plus the checker and the lake files). It holds for any later merge with the
+  same blobs there, so independent patches no longer invalidate each other's verifications.
+
+**Later:** a sandbox for the checks.
 
 ## 7. Decision 4 — Sharing knowledge at a bounded cost
 
@@ -277,7 +293,8 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
 - **Which project to test** phase 0 with. It should be easy to split into zones and have good tests.
 - **Claim duration**: a fixed 2 h, or based on `size`?
 - **Choosing integrators** when there are several: by appointment, by reputation, or rotating?
-- **Integration by consensus, with no integrator** (an improvement to make). Today a single machine
+- **Integration by consensus, with no integrator** (superseded by the open mode below, which is faster).
+  Today a single machine
   signs every verdict and is a bottleneck and a single point of failure. Instead, the verdict could be
   a rule of the state that every node computes alike: a patch is accepted once a quorum of trusted
   owners (say 2, never its author's) verified it as passing on the same trees and no trusted one
@@ -290,8 +307,7 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
   (nodes re-verifying accepted patches at random, and heavy penalties for false verifications).
   It would come in as a project mode (`legion policy --consensus`), tried in simulation first, with
   the integrator kept as a safety net meanwhile.
-- **Faster than a quorum: accept first, check afterwards** (an improvement to make, the preferred way
-  to drop the single integrator). A patch goes in as soon as one trusted agent other than its author
+- **Faster than a quorum: accept first, check afterwards** (done: `legion policy --mode open`). A patch goes in as soon as one trusted agent other than its author
   verifies it on the same trees (the author's own check is the other half), instead of waiting for k
   checks in a row. For a challenge window afterwards (say 24 h), any node may re-check it; since checks
   are deterministic, a failure on the same trees is a proof anyone can reproduce, and it reverts the
@@ -299,7 +315,7 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
   random, newer authors' more often, so cheating is caught with high probability and doesn't pay. The
   wait goes from k checks to one; the price is an occasional revert, and re-checking what was built on
   top of a reverted patch.
-- **Verifications that don't go stale** (an improvement to make first: it helps any of the above). A
+- **Verifications that don't go stale** (done: `legion policy --reads COMMAND`). A
   verification is lost today as soon as main changes anywhere, as when a sketch merged its scaffold
   first. Instead it would record what the check depended on (in Lean, the import closure of the checked
   module, which lake knows; elsewhere, the task's zone and dependencies) and stay valid while what

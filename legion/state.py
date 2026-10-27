@@ -38,7 +38,23 @@ COMPETITIVE_TRIES = 3
 # works out the same way) and which tree came out. Merges are deterministic, so when the integrator gets there
 # the trees match and a quorum of passes from trusted people lets it accept without running the check itself;
 # it still checks a share of them (spot_check), and a verification that turns out false costs trust.
-POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25}
+POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
+          # mode "open": no integrator. Any trusted node finalizes what verifications support, at once, and for a
+          # `window` of seconds afterwards any accepted patch can be challenged and reverted; nodes audit
+          # accepted patches at random (`audit`). `reads`: the project's command that lists the files an
+          # acceptance command reads, so a verification stays valid while main changes elsewhere.
+          "mode": "integrator", "window": 86400, "audit": 0.25, "reads": ""}
+# What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
+FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
+            "path.accepted", "path.rejected", "task.resolved", "task.created"}
+# Rejections any node can confirm with git alone; the others need failing verifications behind them.
+PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout"}
+TRUSTED_AFTER = 2  # accepted patches, and never a false verification, to be trusted without being a founder
+
+
+def owner(name: str) -> str:
+    person, sep, num = name.rpartition("#")
+    return person if sep and person and num.isdigit() else name
 TREE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 SIZES = {"L": 0, "M": 1, "S": 2}
 DEFAULT_RUNNERS = ["python -m unittest", "python -m pytest", "pytest", "npm test", "cargo test", "go test"]
@@ -117,6 +133,8 @@ class Patch:
     metric: float | None = None
     merge_commit: str | None = None
     ts: float = 0.0
+    verified_by: list = field(default_factory=list)  # the verifications it was accepted on, in the open mode
+    accepted_ts: float = 0.0  # when it was accepted: the open mode's challenge window counts from here
     base_tree: str | None = None  # the trees the verdict was reached on: they tell a true verification from a
     tree: str | None = None       # false one
 
@@ -172,6 +190,8 @@ class State:
         self.votes: dict[tuple[str, str], set] = {}  # (add|remove, key) -> integrators who voted for it
         self.leases: list[Claim] = []                # claims on the integrator role, whole or per subtree
         self.verifications: dict[str, list[dict]] = defaultdict(list)  # patch -> patch.verified events
+        self.accepted_count: dict[str, int] = defaultdict(int)  # author -> its accepted patches
+        self.falsified: set[str] = set()  # authors of a reverted patch, and whoever verified it as passing
         self.policy: dict = dict(POLICY)
         self.integrator_names: dict[str, str] = {}
 
@@ -203,6 +223,49 @@ class State:
                 out.append(c)
                 seen.add(c.author)
         return out
+
+    def trusted(self, author: str) -> bool:
+        """Whose verifications and verdicts count in the open mode: the founders, and agents with accepted work
+        and never a false verification."""
+        return author in self.integrators or (self.accepted_count[author] >= TRUSTED_AFTER
+                                              and author not in self.falsified)
+
+    def challengeable(self, p, now: float) -> bool:
+        """An accepted patch can still be audited, and reverted, in the open mode's window."""
+        return (self.policy["mode"] == "open" and p.verdict == "accepted"
+                and now - p.accepted_ts <= self.policy["window"])
+
+    def backed(self, p, ids, outcome: str, tree: str | None = None) -> str | None:
+        """Check that these verifications are `outcome`s by enough trusted owners, never the author's."""
+        vs = {v["id"]: v for v in self.verifications[p.id]}
+        if not isinstance(ids, list) or not all(i in vs for i in ids):
+            return "verified_by must list this patch's verifications"
+        chosen = [vs[i] for i in ids]
+        if any(v["outcome"] != outcome or not self.trusted(v["author"]) or owner(v["name"]) == owner(p.name)
+               or (tree is not None and v["tree"] != tree) for v in chosen):
+            return f"verified_by must be {outcome}es by trusted agents other than the patch's own"
+        need = max(1, self.policy["quorum"]) if outcome == "pass" or tree is None else 2
+        if len({owner(v["name"]) for v in chosen}) < need:
+            return f"it needs {need} trusted owners behind it"
+        return None
+
+    def _finalizer_rules(self, ev: dict) -> str | None:
+        """What a trusted node, not a founder, needs behind its verdict in the open mode."""
+        t = ev["type"]
+        p = self.patches.get(ev.get("patch"))
+        if t == "patch.accepted" and p:
+            if ev["author"] == p.author:
+                return "nobody finalizes their own patch"
+            return self.backed(p, ev.get("verified_by"), "pass")
+        if t == "patch.rejected" and p and ev.get("code") not in PLAIN:
+            return self.backed(p, ev.get("verified_by"), "fail")
+        if t == "patch.reverted":
+            if not p or not self.challengeable(p, ev["ts"]):
+                return "only an accepted patch, inside its challenge window, can be reverted"
+            if not ev.get("merge_commit"):
+                return "a revert needs its commit"
+            return self.backed(p, ev.get("verified_by"), "fail", tree=p.tree)
+        return None
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
         """Works on the task now, or did: claimed it, reported on it, sent or verified a patch, proposed a sketch
@@ -444,12 +507,18 @@ class State:
         if self.project is None:
             return "the project is not started"
         if t in E.INTEGRATOR_ONLY and ev["author"] not in self.integrators:
-            return "only an integrator can publish this event"
+            open_ok = (self.policy["mode"] == "open" and t in FINALIZE and self.trusted(ev["author"])
+                       and (t != "task.created" or ev.get("sketch") or ev.get("path")))
+            if not open_ok:
+                return "only an integrator can publish this event"
+            err = self._finalizer_rules(ev)
+            if err:
+                return err
 
         # Compare-and-swap on main: whatever moves main must say which main it was built on. If main has
         # moved since (another integrator got there first), the event doesn't count and the work is redone.
         # This, not the lease, is what keeps main from forking; the lease only avoids duplicated work.
-        if t in ("patch.accepted", "sketch.accepted", "main.updated") and ev.get("base") is not None \
+        if t in ("patch.accepted", "patch.reverted", "sketch.accepted", "main.updated") and ev.get("base") is not None \
                 and self.main_tip and ev["base"] != self.main_tip:
             return "stale base: main moved on since this was computed"
 
@@ -464,8 +533,14 @@ class State:
 
         if t == "project.policy":
             policy = dict(self.policy)
+            if "mode" in ev and ev["mode"] not in ("integrator", "open"):
+                return "mode must be integrator or open"
+            if "reads" in ev and (not isinstance(ev["reads"], str) or len(ev["reads"]) > 200):
+                return "reads must be a command"
+            policy.update({k: ev[k] for k in ("mode", "reads") if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
-                                      ("spot_check", (int, float), 0, 1)):
+                                      ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
+                                      ("audit", (int, float), 0, 1)):
                 if key in ev:
                     v = ev[key]
                     if not isinstance(v, kind) or isinstance(v, bool) or not lo <= v <= hi:
@@ -492,7 +567,7 @@ class State:
             return self._judge_sketch(ev)
 
         task = self.tasks.get(ev.get("task"))
-        if task is None and t != "digest.published" and t not in ("patch.accepted", "patch.rejected"):
+        if task is None and t != "digest.published" and t not in ("patch.accepted", "patch.rejected", "patch.reverted"):
             return "unknown task"
 
         if t == "task.claimed":
@@ -532,10 +607,15 @@ class State:
             p = self.patches.get(ev.get("patch"))
             if p is None or p.task != task.id:
                 return "unknown patch"
-            if p.verdict:
+            if p.verdict and not self.challengeable(p, ev["ts"]):
                 return "the patch already has a verdict"
             if ev["author"] == p.author:
                 return "a patch can't be verified by its own author"
+            reads = ev.get("reads", ["*"])
+            if not (reads == ["*"] or isinstance(reads, dict) and len(reads) <= 5000 and all(
+                    isinstance(k, str) and len(k) < 300 and (v is None or isinstance(v, str) and TREE.match(v))
+                    for k, v in reads.items())):
+                return "reads must be [\"*\"] or the blob of each file the check read"
             if ev.get("outcome") not in ("pass", "fail"):
                 return "outcome must be pass or fail"
             if not all(isinstance(ev.get(k), str) and TREE.match(ev[k]) for k in ("base_tree", "tree")):
@@ -577,6 +657,20 @@ class State:
             p.base_tree, p.tree = ev.get("base_tree"), ev.get("tree")
             if p.merge_commit:
                 self.main_tip = p.merge_commit
+            if p.verdict == "accepted":
+                p.accepted_ts = ev["ts"]
+                p.verified_by = list(ev.get("verified_by") or [])
+                self.accepted_count[p.author] += 1
+        elif t == "patch.reverted":
+            p = self.patches.get(ev.get("patch"))
+            if p is None or p.verdict != "accepted" or not ev.get("merge_commit"):
+                return "only an accepted patch can be reverted, with its revert commit"
+            p.verdict, p.code, p.reason = "reverted", "reverted", ev.get("reason", "")
+            self.main_tip = ev["merge_commit"]
+            self.accepted_count[p.author] -= 1
+            self.falsified.add(p.author)
+            self.falsified.update(v["author"] for v in self.verifications[p.id]
+                                  if v["outcome"] == "pass" and (v["tree"] == p.tree or v["id"] in p.verified_by))
         elif t == "sketch.proposed":
             if self.done(task.id) or task.cancelled or self.active_sketch(task.id) \
                     or any(k.verdict is None for k in self.sketches_for(task.id)):
@@ -715,6 +809,8 @@ class State:
     def integrates(self, author: str, tid: str, now: float) -> bool:
         """Whether this integrator handles the task now: it holds its subtree's lease, or the project's lease
         and nobody else holds the subtree's."""
+        if self.policy["mode"] == "open":  # no integrator: every trusted node finalizes everything
+            return self.trusted(author)
         holder = self.leader(now, self.root_of(tid)) or self.leader(now)
         return holder.author == author if holder else author in self.integrators  # no lease: anyone may
 

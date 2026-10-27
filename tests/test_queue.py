@@ -12,6 +12,8 @@ from legion.identity import Identity
 
 CHECK = '''import pathlib, sys
 here = pathlib.Path(__file__).parent
+if sys.argv[1] == "--reads":  # what `python check.py X` reads: X's file and this script
+    print(sys.argv[2].split()[-1] + ".txt"); print("check.py"); sys.exit(0)
 build = here / "build"  # git-ignored: what a check leaves for the next one
 build.mkdir(exist_ok=True)
 runs = build / "runs"
@@ -261,3 +263,61 @@ def test_a_patch_built_on_a_dependency_in_review_goes_in_after_it(project):
     st = Ctx(sync=False).st
     assert [p.verdict for p in st.patches_for(tids["a"])] == ["accepted"]
     assert [(p.verdict, p.code) for p in st.patches_for(c3)] == [("accepted", None)]  # a's files aren't held against it
+
+
+def open_mode(repo, **policy):
+    c = as_(repo, "boss")
+    c.emit("project.policy", mode="open", quorum=1, **policy)
+    c.sync()
+
+
+def test_open_mode_one_owner_verifies_and_another_finalizes(project):
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    job, outcome = integrator.verify_one(as_(repo, "luis"), 60)
+    assert (job.task.key, outcome) == ("a", "pass")
+    assert integrator.finalize(as_(repo, "marta"), [].append) == 1
+    st = Ctx(sync=False).st
+    p = st.patches_for(tids["a"])[0]
+    assert p.verdict == "accepted" and p.verified_by and runs(repo, "0") == 0  # nobody checked it twice
+    assert git(repo, "show", f"{st.main_tip}:a.txt") == "ok"
+    assert git(repo, "log", "-1", "--format=%an %ad", "--date=iso", st.main_tip).startswith("legion 2000-01-01")
+
+
+def test_open_mode_a_verification_survives_main_moving_elsewhere(project):
+    repo, tids, patch = project
+    open_mode(repo, reads="python check.py --reads")
+    patch("a", "ok\n")
+    patch("b", "ok\n")
+    luis = as_(repo, "luis")
+    jb = integrator.plan(luis, luis.st.patches_for(tids["b"])[0])
+    integrator.sign(luis, jb, 60)                                   # b verified on today's main
+    v = Ctx(sync=False).st.verifications[jb.patch.id][0]
+    assert set(v["reads"]) == {"b.txt", "check.py"}
+    integrator.verify_one(as_(repo, "marta"), 60)                   # a verified too
+    assert integrator.finalize(as_(repo, "boss"), [].append) == 2    # a goes in, main moves, b still counts
+    assert verdicts(tids) == {"a": ["accepted"], "b": ["accepted"]}
+
+
+def test_open_mode_audits_catch_a_false_pass_and_revert_it(project):
+    repo, tids, patch = project
+    open_mode(repo, audit=1)
+    patch("a", "broken\n")
+    luis = as_(repo, "luis")
+    job = integrator.plan(luis, luis.st.patches_for(tids["a"])[0])
+    luis.emit("patch.verified", task=tids["a"], patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,
+              outcome="pass", reads=["*"])                          # a lie: it never ran the check
+    luis.sync()
+    integrator.finalize(as_(repo, "marta"), [].append)
+    assert verdicts(tids)["a"] == ["accepted"]
+    for who in ("boss", "marta"):                                    # two audits by other owners
+        job, outcome = integrator.verify_one(as_(repo, who), 60)
+        assert outcome == "fail"
+    log = []
+    integrator.finalize(as_(repo, "boss"), log.append)
+    st = Ctx(sync=False).st
+    assert st.patches_for(tids["a"])[0].verdict == "reverted" and any("REVERTED" in m for m in log)
+    assert git(repo, "show", f"{st.main_tip}:a.txt") == "todo"
+    assert make_project.people["luis"].author in st.falsified and not st.trusted(make_project.people["luis"].author) \
+        or make_project.people["luis"].author in st.integrators  # a founder stays trusted, but is marked

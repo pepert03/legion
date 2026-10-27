@@ -4,6 +4,8 @@
     python check.py --module MODULE  e.g. python check.py --module Erdos902.LowerBound.Induction
     python check.py --tournament K FILE   e.g. python check.py --tournament 4 solutions/S4.txt
     python check.py --setup          once per clone: Mathlib, shared by every clone on this computer
+    python check.py --reads COMMAND  the files an acceptance COMMAND reads (legion keeps verifications valid
+                                     while main changes elsewhere); * when it can't tell
 
 THEOREM mode: builds the theorem's module and checks, with Lean itself, that `Erdos902.THEOREM` has exactly
 the type of its proposition in Erdos902/Statements.lean, and that it rests on no `sorry` and no axiom beyond
@@ -216,8 +218,60 @@ def setup():
     print(f"READY: Mathlib, already built, {shared} ({packages.resolve()})")
 
 
+FIXED = ["check.py", "lakefile.toml", "lake-manifest.json", "lean-toolchain", "Erdos902/Basic.lean",
+         "Erdos902/Statements.lean"]
+MODULE = re.compile(r"Erdos902(?:\.[A-Za-z0-9_]+)+")
+IMPORT = re.compile(r"^\s*import\s+(Erdos902(?:\.[A-Za-z0-9_]+)+)", re.M)
+
+
+def module_file(module):
+    return module.replace(".", "/") + ".lean"
+
+
+def closure(modules):
+    """The project's files these modules import, transitively (Mathlib is pinned by the manifest)."""
+    seen, todo = set(), list(modules)
+    while todo:
+        m = todo.pop()
+        if m in seen:
+            continue
+        seen.add(m)
+        f = ROOT / module_file(m)
+        if f.exists():
+            todo += IMPORT.findall(f.read_text(encoding="utf-8", errors="replace"))
+    return {module_file(m) for m in seen}
+
+
+def reads(command):
+    """The files an acceptance command reads, or None if it isn't one of the shapes this project uses."""
+    words = command.split()
+    if words[:2] == ["python", "check.py"]:
+        rest = words[2:]
+        if len(rest) == 1 and rest[0] in TASKS:
+            return set(FIXED) | closure([TASKS[rest[0]][0]])
+        if len(rest) == 2 and rest[0] == "--module":
+            return set(FIXED) | closure([rest[1]])
+        if len(rest) == 3 and rest[0] == "--tournament":
+            return {"check.py", rest[2]}
+        return None
+    if words[:4] == ["python", "-m", "unittest", "discover"] and "-s" in words and "-p" in words:
+        folder, pattern = words[words.index("-s") + 1], words[words.index("-p") + 1]
+        tests = sorted((ROOT / folder).glob(pattern))
+        if not tests:
+            return None
+        found = set()
+        for t in tests:
+            found |= set(MODULE.findall(t.read_text(encoding="utf-8", errors="replace")))
+        return set(FIXED) | closure(found) | {t.relative_to(ROOT).as_posix() for t in tests}
+    return None
+
+
 def main(argv):
-    if argv == ["--setup"]:
+    if len(argv) == 2 and argv[0] == "--reads":
+        found = reads(argv[1])
+        print("\n".join(sorted(found)) if found is not None else "*")
+        return 0
+    elif argv == ["--setup"]:
         setup()
     elif len(argv) == 3 and argv[0] == "--tournament" and argv[1].isdigit():
         check_tournament(int(argv[1]), argv[2])

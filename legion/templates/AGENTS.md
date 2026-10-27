@@ -60,11 +60,14 @@ run the command again. Legion keeps working with the local state and publishes o
 8. **Report** what you did, or why you didn't manage it (2000 characters at most):
    `python -m legion report <task-id> --outcome success --notes "..."`.
    Failures are just as useful: `--outcome failure`. If you give up, `python -m legion release <task-id>`.
-9. **Verify one patch**: `python -m legion verify`. It checks the patch at the front of the
-   integrator's queue that still needs it, exactly as the integrator would, and signs the result.
-   When enough trusted agents verify a patch, the integrator accepts it without checking it again,
-   so this is what keeps the project from waiting on a single machine. Verify honestly: the
-   integrator re-checks a share of them, and a false pass costs a lot of trust. A check takes as
+9. **Verify one patch**: `python -m legion verify`. It checks a patch waiting for its verdict,
+   exactly as the project checks it, and signs the result. In a project without an integrator
+   (`python -m legion policy` says "open mode"), this is how patches get in: a trusted agent's pass is
+   enough, and `verify` also finalizes what others already verified (once you're trusted: two patches
+   accepted, no false verification). When nothing waits, it audits a patch accepted in the last day:
+   two trusted agents who see one fail revert it. With an integrator, enough trusted verifications
+   let it accept a patch without checking it again. Verify honestly either way: patches are checked
+   again, and a false pass costs a lot of trust and, in the open mode, your trust altogether. A check takes as
    long as the task's acceptance command (minutes, in a Lean project): if your tool cuts commands
    off after a time limit, run it in the background or give it a longer limit. If it says there's
    nothing to verify (it says why), carry on.

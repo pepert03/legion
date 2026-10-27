@@ -494,3 +494,52 @@ def test_a_task_opens_while_its_dependencies_are_in_review():
     assert log.state().status(b, 1001) == "blocked"            # b's own patch waits for a's verdict
     log.add(BOSS, "patch.rejected", patch=pa["id"], reason="tests fail", code="tests")
     assert log.state().status(b, 1001) == "blocked"            # a's patch is gone: b waits for a again
+
+
+DAN = Identity.generate("dan")
+
+
+def open_project():
+    """An open-mode project where ANA and BEA are trusted (two accepted patches each) and CEL isn't."""
+    log, tid = project()
+    log.add(BOSS, "project.policy", mode="open", quorum=1)
+    for who in (ANA, BEA):
+        for i in range(2):
+            t = S.task_id(log.add(BOSS, "task.created", key=f"w-{who.name}-{i}", title="w", zone=["w"], accept="true"))
+            p = log.add(who, "patch.submitted", task=t, commit="c", branch=f"legion/w/{who.name}-{i}")
+            log.add(BOSS, "patch.accepted", patch=p["id"], merge_commit=f"m-{who.name}-{i}")
+    return log, tid
+
+
+def test_in_the_open_mode_a_trusted_node_accepts_on_another_owners_pass():
+    log, tid = open_project()
+    st = log.state()
+    assert st.trusted(ANA.author) and st.trusted(BEA.author) and not st.trusted(CEL.author)
+    p = log.add(CEL, "patch.submitted", task=tid, commit="c", branch="legion/t/c-1")
+    log.add(ANA, "patch.accepted", patch=p["id"], merge_commit="m1")            # no verification behind it
+    v = log.add(BEA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+    log.add(DAN, "patch.accepted", patch=p["id"], merge_commit="m1", verified_by=[v["id"]])  # DAN isn't trusted
+    log.add(ANA, "patch.accepted", patch=p["id"], merge_commit="m1", verified_by=[v["id"]], tree=TREE_B,
+            base=log.state().main_tip)
+    st = log.state()
+    assert st.patches[p["id"]].verdict == "accepted" and st.main_tip == "m1"
+    assert [why for _, why in st.ignored] == ["verified_by must list this patch's verifications",
+                                              "only an integrator can publish this event"]
+
+
+def test_a_challenge_by_two_trusted_owners_reverts_inside_the_window():
+    log, tid = open_project()
+    log.add(BOSS, "project.policy", quorum=1)
+    p = log.add(CEL, "patch.submitted", task=tid, commit="c", branch="legion/t/c-1")
+    v = log.add(BEA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+    log.add(ANA, "patch.accepted", patch=p["id"], merge_commit="m1", verified_by=[v["id"]], tree=TREE_B,
+            base=log.state().main_tip)
+    fails = [log.add(who, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="fail")
+             for who in (ANA, BOSS)]
+    log.add(ANA, "patch.reverted", patch=p["id"], merge_commit="r1", verified_by=[f["id"] for f in fails], base="m1")
+    st = log.state()
+    assert st.patches[p["id"]].verdict == "reverted" and st.main_tip == "r1" and not st.done(tid)
+    assert BEA.author in st.falsified and CEL.author in st.falsified and not st.trusted(BEA.author)
+    late = log.add(ANA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="fail",
+                   ts=1000.0 + 2 * 86400)
+    assert log.state().ignored[-1][0]["id"] == late["id"]  # past the window: no more audits

@@ -115,7 +115,8 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     outside = [f for f in files if not S.in_zone(f, allowed)]
     if outside:
         return reject(f"touches files outside its zone ({', '.join(allowed)}): {', '.join(outside)}", "zone")
-    merged = git(repo, "commit-tree", tree, "-p", head, "-p", commit, "-m", msg, env=coordgit.author_env(c.ident))
+    env = FIXED_ENV if c.st.policy["mode"] == "open" else coordgit.author_env(c.ident)
+    merged = git(repo, "commit-tree", tree, "-p", head, "-p", commit, "-m", msg, env=env)
     return merged, head
 
 
@@ -217,6 +218,11 @@ def resolve_parents(c: Ctx, timeout: int, log=print, mine=lambda tid: True) -> i
 # Either way the checks run code from strangers, with no sandbox yet.
 
 FRESH = bool(os.environ.get("LEGION_FRESH_REVIEWS"))
+# In the open mode every finalizer writes main's commits with the same author and date, so the same merge gives
+# the same commit on every node.
+FIXED_ENV = dict(os.environ, GIT_AUTHOR_NAME="legion", GIT_AUTHOR_EMAIL="legion@legion.local",
+                 GIT_AUTHOR_DATE="2000-01-01T00:00:00Z", GIT_COMMITTER_NAME="legion",
+                 GIT_COMMITTER_EMAIL="legion@legion.local", GIT_COMMITTER_DATE="2000-01-01T00:00:00Z")
 TIMED_OUT: dict[str, int] = {}  # patch -> checks of it that ran out of time, in this process
 MISSING_AFTER = 600  # seconds a patch's commit may take to arrive before it's rejected as missing
 REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
@@ -323,32 +329,68 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
     return "accepted", payload
 
 
+def blobs(repo, tree: str, paths: list[str]) -> dict:
+    """The blob of each of these paths in a tree (None where it doesn't exist)."""
+    found = {}
+    for i in range(0, len(paths), 200):
+        out = git(repo, "ls-tree", "-r", "--full-tree", tree, "--", *paths[i:i + 200])
+        for line in out.splitlines():
+            meta, _, path = line.partition("\t")
+            found[path] = meta.split()[2]
+    return {p: found.get(p) for p in paths}
+
+
+def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
+    """What the task's check reads, as the blob of each file in the merged tree: the project's `reads` command
+    says which files. ["*"] (all of them) without one, or if it can't tell."""
+    cmd = c.st.policy.get("reads")
+    if not cmd:
+        return ["*"]
+    code, out = run_cmd(f'{cmd} "{job.task.accept}"', folder, 300)
+    paths = sorted({line.strip() for line in out.splitlines() if line.strip()})
+    if code != 0 or not paths or "*" in paths:
+        return ["*"]
+    return blobs(c.repo, job.tree, paths)
+
+
+def matches(repo, v: dict, tree: str) -> bool:
+    """A verification holds for this merge: the same tree, or the same blob for every file its check read."""
+    reads = v.get("reads", ["*"])
+    if v["tree"] == tree:
+        return True
+    return isinstance(reads, dict) and bool(reads) and blobs(repo, tree, list(reads)) == reads
+
+
 def trusted_verifiers(st: S.State, now: float) -> set[str]:
-    """Whose verifications count: the integrators, and agents whose trust reaches the project's threshold."""
+    """Whose verifications count: in the open mode, whom the state trusts (founders, and agents with accepted
+    work and no false verification); otherwise the integrators, and agents with enough trust."""
+    if st.policy["mode"] == "open":
+        return {e["author"] for e in st.events if st.trusted(e["author"])}
     by_agent, _ = trust.compute(st, now)
     return set(st.integrators) | {a for a, t in by_agent.items()
                                   if t.evidence >= 2 and t.score >= st.policy["verifier_trust"]}
 
 
-def quorum(c: Ctx, job: Job, now: float) -> list[dict] | None:
-    """The passing verifications of exactly this merge, by enough trusted people other than the author, unless
-    this patch is one the integrator checks itself anyway (a spot check, chosen by its trees)."""
-    pol = c.st.policy
-    if pol["quorum"] <= 0 or job.baseline:
+def quorum(c: Ctx, job: Job, now: float, outcome: str = "pass") -> list[dict] | None:
+    """The verifications that hold for this merge with this outcome, by enough trusted people other than the
+    author; for passes with an integrator, unless this patch is one it checks itself anyway (a spot check,
+    chosen by its trees). In the open mode there are no spot checks: audits after acceptance instead."""
+    pol, open_mode = c.st.policy, c.st.policy["mode"] == "open"
+    if (pol["quorum"] <= 0 and not open_mode) or job.baseline:
         return None
     draw = int(hashlib.sha256(f"{job.patch.id}:{job.tree}".encode()).hexdigest(), 16) / 16 ** 64
-    if draw < pol["spot_check"]:
+    if outcome == "pass" and not open_mode and draw < pol["spot_check"]:
         return None
     ok = trusted_verifiers(c.st, now)
     author_person = trust.owner_of(job.patch.name)
     people = {}
     for v in c.st.verifications.get(job.patch.id, ()):
         person = trust.owner_of(v["name"])
-        if (v["outcome"] == "pass" and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)
-                and v["author"] in ok and person != author_person):
+        if (v["outcome"] == outcome and v["author"] in ok and person != author_person
+                and matches(c.repo, v, job.tree)):
             people.setdefault(person, v)
     chosen = list(people.values())
-    return chosen if len(chosen) >= pol["quorum"] else None
+    return chosen if len(chosen) >= max(1, pol["quorum"]) else None
 
 
 def verified_result(job: Job, vs: list[dict]) -> tuple:
@@ -520,32 +562,7 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
         finish_interrupted(c, log)
     mine = lambda tid: c.st.integrates(c.me, tid, time.time())  # noqa: E731 - its subtrees, or all the others
     done = accept_verified(c, log, keep_branches, mine)
-    sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None and mine(k.task)),
-                      key=lambda k: (k.lamport, k.id))
-    for k in sketches:
-        c.reload()
-        k = c.st.sketches[k.id]
-        if k.verdict:
-            continue
-        try:
-            result = review_path(c, k) if k.kind == "path" else review_sketch(c, k)
-        except coordgit.GitError as e:
-            log(f"git error reviewing {k.kind} {k.id[:8]}; will retry: {e}")
-            continue
-        if result is None:
-            continue
-        verdict, payload = result
-        if not emit_verdict(c, f"{k.kind}.{verdict}", log, task=k.task, **{k.kind: k.id}, **payload):
-            continue
-        if verdict == "accepted":
-            create_children(c, c.st.sketches[k.id])
-            c.sync()
-        if not keep_branches and k.branch:
-            coordgit.drop_patch(c.repo, k.branch)
-        key = c.st.tasks[k.task].key
-        log(f"{k.kind.upper()} {verdict.upper()} {key} by {k.name}"
-            + (f": {len(k.children)} subtasks" if verdict == "accepted" else f": {payload['reason'].splitlines()[0]}"))
-        done += 1
+    done += review_sketches(c, log, keep_branches, mine)
     # A merge queue. The ready patches in order (the one that unblocks the most tasks first, then the oldest),
     # up to REVIEWERS of them: the i-th is merged on top of main and the ones before it, all are checked at once,
     # and the verdicts go out in order. If they all pass, they all go in. If one fails, its rejection holds (it
@@ -648,7 +665,7 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
         stack = stacks.setdefault(handler(c.st, p.task, now), {"jobs": [], "onto": None})
         if len(stack["jobs"]) >= depth or any(j.patch.task == p.task for j in stack["jobs"]):
             continue
-        planned = plan(c, p, stack["onto"])
+        planned = plan(c, p, None if c.st.policy["mode"] == "open" else stack["onto"])
         if isinstance(planned, Job):
             stack["jobs"].append(planned)
             stack["onto"] = planned.merged
@@ -673,16 +690,147 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
         if len(have) >= max(1, need):
             skip("verified enough already")
             continue
-        announce_checks(c, [job])
-        code, out, value = check(c.repo, job, "verify", timeout)[:3]
-        if code is None:  # out of time: that says nothing about the patch, so nothing is signed
-            return job, "timed out"
-        outcome = "pass" if code == 0 and (not job.task.metric or value is not None) else "fail"
-        c.emit("patch.verified", task=job.task.id, patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,
-               outcome=outcome, metric=value)
-        c.sync()
-        return job, outcome
+        return sign(c, job, timeout)
+    if c.st.policy["mode"] == "open":
+        job = audit_job(c, now)
+        if job:
+            why["audit"] = 1
+            return sign(c, job, timeout)
     return None
+
+
+def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
+    """Check the job and sign the verdict it leads to, with what the check read."""
+    announce_checks(c, [job])
+    result = check(c.repo, job, "verify", timeout)
+    if result[0] is None:  # out of time: that says nothing about the patch, so nothing is signed
+        return job, "timed out"
+    if job.patch.verdict == "accepted":  # an audit: does the accepted merge still pass its own check?
+        passed = result[0] == 0 and (not job.task.metric or result[2] is not None)
+        verdict, payload = ("accepted", {}) if passed else reject(f"audit: the check fails:\n{tail(result[1])}", "tests")
+    else:
+        verdict, payload = _decide(c, job, result)
+    if payload.get("code") == "done":
+        return job, "done"  # another patch closed the task meanwhile: nothing to say about this one
+    scratch = []
+    try:
+        reads = reads_of(c, job, place(c.repo, job.merged, "verify", scratch))
+    finally:
+        for tmp in scratch:
+            remove_tree(tmp)
+    outcome = "pass" if verdict == "accepted" else "fail"
+    c.emit("patch.verified", task=job.task.id, patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,
+           outcome=outcome, metric=result[2], reads=reads,
+           **({"code": payload["code"], "reason": payload["reason"][:500]} if verdict == "rejected" else {}))
+    c.sync()
+    return job, outcome
+
+
+def audit_job(c: Ctx, now: float) -> Job | None:
+    """An accepted patch, still inside its challenge window, to check again: chosen at random (by this node's
+    key, so different nodes audit different ones), with the project's audit share."""
+    for p in sorted((p for p in c.st.patches.values() if c.st.challengeable(p, now) and p.author != c.me
+                     and p.merge_commit and not any(v["author"] == c.me and v["tree"] == p.tree
+                                                    for v in c.st.verifications[p.id])),
+                    key=lambda p: hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest()):
+        draw = int(hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest(), 16) / 16 ** 64
+        if draw >= c.st.policy["audit"] or not coordgit.has_commit(c.repo, p.merge_commit):
+            continue
+        head = git(c.repo, "rev-parse", p.merge_commit + "^1")
+        trees = git(c.repo, "rev-parse", head + "^{tree}", p.merge_commit + "^{tree}").split()
+        return Job(p, c.st.tasks[p.task], p.merge_commit, head, False, *trees)
+    return None
+
+
+def revert_commit(c: Ctx, p: S.Patch) -> str:
+    """main without the patch: its changes undone on top of the current main (fixed author, like every merge)."""
+    tip, parent = c.st.main_tip, git(c.repo, "rev-parse", p.merge_commit + "^1")
+    m = run(c.repo, "merge-tree", "--write-tree", f"--merge-base={p.merge_commit}", tip, parent)
+    if m.returncode:
+        raise coordgit.GitError(f"can't undo patch {p.id[:8]} on the current main")
+    tree = m.stdout.decode().split()[0]
+    return git(c.repo, "commit-tree", tree, "-p", tip, "-m",
+               f"legion: revert {c.st.tasks[p.task].key} (patch {p.id[:8]})", env=FIXED_ENV)
+
+
+def finalize(c: Ctx, log=print, keep_branches: bool = False, timeout: int = 600) -> int:
+    """The open mode, in place of an integrator: what any trusted node does with what the others verified.
+    Patches that verifications support go in, in queue order, each merged on the current main; patches that
+    fail (by git alone, or by verifications) are rejected; sketches and paths are reviewed (nothing runs);
+    accepted patches that trusted owners saw fail inside their window are reverted; parents whose subtasks are
+    done are resolved. Two nodes doing it at once is fine: the compare-and-swap on main keeps one of each."""
+    c.reload()
+    if c.st.policy["mode"] != "open" or not c.st.trusted(c.me):
+        return 0
+    mine = lambda tid: True  # noqa: E731 - no subtrees, no lease: every trusted node finalizes everything
+    follow_main(c)
+    finish_interrupted(c, log)
+    done = review_sketches(c, log, keep_branches, mine)
+    tried = set()
+    while True:
+        c.reload()
+        now, moved = time.time(), False
+        for p in queue_order(c.st):
+            if p.id in tried or p.author == c.me:
+                continue
+            tried.add(p.id)
+            try:
+                job = plan(c, p)
+            except coordgit.GitError as e:
+                log(f"git error planning {p.id[:8]}; will retry: {e}")
+                continue
+            if job is None:
+                continue
+            if isinstance(job, tuple):  # conflict, zone, empty, done...: any node sees it with git
+                verdict = job
+            elif vs := quorum(c, job, now):
+                verdict = decide(c, job, verified_result(job, vs))
+                if verdict[0] != "accepted":
+                    continue  # e.g. a competitive best moved meanwhile: it needs a fresh verification
+            elif fs := quorum(c, job, now, "fail"):
+                verdict = reject(fs[0].get("reason") or "its verifications fail", fs[0].get("code") or "tests")
+                verdict[1].update(verified_by=[v["id"] for v in fs], base_tree=job.base_tree, tree=job.tree)
+            else:
+                continue  # not verified enough yet
+            if publish_verdict(c, p, verdict, log, keep_branches):
+                done += 1
+                moved = verdict[0] == "accepted"
+                if moved:
+                    break  # main moved: work the queue out again on it
+        if not moved:
+            break
+    done += revert_challenged(c, log)
+    try:
+        done += resolve_parents(c, timeout, log, mine)
+    except coordgit.GitError as e:
+        log(f"git error checking tasks with subtasks; will retry: {e}")
+    return done
+
+
+def revert_challenged(c: Ctx, log) -> int:
+    done = 0
+    now = time.time()
+    ok = trusted_verifiers(c.st, now)
+    for p in [p for p in c.st.patches.values() if c.st.challengeable(p, now)]:
+        fails = {}
+        for v in c.st.verifications[p.id]:
+            if (v["outcome"] == "fail" and v["tree"] == p.tree and v["author"] in ok
+                    and trust.owner_of(v["name"]) != trust.owner_of(p.name)):
+                fails.setdefault(trust.owner_of(v["name"]), v)
+        if len(fails) < 2:
+            continue
+        try:
+            commit = revert_commit(c, p)
+            c.emit("patch.reverted", patch=p.id, task=p.task, base=c.st.main_tip, merge_commit=commit,
+                   verified_by=[v["id"] for v in fails.values()],
+                   reason=next(iter(fails.values())).get("reason", "audited as failing"))
+            c.sync()
+            follow_main(c)
+            log(f"REVERTED {c.st.tasks[p.task].key} by {p.name}: {len(fails)} trusted owners saw it fail")
+            done += 1
+        except (Fail, coordgit.GitError) as e:
+            log(f"couldn't revert {p.id[:8]}: {e}")
+    return done
 
 def accept_verified(c: Ctx, log, keep_branches: bool, mine) -> int:
     """First of all, the patches at the front of the queue that a quorum already verified on this very main:
@@ -706,6 +854,38 @@ def accept_verified(c: Ctx, log, keep_branches: bool, mine) -> int:
             return done
         done += 1
 
+
+
+def review_sketches(c: Ctx, log, keep_branches: bool, mine) -> int:
+    """Sketches and paths waiting for a verdict: reviewed without running anything."""
+    done = 0
+    sketches = sorted((k for k in c.st.sketches.values() if k.verdict is None and mine(k.task)),
+                      key=lambda k: (k.lamport, k.id))
+    for k in sketches:
+        c.reload()
+        k = c.st.sketches[k.id]
+        if k.verdict:
+            continue
+        try:
+            result = review_path(c, k) if k.kind == "path" else review_sketch(c, k)
+        except coordgit.GitError as e:
+            log(f"git error reviewing {k.kind} {k.id[:8]}; will retry: {e}")
+            continue
+        if result is None:
+            continue
+        verdict, payload = result
+        if not emit_verdict(c, f"{k.kind}.{verdict}", log, task=k.task, **{k.kind: k.id}, **payload):
+            continue
+        if verdict == "accepted":
+            create_children(c, c.st.sketches[k.id])
+            c.sync()
+        if not keep_branches and k.branch:
+            coordgit.drop_patch(c.repo, k.branch)
+        key = c.st.tasks[k.task].key
+        log(f"{k.kind.upper()} {verdict.upper()} {key} by {k.name}"
+            + (f": {len(k.children)} subtasks" if verdict == "accepted" else f": {payload['reason'].splitlines()[0]}"))
+        done += 1
+    return done
 
 def queue_order(st: S.State) -> list[S.Patch]:
     """The patches waiting for a verdict, in the order the queue takes them: every node works it out the same

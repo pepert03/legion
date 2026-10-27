@@ -106,7 +106,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
             checking[(ev["author"], ev.get("patch"))] = (ev.get("task"), ev["ts"])
         elif t == "patch.verified":
             checking.pop((ev["author"], ev.get("patch")), None)
-        elif t in ("patch.accepted", "patch.rejected"):
+        elif t in ("patch.accepted", "patch.rejected", "patch.reverted"):
             checking = {k: v for k, v in checking.items() if k[1] != ev.get("patch")}
     for (who, _), (tid, ts) in checking.items():
         if who in agents and now - ts < CHECKING_SECONDS:
@@ -151,7 +151,7 @@ def split_name(name: str) -> tuple[str, int | None]:
     return (person, int(num)) if sep and person and num.isdigit() else (name, None)
 
 
-TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.rejected", "sketch.proposed",
+TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.rejected", "patch.reverted", "sketch.proposed",
                   "sketch.accepted", "sketch.failed", "task.resolved", "task.created", "project.init", "agent.joined",
                   "path.proposed", "path.accepted"}
 
