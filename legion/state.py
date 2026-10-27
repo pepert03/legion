@@ -204,6 +204,28 @@ class State:
                 seen.add(c.author)
         return out
 
+    def took_part(self, tid: str, author: str, now: float) -> bool:
+        """Works on the task now, or did: claimed it, reported on it, sent or verified a patch, proposed a sketch
+        or a path. They are the ones with something to say about it."""
+        return (self.works_on(tid, author, now) or any(c.author == author for c in self.claims[tid])
+                or any(a.get("task") == tid and a["author"] == author for a in self.attempts)
+                or any(p.author == author for p in self.patches_for(tid))
+                or any(v["author"] == author for p in self.patches_for(tid) for v in self.verifications.get(p.id, ()))
+                or any(k.author == author for k in self.sketches.values() if k.task == tid))
+
+    def mentions(self, name: str) -> list[dict]:
+        """Notes that name this agent (@ana#2, or @ana for all of ana's) and that it hasn't answered since:
+        no later note of its own on that task."""
+        owner = name.rpartition("#")[0] if "#" in name else name
+        tags = {f"@{name}".lower(), f"@{owner}".lower()}
+        out = []
+        for notes in self.notes.values():
+            for i, n in enumerate(notes):
+                words = {w.rstrip(".,:;!?)").lower() for w in n["text"].split() if w.startswith("@")}
+                if n["name"] != name and words & tags and not any(m["name"] == name for m in notes[i + 1:]):
+                    out.append(n)
+        return sorted(out, key=lambda n: n["lamport"])
+
     def works_on(self, tid: str, author: str, now: float) -> bool:
         return any(c.author == author for c in self.claimants(tid, now))
 
@@ -513,10 +535,12 @@ class State:
             text = ev.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
                 return f"a note is text of at most {E.MAX_NOTES} characters"
-            if not self.works_on(task.id, ev["author"], ev["ts"]):
-                return "only someone working on the task may post notes on it"
+            if not self.took_part(task.id, ev["author"], ev["ts"]):
+                return "only someone who works on the task, or has, may post notes on it"
             if sum(n["author"] == ev["author"] for n in self.notes[task.id]) >= MAX_TASK_NOTES:
                 return f"at most {MAX_TASK_NOTES} notes per agent on a task"
+            if ev.get("reply") is not None and not any(n["id"] == ev["reply"] for n in self.notes[task.id]):
+                return "a reply answers a note on the same task"
             self.notes[task.id].append(ev)
         elif t == "patch.submitted":
             if not ev.get("commit") or not ev.get("branch"):

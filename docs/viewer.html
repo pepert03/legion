@@ -111,6 +111,13 @@
   .chat .who { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; font-size: 13.5px; }
   .chat .when { margin-left: auto; font-style: italic; color: var(--ink3); font-size: 12px; white-space: nowrap; }
   .chat .text { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .chat .text .at { font-weight: 500; color: var(--ink); }
+  .chat .quote { margin: 0 0 4px; padding-left: 7px; border-left: 2px solid var(--hair); font-size: 12.5px;
+    font-style: italic; color: var(--ink3); overflow-wrap: anywhere; }
+  .chat .tag { font-size: 11px; font-variant: small-caps; letter-spacing: .06em; padding: 0 5px; border-radius: 3px;
+    border: 1px solid var(--hair); color: var(--ink3); }
+  .chat .tag.success { color: var(--accepted); border-color: var(--accepted); }
+  .chat .tag.failure { color: var(--cancelled); border-color: var(--cancelled); }
 
   #time { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; }
   #time svg { width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
@@ -677,7 +684,9 @@ async function viewAgent(a) {
 async function viewTask(n) {
   const col = P[n.status] || P.ink, items = await history(n.id);
   const workers = data.agents.filter((a) => a.holds.includes(n.id));
-  const notes = items.filter((e) => e.type === "task.note"), others = items.filter((e) => e.type !== "task.note");
+  // The conversation: the notes agents post to each other, and their reports, which say what they tried.
+  const notes = items.filter((e) => e.type === "task.note" || e.type === "attempt.reported");
+  const others = items.filter((e) => e.type !== "task.note");
   return [
     h("div", { class: "head" },
       h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
@@ -715,9 +724,22 @@ function chatList(notes) {
     const a = data.agents.find((x) => x.id === e.agent) || { id: e.agent, name: e.name, kinds: e.kind ? [e.kind] : [] };
     return h("li", {}, discImg(a, 30),
       h("div", { class: "bubble" },
-        h("div", { class: "who" }, nameNode(a), h("span", { class: "when" }, ago(e.ts))),
-        h("div", { class: "text" }, e.note)));
+        h("div", { class: "who" }, nameNode(a),
+          e.type === "attempt.reported" ? h("span", { class: `tag ${e.outcome}` }, `report · ${e.outcome}`) : null,
+          h("span", { class: "when" }, ago(e.ts))),
+        e.reply ? replyTo(notes, e.reply) : null,
+        h("div", { class: "text" }, mentions(e.note))));
   }));
+}
+
+function replyTo(notes, id) {
+  const to = notes.find((m) => m.id === id);
+  return to ? h("div", { class: "quote" }, `↳ ${to.name}: ${to.note.length > 90 ? to.note.slice(0, 90) + "…" : to.note}`) : null;
+}
+
+// @name in a note, picked out.
+function mentions(text) {
+  return text.split(/(@[\w#.-]+)/).map((part, i) => i % 2 ? h("b", { class: "at" }, part) : part);
 }
 
 function viewGoal() {

@@ -355,7 +355,7 @@ def test_agents_on_a_task_talk_through_notes():
     log.add(ANA, "task.note", task=tid, text="")
     st = log.state()
     assert [n["text"] for n in st.notes[tid]] == ["I'm trying induction on m", "then I take the counting route"]
-    assert [why for _, why in st.ignored] == ["only someone working on the task may post notes on it",
+    assert [why for _, why in st.ignored] == ["only someone who works on the task, or has, may post notes on it",
                                               f"a note is text of at most {E.MAX_NOTES} characters"]
 
 
@@ -461,3 +461,21 @@ def test_a_subtree_lease_takes_its_tasks_from_the_project_lease():
     assert log.state().integrates(ANA.author, tid, 1001)
     log.add(ANA, "integrator.release", shard=tid)
     assert log.state().integrates(BOSS.author, tid, 1001)
+
+
+def test_who_took_part_may_talk_reply_and_mention():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="induction loses a factor n")
+    log.add(ANA, "task.released", task=tid)                      # ANA left the task, but took part in it
+    q = log.add(ANA, "task.note", task=tid, text="@bea did the counting route close it?")
+    log.add(BEA, "task.claimed", task=tid, ttl=600)
+    st = log.state()
+    assert [n["text"] for n in st.notes[tid]] == ["@bea did the counting route close it?"]
+    assert [n["id"] for n in st.mentions("bea")] == [q["id"]]     # waiting for BEA's answer
+    assert [n["id"] for n in st.mentions("bea#2")] == [q["id"]]   # @bea reaches all of bea's agents
+    log.add(BEA, "task.note", task=tid, text="Not yet: it gives m >= 17.", reply=q["id"])
+    log.add(BEA, "task.note", task=tid, text="x", reply="nope")
+    st = log.state()
+    assert st.mentions("bea") == [] and st.notes[tid][-1]["reply"] == q["id"]
+    assert st.ignored[-1][1] == "a reply answers a note on the same task"

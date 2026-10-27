@@ -216,6 +216,7 @@ def resolve_parents(c: Ctx, timeout: int, log=print, mine=lambda tid: True) -> i
 # Either way the checks run code from strangers, with no sandbox yet.
 
 FRESH = bool(os.environ.get("LEGION_FRESH_REVIEWS"))
+TIMED_OUT: dict[str, int] = {}  # patch -> checks of it that ran out of time, in this process
 MISSING_AFTER = 600  # seconds a patch's commit may take to arrive before it's rejected as missing
 REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
 
@@ -302,6 +303,8 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
     st, task = c.st, job.task
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
+    if code is None:  # ran out of time: on a busy machine that says nothing about the patch
+        return "retry", {"reason": out}
     if code != 0:
         return reject(f"the acceptance command fails:\n{tail(out)}", "tests")
     payload = {}
@@ -598,6 +601,13 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
                 break
             c.reload()
             verdict = decide(c, job, result)
+            if verdict[0] == "retry":
+                TIMED_OUT[job.patch.id] = TIMED_OUT.get(job.patch.id, 0) + 1
+                if TIMED_OUT[job.patch.id] < 2:
+                    log(f"patch {job.patch.id[:8]}'s check ran out of time ({verdict[1]['reason']}); will try again")
+                    break  # the ones after it were checked on top of it
+                verdict = reject(f"the acceptance command ran out of time twice: {verdict[1]['reason']}", "timeout")
+                verdict[1].update(base_tree=job.base_tree, tree=job.tree)
             if not publish_verdict(c, job.patch, verdict, log, keep_branches):
                 break
             done += 1
@@ -664,6 +674,8 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
             continue
         announce_checks(c, [job])
         code, out, value = check(c.repo, job, "verify", timeout)[:3]
+        if code is None:  # out of time: that says nothing about the patch, so nothing is signed
+            return job, "timed out"
         outcome = "pass" if code == 0 and (not job.task.metric or value is not None) else "fail"
         c.emit("patch.verified", task=job.task.id, patch=job.patch.id, base_tree=job.base_tree, tree=job.tree,
                outcome=outcome, metric=value)

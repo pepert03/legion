@@ -16,7 +16,11 @@ build = here / "build"  # git-ignored: what a check leaves for the next one
 build.mkdir(exist_ok=True)
 runs = build / "runs"
 runs.write_text(str(int(runs.read_text()) + 1) if runs.exists() else "1")
-sys.exit(0 if (here / (sys.argv[1] + ".txt")).read_text().strip() == "ok" else 1)
+text = (here / (sys.argv[1] + ".txt")).read_text().strip()
+if text == "slow":
+    import time
+    time.sleep(30)
+sys.exit(0 if text in ("ok", "slow") else 1)
 '''
 
 
@@ -219,3 +223,15 @@ def test_keeping_the_lease_renews_early_retakes_a_lapsed_one_and_syncs_only_then
     monkeypatch.setattr(integrator.time, "time", lambda: real() + 1000)  # it lapsed during a long check
     integrator.keep_leases(c, 300)
     assert [e["type"] for e in c.st.events][-1] == "integrator.lease"
+
+
+def test_a_check_out_of_time_is_retried_then_rejected_as_a_timeout_not_failing_tests(project):
+    repo, tids, patch = project
+    patch("a", "slow\n")
+    integrator.TIMED_OUT.clear()
+    log = []
+    integrator.integrate_once(as_(repo, "boss"), 2, log=log.append)
+    assert verdicts(tids)["a"] == [None] and any("will try again" in m for m in log)
+    integrator.integrate_once(as_(repo, "boss"), 2, log=log.append)
+    p = Ctx(sync=False).st.patches_for(tids["a"])[0]
+    assert (p.verdict, p.code) == ("rejected", "timeout")

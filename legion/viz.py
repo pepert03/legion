@@ -171,7 +171,8 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
     return {"id": ev["id"], "lamport": ev["lamport"], "ts": ev["ts"], "type": ev["type"], "name": ev["name"],
             "agent": agent_id(ev["author"]), "kind": ev.get("agent"), "task": ev.get("task"),
             "text": event_text(ev, st, full),
-            **({"note": ev.get("text", "")} if ev["type"] == "task.note" else {})}
+            **({"note": ev.get("text", ""), "reply": ev.get("reply")} if ev["type"] == "task.note" else {}),
+            **({"note": ev.get("notes", ""), "outcome": ev.get("outcome")} if ev["type"] == "attempt.reported" else {})}
 
 
 def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
@@ -184,7 +185,7 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
         mine = [e for e in evs if e.get("task") == node or e.get("patch") in patches]
     # The latest 80 events (short versions: a test's whole output doesn't fit in a timeline), and every note: a
     # task's conversation is read whole, so it doesn't share that budget.
-    keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine if e["type"] == "task.note"}
+    keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine if e["type"] in ("task.note", "attempt.reported")}
     return [item(e, st) for e in mine if e["id"] in keep]
 
 
