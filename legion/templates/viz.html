@@ -199,6 +199,17 @@ function nameNode(a) {
   return h("span", {}, owner, n ? h("sub", { style: "font-size:.68em" }, n) : null);
 }
 const isIntegrator = (a) => a.role === "integrator";
+// What it's doing on the task it holds. Silent: a claim but nothing published for a while, so perhaps stopped;
+// the claim keeps the task until it expires, and that's what it says.
+function doing(a, capital) {
+  if (!a.holds.length) return null;
+  const verb = (a.checking || []).includes(a.holds[0]) ? "checking" : "working on";
+  if (a.silent) {
+    const until = a.claim_ends ? `; its claim ends at ${new Date(a.claim_ends * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+    return `${capital ? "Silent" : "silent"} for ${Math.round(a.silent / 60)} min on ${taskKey(a.holds[0])}${until}`;
+  }
+  return `${capital ? verb[0].toUpperCase() + verb.slice(1) : verb} ${taskKey(a.holds[0])}`;
+}
 // Logos from Lobe Icons (lobehub/lobe-icons). A local file in .legion/logos/<kind>.svg wins, and
 // legion ships Muse and Instinct, which that collection lacks.
 const LOBE = "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.95.1/icons/";
@@ -541,12 +552,12 @@ function drawAgents(ctx, scale) {
     if (tg.hidden) { ag.x = tg.x; ag.y = tg.y; ag.placed = true; ag.r = 0; continue; }  // behind the ellipsis
     if (!ag.placed) { ag.x = tg.x; ag.y = tg.y; ag.placed = true; }
     ag.x += (tg.x - ag.x) * 0.05; ag.y += (tg.y - ag.y) * 0.05;
-    ag.alpha += ((ag.a.active ? 1 : 0.4) - ag.alpha) * 0.08;
+    ag.alpha += ((ag.a.active && !ag.a.silent ? 1 : 0.4) - ag.alpha) * 0.08;  // silent: faded, as if inactive
     ag.r = R;
     const focus = id === selected || id === hoverAgent;
     ctx.save();
     ctx.globalAlpha = ag.alpha * (hover && !focus ? 0.45 : 1);
-    if (tg.working && !tg.grouped) {  // a slowly turning arc: it's working (a group has one for all)
+    if (tg.working && !tg.grouped && !ag.a.silent) {  // a slowly turning arc: it's working (a group has one for all)
       const a0 = (t / 900) % (Math.PI * 2);
       ctx.beginPath(); ctx.arc(ag.x, ag.y, R + 1.8, a0, a0 + Math.PI * 1.2);
       ctx.strokeStyle = P.claimed; ctx.lineWidth = Math.max(0.6, 1.3 / scale); ctx.lineCap = "round"; ctx.stroke();
@@ -625,11 +636,11 @@ function viewLog() {
   return [
     h("h2", { class: "caps" }, "Agents"),
     ...list.map((a) => {
-      const doing = a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "checking" : "working on"} ${taskKey(a.holds[0])}`
-        : isIntegrator(a) ? (a.leader ? "integrating: holds the lease" : "standing by to take over") : a.last || "no activity";
-      return h("div", { class: "row", onclick: () => openPop("item", a.id) }, discImg(a),
+      const what = doing(a, false)
+        || (isIntegrator(a) ? (a.leader ? "integrating: holds the lease" : "standing by to take over") : a.last || "no activity");
+      return h("div", { class: "row", onclick: () => openPop("item", a.id), style: a.silent ? "opacity:.55" : null }, discImg(a),
         h("div", { class: "who" }, nameNode(a), a.trusted ? h("span", { class: "trusted" }, "trusted") : null,
-          h("div", {}, doing)), scoreNode(a.trust));
+          h("div", {}, what)), scoreNode(a.trust));
     }),
     offline ? h("p", { class: "empty" }, `and ${offline} offline (nothing published for more than 2 hours)`) : null,
     h("h2", { class: "caps" }, "Activity"),
@@ -673,8 +684,7 @@ async function viewAgent(a) {
         h("div", { class: "sub" }, [KIND_LABEL[kind], ...a.models].filter(Boolean).join(", "),
           a.number ? ` · subagent ${a.number} of ${a.owner}` : ""))),
     h("div", { style: "font-style:italic;color:var(--ink2);margin-bottom:12px" },
-      a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "Checking" : "Working on"} ${taskKey(a.holds[0])}.`
-        : a.active ? "Waiting for a task." : "Inactive."),
+      a.holds.length ? `${doing(a, true)}.` : a.active ? "Waiting for a task." : "Inactive."),
     h("div", { class: "nums" },
       h("div", {}, h("b", {}, s.accepted), h("span", { class: "caps" }, "accepted")),
       h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
@@ -795,7 +805,7 @@ function closePop() { popMode = null; selected = null; $("pop").classList.remove
 // ---------------------------------------------------------------------------------------------
 function renderTitle(d) {
   $("project").textContent = d.project || "Legion";
-  const g = nodes.get(GOAL), working = d.agents.filter((a) => a.holds.length).length;
+  const g = nodes.get(GOAL), working = d.agents.filter((a) => a.holds.length && !a.silent).length;
   $("meta").replaceChildren(...[h("b", {}, g ? g.done : 0), ` of ${g ? g.total : 0} tasks done`,
     working ? [", ", h("b", {}, working), working === 1 ? " agent working" : " agents working"] : "",
     d.live ? h("span", { class: "live-dot", title: "live" }) : h("span", { class: "replay-tag caps" }, `· ${clock(d.ts)}`)].flat());
@@ -972,7 +982,7 @@ async function init() {
       const a = agents.get(hoverAgent).a;
       content = [nameNode(a), h("i", {}, ` · ${KIND_LABEL[kindOf(a)]}`),
                  a.trust && a.trust.level !== "new" ? h("i", {}, ` · trust ${a.trust.score}`) : null, h("br"),
-                 h("i", {}, a.holds.length ? `${(a.checking || []).includes(a.holds[0]) ? "checking" : "working on"} ${taskKey(a.holds[0])}` : a.last || "")];
+                 h("i", {}, doing(a, false) || a.last || "")];
     } else if (hover) {
       const n = nodes.get(hover);
       content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`)]

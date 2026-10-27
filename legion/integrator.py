@@ -696,11 +696,16 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
             skip("not ready here yet (its commit or main hasn't reached this clone)" if planned is None
                  else "the integrator will reject it anyway")
     ok, need = trusted_verifiers(c.st, now), c.st.policy["quorum"]
+    me = trust.owner_of(c.ident.name)
+    checking = checks_under_way(c.st, now, c.me)
     order = [j for i in range(depth) for s in stacks.values() if i < len(s["jobs"]) for j in [s["jobs"][i]]]
     for job in order:
         vs = c.st.verifications.get(job.patch.id, [])
         if job.patch.author == c.me:
             skip("yours")
+            continue
+        if trust.owner_of(job.patch.name) == me:  # a check by the author's own owner doesn't count for anything
+            skip("by another agent of your owner: your verification wouldn't count")
             continue
         if job.baseline:
             skip("a competitive task's first result: the integrator measures it itself")
@@ -710,8 +715,15 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
             continue
         have = {trust.owner_of(v["name"]) for v in vs if v["outcome"] == "pass" and v["author"] in ok
                 and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)}
-        if len(have) >= max(1, need):
-            skip("verified enough already")
+        if me in have or len(have) >= max(1, need):  # each owner counts once: a second check of yours adds nothing
+            skip("verified enough already" if me not in have else "already verified by another agent of your owner")
+            continue
+        under_way = checking.get(job.patch.id, set()) - have
+        if me in under_way:
+            skip("another agent of your owner is checking it right now")
+            continue
+        if len(have | under_way) >= max(1, need):  # those checks will be enough: don't build it once more
+            skip("being checked by enough agents right now")
             continue
         return sign(c, job, timeout)
     if c.st.policy["mode"] == "open":
@@ -720,6 +732,26 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
             why["audit"] = 1
             return sign(c, job, timeout)
     return None
+
+
+CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
+
+
+def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
+    """Patch -> the owners checking it right now: announced (patch.checking) recently, with no result yet. Not
+    this agent's own checks: one it left unfinished (a crash) mustn't keep it from checking again."""
+    started = {}
+    for ev in st.events:
+        if ev["type"] == "patch.checking" and ev["author"] != me and now - ev["ts"] < CHECKING_SECONDS:
+            started[(ev.get("patch"), ev["author"])] = trust.owner_of(ev["name"])
+    for pid, vs in st.verifications.items():
+        for v in vs:
+            started.pop((pid, v["author"]), None)
+    out: dict[str, set[str]] = {}
+    for (pid, _), who in started.items():
+        if st.patches.get(pid) and st.patches[pid].verdict is None:
+            out.setdefault(pid, set()).add(who)
+    return out
 
 
 def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
@@ -756,7 +788,8 @@ def audit_job(c: Ctx, now: float) -> Job | None:
         return any(v["author"] == c.me and (v["tree"] == p.tree or p.tree is None and v["ts"] >= (p.accepted_ts or 0))
                    for v in c.st.verifications[p.id])
 
-    for p in sorted((p for p in c.st.patches.values() if c.st.challengeable(p, now) and p.author != c.me
+    me = trust.owner_of(c.ident.name)  # an audit by the author's own owner can't revert anything
+    for p in sorted((p for p in c.st.patches.values() if c.st.challengeable(p, now) and trust.owner_of(p.name) != me
                      and p.merge_commit and not audited(p)),
                     key=lambda p: hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest()):
         draw = int(hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest(), 16) / 16 ** 64

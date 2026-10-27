@@ -22,6 +22,9 @@ PAGE = Path(__file__).parent / "templates" / "viz.html"
 CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
 ACTIVE_SECONDS = 600  # an agent counts as active if it published something in the last 10 minutes
 GONE_SECONDS = 7200   # and it leaves the graph after 2 hours without publishing, holding nothing
+# Holding a claim but publishing nothing for this long: perhaps still working, perhaps stopped. The claim keeps the
+# task until it expires; the viewer says so instead of showing it at work.
+SILENT_SECONDS = 1800
 
 
 class Source:
@@ -131,6 +134,10 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         # Offline: no claim, no lease, and silent for a while. A working agent holds a claim, so it stays.
         holds_lease = any(l.author == a["author"] and l.active(now) for l in st.leases)
         a["gone"] = not a["holds"] and not holds_lease and now - a["last_ts"] > GONE_SECONDS
+        ends = [c.last_beat + c.ttl for tid in a["holds"] for c in st.claims.get(tid, ())
+                if c.author == a["author"] and c.active(now)]
+        a["silent"] = int(now - a["last_ts"]) if a["holds"] and now - a["last_ts"] > SILENT_SECONDS else None
+        a["claim_ends"] = max(ends) if ends else None
         a["trust"] = None if a["role"] == "integrator" else (by_agent.get(a["author"]) or trust.Trust()).as_dict()
     people = {}  # names are agents on computers now, not people: no per-person scores
 

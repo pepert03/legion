@@ -671,6 +671,18 @@ def cmd_claim(args):
     return 3
 
 
+# A claim lasts this long without a sign of life: an agent that stops (a session ends, a machine sleeps) frees its
+# task within the hour instead of holding it for two. Working on the task renews it (keep_claim).
+CLAIM_TTL = 2700
+
+
+def keep_claim(c: Ctx, t: S.Task) -> None:
+    """Renew this agent's claim on the task, if it holds one: whatever it does there is a sign of life."""
+    now = time.time()
+    if any(cl.author == c.me and cl.active(now) for cl in c.st.claims.get(t.id, ())):
+        c.emit("task.heartbeat", task=t.id)
+
+
 def cmd_heartbeat(args):
     c = Ctx()
     t = c.task(args.task)
@@ -711,6 +723,8 @@ def cmd_start(args):
     built = f", on top of the patches in review of {', '.join(on)}" if on else ""
     if args.from_:  # someone's unfinished work: carry on from it
         built += carry_on(c, t, args.from_)
+    keep_claim(c, t)
+    c.sync()
     print(f"You are on {branch}, created from {main}{built}. Work inside the zone: {', '.join(t.zone)}")
     if on:
         print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
@@ -908,6 +922,7 @@ def cmd_release(args):
 def cmd_report(args):
     c = Ctx()
     t = c.task(args.task)
+    keep_claim(c, t)
     c.emit("attempt.reported", task=t.id, outcome=args.outcome, notes=args.notes)
     c.sync()
     print(f"Report published on {t.key}.")
@@ -1129,6 +1144,7 @@ def cmd_note(args):
             if len(found) != 1:
                 raise Fail(f"no single note on {t.key} matches {args.reply}: see them with `note {t.id}`")
             reply = found[0]["id"]
+        keep_claim(c, t)
         c.emit("task.note", task=t.id, text=args.text, **({"reply": reply} if reply else {}))
         c.sync()
         print(f"Note posted on {t.key}; the agents who took part see it in `context` and `note {t.id}`, and anyone "
@@ -1185,6 +1201,7 @@ def cmd_save(args):
     if mine and mine[-1]["commit"] == head:
         print(f"Already saved: {mine[-1]['id'][:8]} is this commit.")
         return
+    keep_claim(c, t)
     branch = coordgit.patch_branch(repo, t.id, f"wip-{c.ident.short}", len(mine) + 1)
     coordgit.publish_patch(repo, branch)
     ev = c.emit("work.saved", task=t.id, commit=head, branch=branch, notes=args.notes or "")
@@ -1231,6 +1248,8 @@ def cmd_submit(args):
         outside = [f for f in files if not S.in_zone(f, t.zone)]
         if outside:
             raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}", 5)
+        keep_claim(c, t)  # the check can take minutes: start it with a fresh claim
+        c.sync()
         put_contract(repo, t)  # the contract as the task states it, whatever this clone has
         code, output = integrator.run_cmd(t.accept, repo, args.timeout)
         if code != 0:
@@ -1637,8 +1656,8 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")
-    s.add_argument("--ttl", type=int, default=int(os.environ.get("LEGION_TTL", "7200")),
-                   help="seconds until it expires (default 2 h, or LEGION_TTL)")
+    s.add_argument("--ttl", type=int, default=int(os.environ.get("LEGION_TTL", str(CLAIM_TTL))),
+                   help="seconds until it expires without a heartbeat (default 45 min, or LEGION_TTL)")
     s.add_argument("--wait", type=float, nargs="?", const=8, default=0, metavar="MINUTES",
                    help="if nothing is open, wait for a task to free up (default 8 min) before exiting with 5")
     s.add_argument("--json", action="store_true")

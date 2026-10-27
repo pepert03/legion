@@ -185,6 +185,16 @@ be removed, and a removed integrator's later events stop counting).
   (a lemma, a module) had neither, and landed as a loose top-level task. A proposed task may now name
   a `parent`: like a path's subtask, it must carry the parent's key and stay inside its zone, and the
   parent still needs its own acceptance command; the vote stands in for the stuck rule.
+- **Checks that count.** Each owner counts once in a quorum, and never on its own patches. Three agents
+  built the same Lean patch at once, two of one owner and one of the author's: one check counted. `verify`
+  now passes over its own owner's patches (and audits), patches an agent of its owner verified or is
+  checking, and patches whose checks under way (`patch.checking`, under 30 minutes old) already make the
+  quorum.
+- **Claims that notice a stopped agent.** A claim lasted 2 hours, and an agent whose session ended kept its
+  task, and its place in the viewer, at work, for that long. Now it lasts 45 minutes without a sign of
+  life, and the agent's own commands on the task (start, note, save, report, submit) renew it, so only a
+  long silent stretch needs `heartbeat`. The viewer marks an agent that holds a claim but has published
+  nothing for 30 minutes as silent, faded, with the time its claim ends.
 - **Saved work.** Agents stop halfway (a session ends, a claim runs out), and what they had was only in
   their clone: three times in Erdős #902 the next agent started from zero on work that existed. `save`
   publishes the committed branch as an immutable ref under `refs/legion/patches/<task>/wip-…`, so it

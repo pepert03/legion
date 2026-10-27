@@ -377,6 +377,25 @@ def test_open_mode_audits_catch_a_false_pass_and_revert_it(project):
         or make_project.people["luis"].author in st.integrators  # a founder stays trusted, but is marked
 
 
+def test_verify_skips_checks_that_wouldnt_count(project):
+    """Three agents built the same Lean patch at once, one of them by the author's own owner: only one of those
+    checks could count. verify leaves alone what's already being checked enough, and its own owner's patches."""
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    patch("b", "ok\n")
+    luis = as_(repo, "luis")
+    pa = luis.st.patches_for(tids["a"])[0]
+    luis.emit("patch.checking", task=tids["a"], patch=pa.id)  # luis is building a's patch right now
+    luis.sync()
+    job, outcome = integrator.verify_one(as_(repo, "marta"), 60)
+    assert (job.task.key, outcome) == ("b", "pass")  # a is in hands enough: marta takes b
+    identity.bind(repo, Identity.generate("ana#2"))  # the patches' author (ana#1) has another agent here
+    why = {}
+    assert integrator.verify_one(Ctx(), 60, why=why) is None
+    assert why["by another agent of your owner: your verification wouldn't count"] >= 1
+
+
 def test_an_old_patch_is_audited_once_by_each_node(project):
     """Patches accepted before verdicts recorded their tree: `verify` audited the same one again and again,
     minutes of checking each time, for an event the state then refused."""
@@ -392,6 +411,20 @@ def test_an_old_patch_is_audited_once_by_each_node(project):
     assert (job.task.key, outcome) == ("a", "pass")
     marta = as_(repo, "marta")
     assert integrator.audit_job(marta, time.time()) is None
+
+
+def test_a_claim_is_short_and_working_on_the_task_renews_it(project):
+    """An agent that stops frees its task within the hour; one that keeps working never has to think of it."""
+    from legion.cli import CLAIM_TTL, main
+    repo, tids, patch = project
+    tid = tids["a"]
+    as_(repo, "luis")
+    main(["claim", tid])
+    claim = lambda: next(c for c in Ctx(sync=False).st.claims[tid] if c.name == "luis#1")  # noqa: E731
+    first = claim()
+    assert first.ttl == CLAIM_TTL == 45 * 60
+    main(["note", tid, "trying the obvious route first"])
+    assert claim().last_beat > first.last_beat
 
 
 def test_saved_work_lets_the_next_agent_carry_on(project, capsys):

@@ -132,6 +132,19 @@ def test_an_agent_silent_for_hours_with_nothing_held_leaves_the_graph(monkeypatc
     assert not {a["name"]: a for a in viz.snapshot(evs, None)["agents"]}["luis"]["gone"]
 
 
+def test_an_agent_with_a_claim_and_nothing_since_is_silent(monkeypatch):
+    """A claim keeps the task until it expires, but an agent that stopped mustn't look at work meanwhile."""
+    evs, tid = project_events()  # ana claims for an hour
+    claimed = evs[-1]["ts"]
+    monkeypatch.setattr(viz.time, "time", lambda: claimed + 600)
+    ana = next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "ana")
+    assert ana["holds"] == [tid] and ana["silent"] is None
+    monkeypatch.setattr(viz.time, "time", lambda: claimed + viz.SILENT_SECONDS + 60)
+    ana = next(a for a in viz.snapshot(evs, None)["agents"] if a["name"] == "ana")
+    assert ana["holds"] == [tid] and ana["silent"] == viz.SILENT_SECONDS + 60
+    assert ana["claim_ends"] == claimed + 3600
+
+
 def test_a_checker_sits_on_the_task_until_its_result(monkeypatch):
     evs, tid = project_events()
     p = E.create(ANA, "patch.submitted", 4, task=tid, commit="c" * 40, branch="legion/t/a-1")

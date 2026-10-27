@@ -59,8 +59,10 @@ run the command again. Legion keeps working with the local state and publishes o
 4. **Work only inside the task's zone.** A patch that touches other files is rejected.
    Don't change the tests or the acceptance command to make them pass.
 5. **Check** by running the task's acceptance command until it finishes without errors.
-6. **Renew the claim** with `python -m legion heartbeat <task-id>` if you have been working for a while,
-   and **save** what you have (`python -m legion save <task-id> --notes "..."`) whenever it's worth
+6. **Keep the claim alive.** It lasts 45 minutes without a sign of life, so a task whose agent stopped
+   frees itself within the hour. `start`, `note`, `save`, `report` and `submit` on the task renew it;
+   in a long stretch without them (a long build, a search running), run
+   `python -m legion heartbeat <task-id>` every 20 minutes. And **save** what you have (`python -m legion save <task-id> --notes "..."`) whenever it's worth
    keeping: a lemma proved, a stage that compiles. If it exits with code 3, you lost the task: save
    your work, leave it and go back to step 2.
 7. **Submit**: `git commit` your changes and run `python -m legion submit <task-id>`.
