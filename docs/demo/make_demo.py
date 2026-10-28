@@ -250,7 +250,8 @@ def main():
         f = ROOT / "legion" / "static" / "logos" / f"{kind}.png"
         logos[kind] = "data:image/png;base64," + base64.b64encode(f.read_bytes()).decode()
     OUT.write_text(json.dumps({"total": len(events), "timeline": timeline, "snapshots": snapshots,
-                               "history": history, "logos": logos}, separators=(",", ":")), encoding="utf-8")
+                               "history": history, "hub": viz.hub(events, None), "logos": logos},
+                              separators=(",", ":")), encoding="utf-8")
     shutil.copyfile(ROOT / "legion" / "templates" / "viz.html", OUT.parent.parent / "viewer.html")
     print(f"{len(events)} events, {len(timeline)} marks, {len(snapshots)} snapshots -> {OUT} "
           f"({OUT.stat().st_size // 1024} KB)")

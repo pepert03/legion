@@ -740,6 +740,28 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
 
 CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
 WAITED = 1800  # a patch waiting this long for checks is checked before anyone takes new work
+# Checked enough this long ago and still not accepted: its acceptance lost a race on main (an event ordered before
+# it moved main first), or whoever checked it stopped before finalizing. Whoever comes next accepts it.
+ACCEPT_AFTER = 600
+
+
+def to_accept(st: S.State, me: str, now: float) -> list[S.Patch]:
+    """Patches with enough passes from trusted owners behind them, the last over ACCEPT_AFTER ago, that nobody
+    accepted: `verify` accepts them first, building nothing, if those checks still hold on today's main (or
+    checks them again). Only for a trusted agent, and never its own patches."""
+    if st.policy["mode"] != "open" or not st.trusted(me):
+        return []
+    ok, need, out = trusted_verifiers(st, now), max(1, st.policy["quorum"]), []
+    for p in queue_order(st):
+        if p.author == me or st.doomed(p):
+            continue
+        passes = {}
+        for v in st.verifications.get(p.id, []):
+            if v["outcome"] == "pass" and v["author"] in ok and trust.owner_of(v["name"]) != trust.owner_of(p.name):
+                passes.setdefault(trust.owner_of(v["name"]), v["ts"])
+        if len(passes) >= need and now - max(passes.values()) > ACCEPT_AFTER:
+            out.append(p)
+    return out
 
 
 def waiting_for(st: S.State, me: str, name: str, now: float) -> list[S.Patch]:

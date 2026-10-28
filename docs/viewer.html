@@ -116,8 +116,15 @@
   .chat .text .at { font-weight: 500; color: var(--ink); }
   .chat .quote { margin: 0 0 4px; padding-left: 7px; border-left: 2px solid var(--hair); font-size: 12.5px;
     font-style: italic; color: var(--ink3); overflow-wrap: anywhere; }
-  .chat .tag { font-size: 11px; font-variant: small-caps; letter-spacing: .06em; padding: 0 5px; border-radius: 3px;
-    border: 1px solid var(--hair); color: var(--ink3); }
+  .chat .tag, .lit .tag { font-size: 11px; font-variant: small-caps; letter-spacing: .06em; padding: 0 5px; border-radius: 3px;
+    border: 1px solid var(--hair); color: var(--ink3); margin-left: 6px; }
+  .chat .who .tag { margin-left: 0; }
+  .chat .text a, .lit .ref a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--hair); }
+  .lit { list-style: none; margin: 0; padding: 0; }
+  .lit li { margin: 0 0 13px; padding-bottom: 11px; border-bottom: 1px solid var(--hair); }
+  .lit .ref { font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+  .lit .host { font-size: 12px; font-style: italic; color: var(--ink3); margin: 2px 0 4px; }
+  .lit .why { font-size: 13.5px; line-height: 1.45; color: var(--ink2); overflow-wrap: anywhere; margin-top: 3px; }
   .chat .tag.success { color: var(--accepted); border-color: var(--accepted); }
   .chat .tag.failure { color: var(--cancelled); border-color: var(--cancelled); }
 
@@ -202,6 +209,7 @@ const isIntegrator = (a) => a.role === "integrator";
 // What it's doing on the task it holds. Silent: a claim but nothing published for a while, so perhaps stopped;
 // the claim keeps the task until it expires, and that's what it says.
 function doing(a, capital) {
+  if (a.at_hub) return `${capital ? "In" : "in"} the hub${a.holds.length ? `, from ${taskKey(a.holds[0])}` : ""}`;
   if (!a.holds.length) return null;
   const verb = (a.checking || []).includes(a.holds[0]) ? "checking" : "working on";
   if (a.silent) {
@@ -235,6 +243,7 @@ async function api(path, params = {}) {
   if (path === "timeline.json") return demoRun.timeline;
   if (path === "logos.json") return Object.keys(demoRun.logos || {});
   if (path === "history.json") return demoRun.history[params.node] || [];
+  if (path === "hub.json") return demoRun.hub || { chat: [], literature: [] };
   return [];
 }
 const logoUrl = (kind) => (DEMO ? (demoRun && demoRun.logos || {})[kind] : `/logo/${kind}`);
@@ -407,7 +416,8 @@ function agentTargets(t, R) {
   const out = new Map(), byTask = new Map(), idle = [];
   groups = [];
   for (const [id, ag] of agents) {
-    const tid = ag.a.holds.find((x) => nodes.has(x));  // an integrator holds a task only while checking it
+    // An integrator holds a task only while checking it; an agent in the hub sits at the centre, whatever it holds.
+    const tid = ag.a.at_hub ? null : ag.a.holds.find((x) => nodes.has(x));
     if (tid) { if (!byTask.has(tid)) byTask.set(tid, []); byTask.get(tid).push(id); } else idle.push(id);
   }
   // The agents on one task sit together, slightly overlapping in a row that leaves the task diagonally, so a
@@ -462,6 +472,13 @@ function drawNode(n, ctx, scale) {
     if (frac) {
       ctx.beginPath(); ctx.arc(n.x, n.y, r + 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
       ctx.strokeStyle = P.accepted; ctx.lineWidth = 1.6; ctx.lineCap = "round"; ctx.stroke();
+    }
+    // The hub's literature, as beads around it: one per reference the agents brought.
+    const refs = Math.min((data && data.hub && data.hub.literature) || 0, 72);
+    for (let i = 0; i < refs; i++) {
+      const ang = -Math.PI / 2 + (i / 72) * Math.PI * 2;
+      ctx.beginPath(); ctx.arc(n.x + Math.cos(ang) * (r + 7), n.y + Math.sin(ang) * (r + 7), 0.9, 0, Math.PI * 2);
+      ctx.fillStyle = P.ink3; ctx.fill();
     }
     ctx.fillStyle = P.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.font = `400 9px ${SERIF}`;
@@ -557,6 +574,11 @@ function drawAgents(ctx, scale) {
     const focus = id === selected || id === hoverAgent;
     ctx.save();
     ctx.globalAlpha = ag.alpha * (hover && !focus ? 0.45 : 1);
+    const from = ag.a.at_hub && nodes.get(ag.a.holds.find((x) => nodes.has(x)));
+    if (from) {  // it came to the hub from its task (stuck, to ask): a thread back to it
+      ctx.beginPath(); ctx.setLineDash([2 / scale, 3 / scale]); ctx.moveTo(ag.x, ag.y); ctx.lineTo(from.x, from.y);
+      ctx.strokeStyle = rgba(P.ink3, 0.55); ctx.lineWidth = 0.7 / scale; ctx.stroke(); ctx.setLineDash([]);
+    }
     if (tg.working && !tg.grouped && !ag.a.silent) {  // a slowly turning arc: it's working (a group has one for all)
       const a0 = (t / 900) % (Math.PI * 2);
       ctx.beginPath(); ctx.arc(ag.x, ag.y, R + 1.8, a0, a0 + Math.PI * 1.2);
@@ -684,7 +706,7 @@ async function viewAgent(a) {
         h("div", { class: "sub" }, [KIND_LABEL[kind], ...a.models].filter(Boolean).join(", "),
           a.number ? ` · subagent ${a.number} of ${a.owner}` : ""))),
     h("div", { style: "font-style:italic;color:var(--ink2);margin-bottom:12px" },
-      a.holds.length ? `${doing(a, true)}.` : a.active ? "Waiting for a task." : "Inactive."),
+      doing(a, true) ? `${doing(a, true)}.` : a.active ? "Waiting for a task." : "Inactive."),
     h("div", { class: "nums" },
       h("div", {}, h("b", {}, s.accepted), h("span", { class: "caps" }, "accepted")),
       h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
@@ -700,8 +722,10 @@ async function viewTask(n) {
   const col = P[n.status] || P.ink, items = await history(n.id);
   const workers = data.agents.filter((a) => a.holds.includes(n.id));
   // The conversation: the notes agents post to each other, and their reports, which say what they tried.
-  const notes = items.filter((e) => e.type === "task.note" || e.type === "attempt.reported" || e.type === "work.saved");
-  const others = items.filter((e) => e.type !== "task.note");
+  // What was said about it in the hub, and the references brought for it, belong to its conversation too.
+  const TALK = new Set(["task.note", "attempt.reported", "work.saved", "hub.message", "lit.added"]);
+  const notes = items.filter((e) => TALK.has(e.type));
+  const others = items.filter((e) => !["task.note", "hub.message", "lit.added"].includes(e.type));
   return [
     h("div", { class: "head" },
       h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
@@ -733,8 +757,9 @@ function tabs(id, fallback, panes) {
   ];
 }
 
-// What the agents on a task tell each other (legion note), as messages: in order, the latest at the bottom.
-function chatList(notes) {
+// What the agents on a task tell each other (legion note), as messages: in order, the latest at the bottom. In the
+// hub's own window (hubView), messages say which task they're about; in a task's, that they were said in the hub.
+function chatList(notes, hubView = false) {
   return h("ul", { class: "chat" }, ...notes.map((e) => {
     const a = data.agents.find((x) => x.id === e.agent) || { id: e.agent, name: e.name, kinds: e.kind ? [e.kind] : [] };
     return h("li", {}, discImg(a, 30),
@@ -742,10 +767,32 @@ function chatList(notes) {
         h("div", { class: "who" }, nameNode(a),
           e.type === "attempt.reported" ? h("span", { class: `tag ${e.outcome}` }, `report · ${e.outcome}`) : null,
           e.type === "work.saved" ? h("span", { class: "tag" }, "saved work") : null,
+          e.type === "lit.added" ? h("span", { class: "tag" }, "reference") : null,
+          e.type === "proposal.made" ? h("span", { class: "tag" }, "proposal") : null,
+          e.type === "hub.message" && e.task && hubView ? h("span", { class: "tag" }, `on ${taskKey(e.task)}`) : null,
+          e.type === "hub.message" && !hubView ? h("span", { class: "tag" }, "in the hub") : null,
           h("span", { class: "when" }, ago(e.ts))),
         e.reply ? replyTo(notes, e.reply) : null,
-        h("div", { class: "text" }, mentions(e.note))));
+        e.type === "lit.added" ? h("div", { class: "text" }, link(e.url, e.title || e.url), "\n", e.note)
+          : h("div", { class: "text" }, e.note == null ? e.text : mentions(e.note))));
   }));
+}
+
+// A link from an event: only to a web page, opened apart.
+function link(url, text) {
+  return /^https?:\/\//i.test(url || "") ? h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, text) : text;
+}
+function host(url) {
+  try { return new URL(url).host.replace(/^www\./, ""); } catch (e) { return url; }
+}
+
+// The literature the agents brought to the hub: the references most of them vouch for first.
+function litList(refs) {
+  return h("ul", { class: "lit" }, ...refs.map((r) => h("li", {},
+    h("div", { class: "ref" }, link(r.url, r.title)),
+    h("div", { class: "host" }, host(r.url), r.by.length > 1 ? ` · ${r.by.length} agents vouch for it` : ""),
+    ...r.by.slice(0, 4).map((b) => h("div", { class: "why" }, h("i", {}, b.name), `: ${b.why}`,
+      b.task ? h("span", { class: "tag" }, taskKey(b.task)) : null)))));
 }
 
 function replyTo(notes, id) {
@@ -758,11 +805,26 @@ function mentions(text) {
   return text.split(/(@[\w#.-]+)/).map((part, i) => i % 2 ? h("b", { class: "at" }, part) : part);
 }
 
-function viewGoal() {
-  const g = nodes.get(GOAL);
+// The centre of the project is its hub: where agents start (a literature review of the problem), where they come
+// back when stuck, and where they talk about the whole of it.
+async function viewGoal() {
+  const g = nodes.get(GOAL), hub = await api("hub.json", { upto: data.live ? null : data.index });
+  const chat = hub.chat || [], lit = hub.literature || [];
   return [
     h("div", { class: "head" }, h("div", { class: "orb", style: "border:1px solid var(--ink)" }),
-      h("div", {}, h("div", { class: "name" }, data.project || "Project"), h("div", { class: "sub" }, "the main goal"))),
+      h("div", {}, h("div", { class: "name" }, data.project || "Project"),
+        h("div", { class: "sub" }, "the main goal, and the hub: every agent starts here, and comes back when stuck"))),
+    tabs(GOAL, chat.length ? "chat" : lit.length ? "literature" : "about", [
+      ["chat", "Chat", chat.length, () => chat.length ? chatList(chat, true)
+        : h("p", { class: "empty" }, "No messages yet: agents talk here with legion chat.")],
+      ["literature", "Literature", lit.length, () => lit.length ? litList(lit)
+        : h("p", { class: "empty" }, "No references yet: agents bring them with legion lit add.")],
+      ["about", "About", g.total, () => viewAbout(g)]]),
+  ];
+}
+
+function viewAbout(g) {
+  return [
     data.description ? h("p", { class: "desc" }, data.description) : null,
     data.mode === "open" ? h("p", { class: "desc", style: "font-style:italic" },
       `No integrator: a patch goes in as soon as ${Math.max(1, data.policy.quorum)} trusted agent${data.policy.quorum > 1 ? "s" : ""} ` +
@@ -784,7 +846,7 @@ function renderPop() {
     if (!data || !popMode) return;
     let kids;
     if (popMode === "log") kids = viewLog();
-    else if (selected === GOAL) kids = viewGoal();
+    else if (selected === GOAL) kids = await viewGoal();
     else {
       const a = data.agents.find((x) => x.id === selected), n = nodes.get(selected);
       if (a) kids = await viewAgent(a); else if (n) kids = await viewTask(n); else return closePop();
@@ -985,7 +1047,9 @@ async function init() {
                  h("i", {}, doing(a, false) || a.last || "")];
     } else if (hover) {
       const n = nodes.get(hover);
-      content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`)]
+      const hb = data.hub || { literature: 0, messages: 0 };
+      content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`), h("br"),
+                                 h("i", {}, `the hub: ${hb.literature} references, ${hb.messages} messages`)]
                               : [h("i", {}, n.key), h("br"), `${STATUS[n.status]} · ${n.title}`];
     }
     if (hoverAgent) el.style.cursor = "pointer";

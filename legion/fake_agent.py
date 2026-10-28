@@ -208,6 +208,9 @@ class FakeAgent:
         tried, proposed = set(), set()
         while time.time() < deadline:
             p = legion("claim", "--json")
+            if p.returncode == 6:  # new here: it starts at the hub
+                legion("chat", "Starting: I read the hub and the literature; nothing to add yet.")
+                continue
             if p.returncode == 0:
                 task = json.loads(p.stdout)["task"]
                 if task["mode"] == "competitive":  # handed out once the exclusive tasks are done

@@ -38,6 +38,14 @@ MAX_SHARED = 3
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
 # working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
 MAX_TASK_NOTES = 30
+# The hub, at the centre of the project: where agents start (a literature review of the problem), where they come
+# back when stuck, and where they talk about the whole problem: new routes, new tasks, help. Its chat
+# (hub.message) and its literature (lit.added: a link, its title, why it helps) are open to every agent, trusted
+# or not, at most MAX_HUB_PER_DAY of either per agent in any 24 hours. A reference is one per link: whoever adds
+# it again vouches for it, with their own reason.
+MAX_HUB_PER_DAY = 60
+MAX_URL, MAX_TITLE = 500, 300
+LINK_PREFIXES = ("https://", "http://", "doi:", "arxiv:")
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
 COMPETITIVE_TRIES = 3
@@ -62,7 +70,8 @@ PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout", "bas
 # once enough of the trusted owners active in the policy's vote_window say yes (each owner counts once): a
 # majority, and never fewer than MIN_YES (or all the active ones, if they are fewer). The window is a week unless
 # the policy shortens it (an hour: who is away doesn't hold the others back, and an agent working alone can add
-# the tasks it needs); proposals are then counted again as people come and go. The policy itself always needs two
+# the tasks it needs). A proposal keeps the window it was made under; made under a short one, it's counted again as
+# people come and go. The policy itself always needs two
 # thirds of those active in the last ACTIVE_DAYS, so nobody changes the rules while the others sleep. While fewer
 # than FOUNDERS_UNTIL trusted owners aren't founders, a founder's no blocks it. A proposal lapses after ACTIVE_DAYS.
 PROPOSABLE = {"task.created", "project.policy", "project.described", "digest.published"}
@@ -196,6 +205,28 @@ def sketch_dir(tid: str) -> str:
     return f"{SKETCH_DIR}/{tid}"
 
 
+def link_url(url: str) -> str:
+    """The page of a reference: doi: and arxiv: links as their https pages."""
+    u = url.strip()
+    if u.lower().startswith("doi:"):
+        return "https://doi.org/" + u[4:].strip()
+    if u.lower().startswith("arxiv:"):
+        return "https://arxiv.org/abs/" + u[6:].strip()
+    return u
+
+
+def link_key(url: str) -> str:
+    """One key per reference, however its link is written: the scheme and host in lower case, without www., a
+    fragment or a trailing slash, and an arXiv paper as its abstract, whatever the version or format."""
+    u = link_url(url).split("#", 1)[0].rstrip("/")
+    scheme, _, rest = u.partition("://")
+    host, _, path = rest.partition("/")
+    host = host.lower().removeprefix("www.")
+    if host == "arxiv.org" and path[:4] in ("abs/", "pdf/"):
+        path = "abs/" + re.sub("v[0-9]+$", "", path[4:].removesuffix(".pdf"))
+    return f"{scheme.lower()}://{host}" + (f"/{path}" if path else "")
+
+
 def valid_branch(branch) -> bool:
     return isinstance(branch, str) and branch.startswith(PATCH_PREFIXES) and ".." not in branch
 
@@ -227,6 +258,9 @@ class State:
         self.attempts: list[dict] = []
         self.notes: dict[str, list[dict]] = defaultdict(list)  # task -> its notes, in order
         self.saved: dict[str, list[dict]] = defaultdict(list)  # task -> work in progress published on it, in order
+        self.hub: list[dict] = []  # the central chat's messages, in order
+        self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
+        self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -317,23 +351,24 @@ class State:
             return self.backed(p, ev.get("verified_by"), "fail", tree=p.tree)
         return None
 
-    def active_owners(self, now: float, kind: str = "project.policy") -> set[str]:
-        """Trusted owners with an event recently: who a vote on this kind is counted among (see ACTIVE_NOW)."""
-        window = ACTIVE_DAYS * 86400 if kind == "project.policy" else self.policy["vote_window"]
+    def active_owners(self, now: float, kind: str = "project.policy", window: int | None = None) -> set[str]:
+        """Trusted owners with an event recently: who a vote on this kind is counted among. The policy's vote
+        window, or the one a proposal was made under (window); for the policy itself, always the week."""
+        window = ACTIVE_DAYS * 86400 if kind == "project.policy" else window or self.policy["vote_window"]
         return {owner(self.names[a]) for a, ts in self.last_seen.items() if now - ts <= window and self.trusted(a)}
 
-    def votes_needed(self, kind: str, now: float) -> int:
-        active = len(self.active_owners(now, kind))
+    def votes_needed(self, kind: str, now: float, window: int | None = None) -> int:
+        active = len(self.active_owners(now, kind, window))
         share = active * 2 // 3 + (1 if active * 2 % 3 else 0) if kind == "project.policy" else active // 2 + 1
         return max(share, min(MIN_YES, active), 1)
 
     def recount(self, now: float) -> None:
-        """Count the open proposals again, with a short vote window: those voting on them may have gone away
-        since. (With a week's, a proposal is counted on its votes alone, as it always was.)"""
-        if self.policy["vote_window"] >= ACTIVE_DAYS * 86400:
-            return
+        """Count again the open proposals made under a short vote window: those voting on them may have gone away
+        since. (Under the week's, a proposal is counted on its votes alone, as it always was.)"""
         for pid, prop in list(self.proposals.items()):
-            if prop["status"] == "open" and now - prop["ev"]["ts"] <= ACTIVE_DAYS * 86400                     and sum(prop["votes"].values()) >= self.votes_needed(prop["ev"]["kind"], now):
+            if (prop["status"] == "open" and prop["window"] < ACTIVE_DAYS * 86400
+                    and now - prop["ev"]["ts"] <= ACTIVE_DAYS * 86400
+                    and sum(prop["votes"].values()) >= self.votes_needed(prop["ev"]["kind"], now, prop["window"])):
                 self._tally(pid, now)
 
     def _proposal(self, ev: dict) -> str | None:
@@ -363,7 +398,10 @@ class State:
                 if not isinstance(deps, list) or not all(isinstance(d, str) and (self.find_task(d) or d in coming)
                                                          for d in deps):
                     return "a dependency is a task, or the key of a task another open proposal creates"
-            self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "status": "open", "reason": ""}
+            # Counted with the vote window in force now, whatever the policy says later: a shorter one must not
+            # pass, on a recount, what was proposed under the week's rule.
+            self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "status": "open", "reason": "",
+                                        "window": self.policy["vote_window"]}
             return self._tally(ev["id"], ev["ts"])
         prop = self.proposals.get(ev.get("proposal"))
         if prop is None:
@@ -384,7 +422,7 @@ class State:
             prop["status"], prop["reason"] = "vetoed", "a founder said no"
             return None
         yes = sum(1 for o, v in prop["votes"].items() if v)
-        if yes < self.votes_needed(kind, now):
+        if yes < self.votes_needed(kind, now, prop["window"]):
             return None
         waiting = [d for d in prop["ev"]["payload"].get("deps") or [] if kind == "task.created" and not self.find_task(d)]
         if waiting:  # voted in, but a task it depends on comes from a proposal that hasn't passed yet
@@ -404,6 +442,52 @@ class State:
             for other, p in list(self.proposals.items()):
                 if p["status"] == "open" and p["reason"].startswith("waiting for"):
                     self._tally(other, now)
+        return None
+
+    def newcomer(self, author: str) -> bool:
+        """An agent that hasn't done anything here yet, nor been to the hub: it starts there (claim sends it).
+        The founders aren't sent."""
+        return (author not in self.integrators and not self.hub_by.get(author)
+                and not any(c.author == author for cs in self.claims.values() for c in cs)
+                and not any(a["author"] == author for a in self.attempts)
+                and not any(p.author == author for p in self.patches.values()))
+
+    def references(self, tid: str | None = None) -> list[dict]:
+        """The literature, the references most agents vouch for first (then the newest), or those for a task."""
+        refs = [r for r in self.literature.values() if tid is None or any(e.get("task") == tid for e in r["by"])]
+        return sorted(refs, key=lambda r: (-len(r["by"]), -r["lamport"]))
+
+    def _hub(self, ev: dict) -> str | None:
+        if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
+            return f"at most {MAX_HUB_PER_DAY} messages and references a day per agent in the hub"
+        if ev.get("task") is not None and ev["task"] not in self.tasks:
+            return "unknown task"
+        if ev["type"] == "hub.message":
+            text = ev.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
+                return f"a message is text of at most {E.MAX_NOTES} characters"
+            if ev.get("reply") is not None and not any(m["id"] == ev["reply"] for m in self.hub):
+                return "a reply answers a message in the hub"
+            self.hub.append(ev)
+        else:
+            url, title, why = ev.get("url"), ev.get("title"), ev.get("why")
+            if (not isinstance(url, str) or not url.lower().startswith(LINK_PREFIXES) or len(url) > MAX_URL
+                    or any(ch.isspace() for ch in url)):
+                return "a reference is a link: https://..., http://..., doi:... or arxiv:..."
+            if not isinstance(why, str) or not why.strip() or len(why) > E.MAX_NOTES:
+                return f"a reference says why it helps, in at most {E.MAX_NOTES} characters"
+            ref = self.literature.get(link_key(url))
+            if ref is None:
+                if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE:
+                    return f"a new reference needs its title, at most {MAX_TITLE} characters"
+                self.literature[link_key(url)] = {"key": link_key(url), "url": url, "title": title.strip(),
+                                                  "id": ev["id"], "lamport": ev["lamport"], "ts": ev["ts"],
+                                                  "by": [ev]}
+            elif any(e["author"] == ev["author"] for e in ref["by"]):
+                return "this agent already added that reference"
+            else:
+                ref["by"].append(ev)  # found useful again, by someone else: it vouches for it
+        self.hub_by[ev["author"]].append(ev["ts"])
         return None
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
@@ -429,7 +513,7 @@ class State:
         owner = name.rpartition("#")[0] if "#" in name else name
         tags = {f"@{name}".lower(), f"@{owner}".lower()}
         out = []
-        for notes in self.notes.values():
+        for notes in [*self.notes.values(), self.hub]:  # a task's conversation, and the central chat
             for i, n in enumerate(notes):
                 words = {w.rstrip(".,:;!?)").lower() for w in n["text"].split() if w.startswith("@")}
                 if n["name"] != name and words & tags and not any(m["name"] == name for m in notes[i + 1:]):
@@ -499,6 +583,20 @@ class State:
 
     def children(self, tid: str) -> list[Task]:
         return [t for t in self.tasks.values() if t.parent == tid]
+
+    def under(self, t: Task) -> str | None:
+        """The task it belongs to, to show it there: its parent, or, for a task voted without naming one (before
+        proposals could, or by an agent that didn't), the task its key starts with: upper-constant/tail-module
+        under upper-constant. Only for showing: it changes nothing a parent means."""
+        if t.parent:
+            return t.parent
+        head = self.find_task(t.key.rpartition("/")[0]) if "/" in t.key else None
+        return head.id if head else None
+
+    def depth_under(self, t: Task) -> int:
+        """How deep it's shown: how many tasks it is under (see under)."""
+        up = self.under(t)
+        return 1 + self.depth_under(self.tasks[up]) if up else 0
 
     def ready_to_resolve(self) -> list[Sketch]:
         return [k for k in self.sketches.values()
@@ -702,6 +800,9 @@ class State:
 
         if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
             return None
+
+        if t in ("hub.message", "lit.added"):
+            return self._hub(ev)
 
         if t == "project.policy":
             policy = dict(self.policy)

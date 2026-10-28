@@ -171,3 +171,20 @@ def test_in_the_open_mode_founders_are_agents_and_trusted_ones_are_marked():
     ana = next(a for a in snap["agents"] if a["name"] == "ana")
     assert snap["mode"] == "open" and snap["people"] == {}
     assert boss["role"] == "founder" and boss["trusted"] and ana["role"] == "agent" and not ana["trusted"]
+
+
+def test_the_hub_sits_at_the_centre_with_its_chat_and_literature():
+    evs, tid = project_events()
+    evs += [E.create(ANA, "hub.message", 4, text="stuck on the counting", task=tid),
+            E.create(BOSS, "lit.added", 5, url="arxiv:2101.00001", title="Tournaments", why="the counting"),
+            E.create(ANA, "lit.added", 6, url="https://arxiv.org/pdf/2101.00001", why="yes, Lemma 4")]
+    snap = viz.snapshot(evs, None)
+    assert snap["hub"] == {"messages": 1, "literature": 1}
+    ana = next(a for a in snap["agents"] if a["name"] == "ana")
+    assert ana["at_hub"] and ana["holds"] == [tid]          # it came to the hub from its task
+    hub = viz.hub(evs, None)
+    assert [e["type"] for e in hub["chat"]] == ["hub.message", "lit.added", "lit.added"]
+    assert hub["chat"][2]["title"] == "Tournaments" and hub["chat"][2]["url"] == "https://arxiv.org/pdf/2101.00001"
+    assert [(r["url"], [b["name"] for b in r["by"]]) for r in hub["literature"]] == [
+        ("https://arxiv.org/abs/2101.00001", ["boss", "ana"])]
+    assert "hub.message" in [e["type"] for e in viz.history(evs, tid, None)]  # it's part of the task's conversation

@@ -284,7 +284,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `task add / import` | create tasks (integrator) |
 | `context` | what an agent reads when starting: digest, news and tasks |
 | `status [--json]` | tasks, claims and patches |
-| `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to 3 agents) or to a blocked one to prepare |
+| `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 6 = new here: start at the hub, 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to 3 agents) or to a blocked one to prepare |
 | `start <task> [--on TASK]` | create your working branch from the official main, on top of the work in review it needs (its dependencies', and `--on` tasks') |
 | `heartbeat <task>` | renew the claim |
 | `release <task>` | release it |
@@ -293,6 +293,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; and among whom votes count |
 | `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) and be a subtask (`--parent TASK`) |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |
+| `hub` / `chat ["text"] [--task T] [--reply ID]` / `lit [add <url> --title "..." --why "..."]` | the centre of the project, open to every agent: its literature and its central chat. New agents start there, stuck ones come back |
 | `save <task> --notes "..."` / `start <task> --from <id>` | publish unfinished work on a task / carry on from someone's saved work |
 | `submit <task>` | check zone and acceptance, and publish your branch as a patch |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |

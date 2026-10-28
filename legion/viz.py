@@ -67,7 +67,8 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         h = working[0] if working else None
         kids = st.children(t.id)
         tasks.append({"id": t.id, "key": t.key, "title": t.title, "status": status, "mode": t.mode,
-                      "depth": t.depth, "parent": t.parent, "deps": t.deps, "size": t.size,
+                      # Where it's drawn: under its parent, or the task its key starts with (see State.under).
+                      "depth": st.depth_under(t), "parent": st.under(t), "deps": t.deps, "size": t.size,
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
@@ -78,12 +79,13 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         a = agents.setdefault(ev["author"], {
             "id": agent_id(ev["author"]), "author": ev["author"], "name": ev["name"], "kinds": [], "models": [],
             "role": "integrator" if ev["author"] in st.integrators else "agent",
-            "last_ts": 0, "holds": [], "done": [], "last": "",
+            "last_ts": 0, "holds": [], "done": [], "last": "", "last_type": "", "last_type_ts": 0,
             "stats": {"claims": 0, "patches": 0, "accepted": 0, "rejected": 0, "reports": 0, "sketches": 0}})
         a["name"] = ev["name"]
         a["last_ts"] = max(a["last_ts"], ev["ts"])
         if ev["type"] not in ROUTINE:
             a["last"] = event_text(ev, st)
+            a["last_type"], a["last_type_ts"] = ev["type"], ev["ts"]
         for field, bucket in (("agent", "kinds"), ("model", "models")):
             if ev.get(field) and ev[field] not in a[bucket]:
                 a[bucket].append(ev[field])
@@ -126,6 +128,10 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
     open_mode = st.policy["mode"] == "open"
     for a in agents.values():
         a["active"] = bool(a["holds"]) or now - a["last_ts"] < ACTIVE_SECONDS
+        # In the hub: what it did last was talk or bring a reference there, lately. It sits at the centre then,
+        # even if it holds a task (stuck, it came to ask), with a thread back to that task.
+        kind, ts = a.pop("last_type"), a.pop("last_type_ts")
+        a["at_hub"] = kind in HUB_TYPES and now - ts < ACTIVE_SECONDS
         a["owner"], a["number"] = split_name(a["name"])
         # Membership can change. In the open mode nobody integrates: the founders are agents like the rest.
         a["role"] = ("founder" if open_mode else "integrator") if a["author"] in st.integrators else "agent"
@@ -149,7 +155,8 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
             "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent,
-            "mode": st.policy["mode"], "policy": {k: st.policy[k] for k in ("quorum", "window", "audit")}}
+            "mode": st.policy["mode"], "policy": {k: st.policy[k] for k in ("quorum", "window", "audit")},
+            "hub": {"messages": len(st.hub), "literature": len(st.literature)}}
 
 
 def agent_id(author: str) -> str:
@@ -168,6 +175,7 @@ TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.re
 
 
 ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed
+HUB_TYPES = {"hub.message", "lit.added"}  # what agents do in the hub, the centre of the project
 
 
 def timeline(events: list[dict]) -> list[dict]:
@@ -182,7 +190,10 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
     return {"id": ev["id"], "lamport": ev["lamport"], "ts": ev["ts"], "type": ev["type"], "name": ev["name"],
             "agent": agent_id(ev["author"]), "kind": ev.get("agent"), "task": ev.get("task"),
             "text": event_text(ev, st, full),
-            **({"note": ev.get("text", ""), "reply": ev.get("reply")} if ev["type"] == "task.note" else {}),
+            **({"note": ev.get("text", ""), "reply": ev.get("reply")} if ev["type"] in ("task.note", "hub.message") else {}),
+            **({"note": ev.get("why", ""), "url": S.link_url(ev.get("url", "")),
+                "title": ev.get("title") or st.literature.get(S.link_key(ev.get("url", "")), {}).get("title", "")}
+               if ev["type"] == "lit.added" else {}),
             **({"note": ev.get("notes", ""), "outcome": ev.get("outcome")} if ev["type"] == "attempt.reported" else {}),
             **({"note": ev.get("notes", "")} if ev["type"] == "work.saved" else {})}
 
@@ -198,8 +209,19 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
     # The latest 80 events (short versions: a test's whole output doesn't fit in a timeline), and every note: a
     # task's conversation is read whole, so it doesn't share that budget.
     keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine
-                                             if e["type"] in ("task.note", "attempt.reported", "work.saved")}
+                                             if e["type"] in ("task.note", "attempt.reported", "work.saved", *HUB_TYPES)}
     return [item(e, st) for e in mine if e["id"] in keep]
+
+
+def hub(events: list[dict], upto: int | None) -> dict:
+    """The centre of the project: its chat (with the proposals, which are planned there) and its literature."""
+    evs = events if upto is None else events[:max(upto, 0)]
+    st = S.build(evs, trusted=True)  # already validated by the Source
+    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | {"proposal.made"}][-300:]
+    refs = [{"id": r["id"], "url": S.link_url(r["url"]), "title": r["title"], "ts": r["ts"],
+             "by": [{"name": e["name"], "agent": agent_id(e["author"]), "why": e["why"], "task": e.get("task"),
+                     "ts": e["ts"]} for e in r["by"]]} for r in st.references()]
+    return {"chat": chat, "literature": refs}
 
 
 def logo_dirs(repo: Path) -> list[Path]:
@@ -236,6 +258,9 @@ def make_handler(source: Source):
                 self.send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json")
             elif url.path == "/history.json" and q.get("node"):
                 data = history(source.get(), q["node"][0], upto)
+                self.send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json")
+            elif url.path == "/hub.json":
+                data = hub(source.get(), upto)
                 self.send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json")
             elif url.path == "/timeline.json":
                 data = timeline(source.get())

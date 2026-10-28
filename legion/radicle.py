@@ -487,17 +487,43 @@ def forget_judged(repo, refs) -> None:
             f.write("".join(f"{r}\n" for r in sorted(new)))
 
 
+# A push to the node: from a repository under /mnt/c, with the disk cold after a reboot, three minutes and more.
+PUSH_TIMEOUT = 600
+
+
 def publish_specs(repo, who: str) -> list[str]:
-    """The refspecs that push this repository's legion refs under its identity's own prefix."""
+    """The refspecs that push this repository's legion refs under its identity's own prefix: its coord, and the
+    patches the node doesn't hold yet as they are here. Pushing every patch again on every sync took minutes from
+    /mnt/c, longer than the push may take, so nothing went out at all."""
     def listed(prefix):
-        return subprocess.run(["git", "for-each-ref", "--format=%(refname)", prefix], cwd=repo,
-                              capture_output=True, text=True).stdout.split()
+        out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", prefix], cwd=repo,
+                             capture_output=True, text=True).stdout
+        return {ref: sha for sha, ref in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
 
     specs = [f"refs/legion/pub/*:refs/legion/pub/{who}/*"] if listed("refs/legion/pub/") else []
     # Patches by name, not with a pattern: judged ones are deleted as they go, and on Windows the git in WSL
     # can still see a just-deleted ref file under /mnt/c, expand the pattern to it and fail the whole push.
-    gone = judged(repo)
-    return specs + [f"{ref}:{ref}" for ref in listed("refs/legion/patches/") if ref not in gone]
+    gone, held = judged(repo), node_patches(repo)
+    return specs + [f"{ref}:{ref}" for ref, sha in listed("refs/legion/patches/").items()
+                    if ref not in gone and (held is None or held.get(ref) != sha)]
+
+
+def node_patches(repo) -> dict[str, str] | None:
+    """The patch refs the node already holds from this node, and where they point (None if it can't tell: then
+    everything is pushed)."""
+    if not rid(repo):
+        return None
+    try:
+        me = _cfg(repo, "legion.nid")
+        if not me:
+            me = node_id(repo)
+            subprocess.run(["git", "config", "legion.nid", me], cwd=repo, capture_output=True)
+        out = run("git", "--git-dir", storage(repo), "for-each-ref", "--format=%(objectname) %(refname)",
+                  f"refs/namespaces/{me}/refs/legion/patches/", repo=repo, timeout=60).stdout
+    except (RadError, OSError):
+        return None
+    cut = len(f"refs/namespaces/{me}/")
+    return {ref[cut:]: sha for sha, ref in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
 
 
 def publish_main(repo) -> None:
@@ -509,7 +535,7 @@ def publish_main(repo) -> None:
     shown = subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/remotes/rad/main"], cwd=repo,
                            capture_output=True, text=True).stdout.strip()
     if tip and tip != shown:
-        rgit(repo, "push", "-q", "rad", "refs/legion/main:refs/heads/main", check=False, timeout=120)
+        rgit(repo, "push", "-q", "rad", "refs/legion/main:refs/heads/main", check=False, timeout=PUSH_TIMEOUT)
 
 
 LOOSE_OBJECTS = 300
@@ -534,7 +560,7 @@ def publish(repo, who: str) -> None:
     for i in range(0, len(specs), 200):  # keeps the command line short with many patches
         for attempt in range(3):
             try:
-                rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=120)
+                rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=PUSH_TIMEOUT)
                 break
             except RadError as e:  # another clone on this computer pushing to the same node right now
                 if "cannot lock ref" not in str(e) or attempt == 2:

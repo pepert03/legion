@@ -180,3 +180,18 @@ def test_many_refspecs_are_fetched_in_batches_a_command_line_can_hold():
     groups = radicle.batches(specs)
     assert len(groups) > 1 and sum(groups, []) == specs
     assert all(sum(len(s) + 1 for s in g) <= radicle.MAX_ARGS for g in groups)
+
+
+def test_a_sync_pushes_only_the_patches_the_node_lacks(network):
+    """Every patch pushed again on every sync took minutes from /mnt/c: only the new ones go."""
+    bob = network["z6MkBob"]
+    boss = Identity.generate("boss")
+    coordgit.append(bob, boss, E.create(boss, "project.init", 1, project="p"))
+    git(bob, "commit", "-q", "--allow-empty", "-m", "one")
+    git(bob, "update-ref", "refs/legion/patches/t-1/bob-1", "HEAD")
+    assert "refs/legion/patches/t-1/bob-1:refs/legion/patches/t-1/bob-1" in radicle.publish_specs(bob, "b")
+    radicle.publish(bob, "b")
+    git(bob, "commit", "-q", "--allow-empty", "-m", "two")
+    git(bob, "update-ref", "refs/legion/patches/t-1/bob-2", "HEAD")
+    assert radicle.publish_specs(bob, "b") == ["refs/legion/pub/*:refs/legion/pub/b/*",
+                                               "refs/legion/patches/t-1/bob-2:refs/legion/patches/t-1/bob-2"]

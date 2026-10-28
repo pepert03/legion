@@ -697,6 +697,8 @@ def test_a_patch_built_on_one_that_is_rejected_is_doomed():
 def test_with_a_short_vote_window_tasks_pass_among_those_here_and_the_policy_still_needs_the_week():
     for window in (None, 3600):
         log, crowd = trusted_crowd(4)             # 5 active owners at ts 1000: a task needs 3 yes
+        old = log.add(crowd[0], "proposal.made", kind="task.created", ts=800.0,
+                      payload=dict(key="old", title="Old", zone=["o"], accept="true"))
         if window:
             log.add(BOSS, "project.policy", vote_window=window)
         later = 1000.0 + 3600 + 60                # an hour on, only crowd[0] is still around
@@ -707,6 +709,7 @@ def test_with_a_short_vote_window_tasks_pass_among_those_here_and_the_policy_sti
         st = log.state()
         # A week's window, as before: the history of a project reads the same. An hour's: counted again, it passes.
         assert bool(st.find_task("new")) == bool(window)
+        assert not st.find_task("old") and st.proposals[old["id"]]["window"] == 7 * 86400  # it keeps the week's rule
         assert st.votes_needed("task.created", later) == (1 if window else 3)
         pol = log.add(crowd[0], "proposal.made", kind="project.policy", payload={"window": 7200}, ts=later)
         assert log.state().proposals[pol["id"]]["status"] == "open"           # the rules need the week's owners
@@ -722,3 +725,70 @@ def test_a_trusted_agent_is_sent_to_check_patches_that_waited_too_long():
     assert integrator.waiting_for(st, CEL.author, "cel", late) == []            # CEL's check wouldn't count
     log.add(BEA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
     assert integrator.waiting_for(log.state(), ANA.author, "ana", late) == []   # quorum 1: checked enough
+    st = log.state()
+    assert integrator.to_accept(st, ANA.author, 1001) == []                     # its checker accepts it now
+    assert [x.id for x in integrator.to_accept(st, ANA.author, late)] == [p["id"]]  # nobody did: ana, then
+
+
+def test_the_hub_is_open_to_every_agent():
+    log, tid = project()
+    first = log.add(CEL, "hub.message", text="Has anyone read the 1965 paper? @bea")  # never took part in anything
+    log.add(CEL, "hub.message", text="x", reply="nope")
+    log.add(CEL, "hub.message", text="x", task="t-nowhere")
+    log.add(CEL, "hub.message", text="   ")
+    st = log.state()
+    assert [m["id"] for m in st.hub] == [first["id"]]
+    assert [why for _, why in st.ignored] == ["a reply answers a message in the hub", "unknown task",
+                                              f"a message is text of at most {E.MAX_NOTES} characters"]
+    assert [m["id"] for m in st.mentions("bea")] == [first["id"]]
+    log.add(BEA, "hub.message", text="Yes: it's the counting in section 3.", reply=first["id"], task=tid)
+    st = log.state()
+    assert st.mentions("bea") == [] and st.hub[-1]["task"] == tid
+
+
+def test_the_literature_keeps_one_reference_per_link_and_who_vouches_for_it():
+    log, tid = project()
+    log.add(ANA, "lit.added", url="https://www.arxiv.org/pdf/2101.00001v2.pdf", title="Tournaments, S. and S.",
+            why="Proves the lower bound we start from.", task=tid)
+    log.add(BEA, "lit.added", url="arxiv:2101.00001", why="Its Lemma 4 is the step a/x needs.")
+    log.add(ANA, "lit.added", url="https://arxiv.org/abs/2101.00001", why="again")
+    log.add(BEA, "lit.added", url="https://example.org/survey", why="A survey.")             # new: needs a title
+    log.add(BEA, "lit.added", url="ftp://example.org/x", title="X", why="y")
+    log.add(BEA, "lit.added", url="https://example.org/survey", title="A survey", why="")
+    log.add(CEL, "lit.added", url="doi:10.1000/182", title="The DOI handbook", why="How to cite.")
+    st = log.state()
+    assert [why for _, why in st.ignored] == [
+        "this agent already added that reference", "a new reference needs its title, at most 300 characters",
+        "a reference is a link: https://..., http://..., doi:... or arxiv:...",
+        f"a reference says why it helps, in at most {E.MAX_NOTES} characters"]
+    refs = st.references()
+    assert [r["title"] for r in refs] == ["Tournaments, S. and S.", "The DOI handbook"]   # the most vouched for first
+    assert [e["name"] for e in refs[0]["by"]] == ["ana", "bea"]
+    assert [r["title"] for r in st.references(tid)] == ["Tournaments, S. and S."]
+    assert S.link_url(refs[1]["url"]) == "https://doi.org/10.1000/182"
+
+
+def test_at_most_so_many_hub_posts_a_day_and_newcomers_start_there():
+    log, tid = project()
+    st = log.state()
+    assert st.newcomer(DAN.author) and not st.newcomer(BOSS.author)  # the founders aren't sent
+    for i in range(S.MAX_HUB_PER_DAY):
+        log.add(DAN, "hub.message", text=f"{i}", ts=1000.0 + i)
+    log.add(DAN, "hub.message", text="one too many", ts=2000.0)
+    log.add(DAN, "hub.message", text="the next day", ts=1000.0 + 86400 + 1)
+    st = log.state()
+    assert len(st.hub) == S.MAX_HUB_PER_DAY + 1 and st.ignored[-1][1].startswith("at most 60 messages")
+    assert not st.newcomer(DAN.author)
+    log2, tid2 = project()
+    log2.add(ANA, "task.claimed", task=tid2, ttl=600)
+    assert not log2.state().newcomer(ANA.author)                # it has worked here before
+
+
+def test_a_task_voted_without_its_parent_shows_under_the_one_its_key_starts_with():
+    log, a = project(key="upper")
+    loose = S.task_id(log.add(BOSS, "task.created", key="upper/tail", title="T", zone=["x"], accept="true"))
+    other = S.task_id(log.add(BOSS, "task.created", key="nowhere/x", title="X", zone=["y"], accept="true"))
+    st = log.state()
+    assert st.under(st.tasks[loose]) == a and st.depth_under(st.tasks[loose]) == 1
+    assert st.tasks[loose].parent is None and st.children(a) == []   # only shown there: it isn't its parent
+    assert st.under(st.tasks[other]) is None and st.depth_under(st.tasks[other]) == 0

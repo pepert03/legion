@@ -527,6 +527,11 @@ def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
         main(["vote", pid[:8], "yes"])
     st = Ctx(sync=False).st
     assert st.find_task("voted/part").parent == st.find_task("voted").id
+    # A key under another task's makes the proposal its subtask, even without --parent.
+    main(["propose", "task", "--key", "voted/more", "--title", "More", "--zone", "v.txt",
+          "--accept", "python check.py v"])
+    pid = max(Ctx(sync=False).st.proposals, key=lambda p: Ctx(sync=False).st.proposals[p]["ev"]["lamport"])
+    assert Ctx(sync=False).st.proposals[pid]["ev"]["payload"]["parent"] == st.find_task("voted").id
 
 
 def test_an_agent_alone_goes_on_over_work_in_review(project, capsys):
@@ -565,3 +570,35 @@ def test_an_agent_alone_goes_on_over_work_in_review(project, capsys):
     assert [(p.verdict, p.code) for t in (tids["a"], tc, tids["b"], td) for p in st.patches_for(t)] == [
         ("accepted", None), ("accepted", None), ("rejected", "tests"), ("rejected", "base")]
     assert git(repo, "show", "legion/main:c.txt") == "ok"
+
+
+def test_a_new_agent_starts_at_the_hub_and_a_stuck_one_goes_back(project, capsys):
+    """Whoever joins starts with the literature and the central chat; claim sends it there first. A failed report
+    sends it back, and what's said there on a task reaches whoever claims the task."""
+    from legion.cli import main
+    repo, tids, patch = project
+    identity.bind(repo, Identity.generate("nueva#1"))
+    capsys.readouterr()
+    assert main(["claim"]) == 6
+    assert "start at the hub" in capsys.readouterr().out
+    assert main(["lit", "add", "https://arxiv.org/abs/2101.00001", "--why", "Its counting is what a needs."]) == 2
+    main(["lit", "add", "https://arxiv.org/abs/2101.00001", "--title", "Tournaments", "--task", tids["a"],
+          "--why", "Its counting is what a needs."])
+    main(["chat", "I'll take a, by the counting in Tournaments."])
+    capsys.readouterr()
+    main(["hub", "--no-sync"])
+    shown = capsys.readouterr().out
+    assert "Tournaments <https://arxiv.org/abs/2101.00001>" in shown and "I'll take a, by the counting" in shown
+    assert main(["claim", tids["a"]]) == 0
+    main(["report", tids["a"], "--outcome", "failure", "--notes", "the counting loses a factor 2"])
+    assert "Stuck? Take it to the hub" in capsys.readouterr().out
+    main(["chat", "--task", tids["a"], "@luis the counting loses a factor 2: did you see a fix?"])
+    main(["release", tids["a"]])
+    as_(repo, "luis")
+    capsys.readouterr()
+    main(["context", "--no-update"])
+    shown = capsys.readouterr().out
+    assert "in the hub, [" in shown and "did you see a fix?" in shown and "legion chat \"...\" --reply" in shown
+    main(["claim", tids["a"]])
+    shown = capsys.readouterr().out
+    assert "The hub has this on this task" in shown and "Tournaments <https://arxiv.org/abs/2101.00001>" in shown
