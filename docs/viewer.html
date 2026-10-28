@@ -638,7 +638,22 @@ const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "pa
   "path.proposed": "sketched", "path.accepted": "sketched", "path.rejected": "cancelled",
   "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
   "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink",
-  "result.submitted": "review", "task.brief": "ink", "question.asked": "review", "question.answered": "accepted" };
+  "result.submitted": "review", "task.brief": "ink", "question.asked": "review", "question.answered": "accepted",
+  "idea.proposed": "sketched", "idea.compared": "ink3", "idea.critiqued": "ink3", "playbook.updated": "ink" };
+
+// The routes towards a task, the best rated first: their rating comes from pairwise judgments by other owners.
+function ideaList(ideas) {
+  return h("ul", { class: "lit" }, ...ideas.map((i) => {
+    const a = data.agents.find((x) => x.id === i.agent) || { id: i.agent, name: i.by, kinds: [] };
+    return h("li", {},
+      h("div", { class: "ref" }, h("b", {}, String(i.elo)), " ", h("span", { class: `tag${i.status === "worked" ? " success" : ""}` }, i.status),
+        i.compared ? h("span", { class: "host" }, ` · judged ${i.compared}×`) : null),
+      h("div", { class: "why", style: "white-space:pre-wrap" }, i.text),
+      h("div", { class: "host" }, "by ", nameNode(a), i.from.length ? ` · from ${i.from.map((x) => x.slice(0, 8)).join(", ")}` : "",
+        i.tries.length ? ` · tried by ${i.tries.map((x) => `${x.name} (${x.outcome})`).join(", ")}` : ""),
+      ...i.critiques.slice(-2).map((x) => h("div", { class: "why" }, h("i", {}, `${x.name}: `), x.text)));
+  }));
+}
 
 // A task's state of the art: one text its agents keep current (legion brief), the latest version.
 function briefView(e) {
@@ -766,6 +781,8 @@ async function viewTask(n) {
     tabs(n.id, brief ? "brief" : notes.length ? "conversation" : "history", [
       ["brief", "State of the art", brief ? 1 : 0, () => brief ? briefView(brief)
         : h("p", { class: "empty" }, "Nobody has written it yet: the agents on this task do, with legion brief.")],
+      ["ideas", "Ideas", (n.ideas || []).length, () => (n.ideas || []).length ? ideaList(n.ideas)
+        : h("p", { class: "empty" }, "No ideas yet: agents propose routes with legion idea, and compare them.")],
       ["questions", "Questions", asked.length, () => asked.length ? chatList(thread)
         : h("p", { class: "empty" }, "No questions yet: agents ask them with legion ask.")],
       ["conversation", "Conversation", notes.length, () => notes.length ? chatList(notes)
@@ -799,6 +816,7 @@ function chatList(notes, hubView = false) {
           e.type === "lit.added" ? h("span", { class: "tag" }, "reference") : null,
           e.type === "result.submitted" ? h("span", { class: "tag" }, "result") : null,
           e.type === "question.asked" ? h("span", { class: "tag" }, e.result ? "replication asked" : "question") : null,
+          e.type === "idea.proposed" ? h("span", { class: "tag" }, "idea") : null,
           e.type === "question.answered" ? h("span", { class: e.settled ? "tag success" : "tag" },
             e.settled ? "settles it" : "answer") : null,
           e.type === "proposal.made" ? h("span", { class: "tag" }, "proposal") : null,
@@ -853,6 +871,10 @@ async function viewGoal() {
         : h("p", { class: "empty" }, "No messages yet: agents talk here with legion chat.")],
       ["literature", "Literature", lit.length, () => lit.length ? litList(lit)
         : h("p", { class: "empty" }, "No references yet: agents bring them with legion lit add.")],
+      ["playbook", "Playbook", hub.playbook ? hub.playbook.versions : 0, () => hub.playbook
+        ? h("div", { class: "brief" }, h("div", { class: "who" }, `by ${hub.playbook.name} · ${ago(hub.playbook.ts)}`),
+            h("div", { class: "text" }, hub.playbook.text))
+        : h("p", { class: "empty" }, "No playbook yet: agents distill one from what failed, with legion playbook.")],
       ["about", "About", g.total, () => viewAbout(g)]]),
   ];
 }

@@ -771,3 +771,31 @@ def test_with_no_task_free_claim_hands_out_a_question(project, capsys):
     qid = next(iter(Ctx(sync=False).st.questions))
     assert main(["answer", qid[:8], "Yes, by the double count.", "--settled"]) == 0
     assert Ctx(sync=False).st.questions[qid]["status"] == "settled"
+
+
+def test_claim_hands_out_the_research_work_most_wanted(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    for who, text in (("marta", "Count triples instead of pairs"), ("boss", "A Cayley construction")):
+        as_(repo, who)
+        main(["idea", tids["a"], text])
+    as_(repo, "luis")
+    for tid in tids.values():
+        main(["claim", tid])
+        main(["release", tid, "--notes", "no route of my own"])
+    capsys.readouterr()
+    assert main(["claim", "--json"]) == 7                              # nothing free: judge two ideas first
+    import json
+    work = json.loads(capsys.readouterr().out)["work"]
+    assert work == {"kind": "compare", "task": "a"}
+    better, worse = [i["ev"]["id"][:8] for i in Ctx(sync=False).st.ideas_for(tids["a"])]
+    assert main(["compare", better, worse, "--why", "triples see more structure"]) == 0
+    capsys.readouterr()
+    assert main(["claim", "--json"]) == 7
+    assert json.loads(capsys.readouterr().out)["work"]["kind"] == "ideas"   # then new routes where few are left
+    as_(repo, "marta")
+    main(["idea", tids["b"], "A probabilistic deletion argument"])     # a new idea on b, which luis let go of
+    as_(repo, "luis")
+    capsys.readouterr()
+    assert main(["claim"]) == 0                                         # b comes back to luis, with its route
+    assert "A probabilistic deletion argument" in capsys.readouterr().out

@@ -71,6 +71,12 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
                       "depth": st.depth_under(t), "parent": st.under(t), "deps": t.deps, "size": t.size,
                       "kind": t.kind, "replicated": st.replications(t.id) if t.kind == "result" else [],
                       "questions": sum(q["task"] == t.id and q["status"] == "open" for q in st.questions.values()),
+                      "ideas": [{"id": i["ev"]["id"], "text": i["ev"]["text"][:600], "elo": round(i["elo"]),
+                                 "status": st.idea_status(i), "by": i["ev"]["name"], "agent": agent_id(i["ev"]["author"]),
+                                 "from": i["from"], "compared": i["compared"],
+                                 "critiques": [{"name": x["name"], "text": x["text"][:400]} for x in i["critiques"]],
+                                 "tries": [{"name": x["name"], "outcome": x["outcome"]} for x in i["tries"]]}
+                                for i in st.ideas_for(t.id)],
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
@@ -179,7 +185,7 @@ TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.re
 ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed
 HUB_TYPES = {"hub.message", "lit.added"}  # what agents do in the hub, the centre of the project
 # What the hub's chat shows besides its own messages: what's proposed, proved, asked and answered on the tasks.
-RESEARCH = {"proposal.made", "result.submitted", "question.asked", "question.answered"}
+RESEARCH = {"proposal.made", "result.submitted", "question.asked", "question.answered", "idea.proposed"}
 
 
 def timeline(events: list[dict]) -> list[dict]:
@@ -201,7 +207,9 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
             **({"note": ev.get("notes", ""), "outcome": ev.get("outcome")} if ev["type"] == "attempt.reported" else {}),
             **({"note": ev.get("notes", "")} if ev["type"] == "work.saved" else {}),
             **({"note": ev.get("notes", ""), "title": ev.get("title", "")} if ev["type"] == "result.submitted" else {}),
-            **({"note": ev.get("text", "")} if ev["type"] in ("task.brief", "question.asked") else {}),
+            **({"note": ev.get("text", "")} if ev["type"] in ("task.brief", "question.asked", "idea.proposed",
+                                                              "idea.critiqued", "playbook.updated") else {}),
+            **({"note": ev.get("why", "")} if ev["type"] == "idea.compared" else {}),
             **({"result": ev.get("result")} if ev["type"] == "question.asked" else {}),
             **({"note": ev.get("text", ""), "question": ev.get("question"), "settled": bool(ev.get("settled"))}
                if ev["type"] == "question.answered" else {})}
@@ -232,7 +240,9 @@ def hub(events: list[dict], upto: int | None) -> dict:
     refs = [{"id": r["id"], "url": S.link_url(r["url"]), "title": r["title"], "ts": r["ts"],
              "by": [{"name": e["name"], "agent": agent_id(e["author"]), "why": e["why"], "task": e.get("task"),
                      "ts": e["ts"]} for e in r["by"]]} for r in st.references()]
-    return {"chat": chat, "literature": refs}
+    return {"chat": chat, "literature": refs,
+            "playbook": {"text": st.playbook[-1]["text"], "name": st.playbook[-1]["name"], "ts": st.playbook[-1]["ts"],
+                         "versions": len(st.playbook)} if st.playbook else None}
 
 
 def logo_dirs(repo: Path) -> list[Path]:

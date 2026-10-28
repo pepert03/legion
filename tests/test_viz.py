@@ -214,3 +214,13 @@ def test_a_result_shows_who_replicated_it():
     assert r["replicated"] == ["boss"]
     assert [e["type"] for e in viz.hub(evs, None)["chat"]][-2:] == ["question.asked", "question.answered"]
     assert {"question.asked", "question.answered"} <= {e["type"] for e in viz.history(evs, tid, None)}
+
+
+def test_a_task_shows_its_ideas_and_the_hub_its_playbook():
+    evs, tid = project_events()
+    evs += [E.create(ANA, "idea.proposed", 4, task=tid, text="Count triples"),
+            E.create(BOSS, "playbook.updated", 5, text="## Dead ends")]
+    t = next(t for t in viz.snapshot(evs, None)["tasks"] if t["id"] == tid)
+    assert [(i["text"], i["elo"], i["status"]) for i in t["ideas"]] == [("Count triples", 1200, "open")]
+    hub = viz.hub(evs, None)
+    assert hub["playbook"]["text"] == "## Dead ends" and hub["chat"][-1]["type"] == "idea.proposed"

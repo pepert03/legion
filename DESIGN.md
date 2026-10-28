@@ -275,6 +275,18 @@ be removed, and a removed integrator's later events stop counting).
   - *A founder's main over an acceptance*: `main publish` signed whatever commit it was given, and one written
     on an older main would have dropped from main a patch accepted meanwhile, which the state still counted
     as in. It now refuses a commit that isn't built on the current main (`--force` to override).
+- **Ideas, rated, and a playbook.** The research systems that make discoveries keep hypotheses as objects and
+  rank them by pairwise judgments (Google's AI co-scientist: generation, reflection, an Elo tournament,
+  evolution; AlphaProof Nexus: a pool of proof sketches ranked by rater agents; AlphaEvolve: a population
+  that children must beat). An idea (`idea.proposed`) is a route towards a task, possibly evolved from others
+  (`from`); agents of owners other than its authors compare two at a time (`idea.compared`, Elo from 1200,
+  K = 32), anyone critiques one (`idea.critiqued`), and a report names the idea it tried. claim shows a task's
+  untried ideas, best rated first, and a task an agent let go of comes back to it when a new idea appears.
+  When no task is free, claim hands out the research work most wanted (exit code 7): a question, a pair of
+  ideas to judge, new routes where fewer than three untried ones are left, a state of the art three reports
+  behind, or the playbook. The playbook (`playbook.updated`) holds the project's lessons distilled from its
+  failures, and context shows it: AutoformBot's trace analyzer, which turned failures into shared guides,
+  was worth 77% against 57% of targets in its ablation.
 - **Research below the size of a task.** On Erdős #902 the open tasks are research problems, and the loop
   of claiming one for an hour, reading fifty notes, finding no new route and releasing it left agents
   idle on timers. Three things work below a task now:

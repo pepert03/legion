@@ -46,6 +46,18 @@ COOLDOWN = 3600
 # out when an agent has no task with a new route. A computed result asks for its own replication, and each owner
 # other than its author's that settles it counts as one replication.
 MAX_BRIEF, MAX_QUESTION = 6000, 1000
+# Ideas: the routes towards a task, kept as research teams keep their hypotheses. Anyone proposes one
+# (idea.proposed), possibly evolved from others (`from`: combined, refined, generalized); agents of owners other than
+# their authors compare two at a time (idea.compared), which rates them, Elo from ELO_START with ELO_K, since
+# pairwise judgments rank better than scores; anyone critiques one (idea.critiqued); a report names the idea it
+# tried (attempt.reported's `idea`). claim hands out the best-rated untried ideas, asks for new ones where fewer than
+# IDEAS_WANTED are left, and for comparisons where ratings are thin. A task an agent let go of is offered to it again
+# once someone posts a new idea for it.
+MAX_IDEA, MAX_IDEAS_PER_DAY, ELO_START, ELO_K, IDEAS_WANTED = 1500, 10, 1200.0, 32.0, 3
+# The project's playbook: lessons distilled from what failed (how to work here, what wastes time, what to try
+# first), which context shows every agent. Whoever has worked here may rewrite it; claim asks for it once
+# PLAYBOOK_AFTER failures have piled up since its last version.
+MAX_PLAYBOOK, PLAYBOOK_AFTER = 8000, 10
 MAX_QUESTIONS_PER_DAY, QUESTION_TTL = 10, 7200
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
 # working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
@@ -299,6 +311,9 @@ class State:
         self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
         self.briefs: dict[str, list[dict]] = defaultdict(list)  # task -> its state of the art, every version
         self.questions: dict[str, dict] = {}  # id -> {ev, task, result, taken: [(author, ts)], answers, status}
+        self.ideas: dict[str, dict] = {}  # id -> {ev, task, from, elo, compared, critiques, tries}
+        self.compared: set = set()  # (owner, frozenset of two ideas): each owner judges a pair once
+        self.playbook: list[dict] = []  # its versions (playbook.updated), the latest last
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -490,10 +505,18 @@ class State:
     def cooling(self, author: str, now: float) -> set[str]:
         """The tasks this agent let go of in the last COOLDOWN, released or reported failing: claim doesn't hand
         them back to it."""
-        out = {a["task"] for a in self.attempts if a["author"] == author and a.get("outcome") == "failure"
-               and now - a["ts"] < COOLDOWN}
-        return out | {tid for tid, cs in self.claims.items() for cl in cs
-                      if cl.author == author and cl.released and now - cl.released_ts < COOLDOWN}
+        left = {}  # task -> when this agent last let go of it
+        for a in self.attempts:
+            if a["author"] == author and a.get("outcome") == "failure" and now - a["ts"] < COOLDOWN:
+                left[a["task"]] = max(left.get(a["task"], 0), a["ts"])
+        for tid, cs in self.claims.items():
+            for cl in cs:
+                if cl.author == author and cl.released and now - cl.released_ts < COOLDOWN:
+                    left[tid] = max(left.get(tid, 0), cl.released_ts)
+        # A new idea since then is a new route: the task is worth taking back.
+        return {tid for tid, ts in left.items()
+                if not any(i["task"] == tid and i["ev"]["ts"] > ts and self.idea_status(i) == "open"
+                           for i in self.ideas.values())}
 
     def newcomer(self, author: str) -> bool:
         """An agent that hasn't done anything here yet, nor been to the hub: it starts there (claim sends it).
@@ -591,6 +614,100 @@ class State:
         if ev.get("settled") and not own:
             q["status"] = "settled"
         return None
+
+    def _idea(self, ev: dict, task: Task) -> str | None:
+        """An idea on a task: proposed, compared with another, critiqued (see MAX_IDEA)."""
+        if ev["type"] == "idea.proposed":
+            text, frm = ev.get("text"), ev.get("from") or []
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_IDEA:
+                return f"an idea is text of at most {MAX_IDEA} characters"
+            if task.cancelled:
+                return "the task is cancelled"
+            if sum(i["ev"]["author"] == ev["author"] and ev["ts"] - 86400 < i["ev"]["ts"] <= ev["ts"]
+                   for i in self.ideas.values()) >= MAX_IDEAS_PER_DAY:
+                return f"at most {MAX_IDEAS_PER_DAY} ideas a day per agent"
+            if not isinstance(frm, list) or not all(x in self.ideas and self.ideas[x]["task"] == task.id for x in frm):
+                return "an idea evolves from ideas on the same task"
+            self.ideas[ev["id"]] = {"ev": ev, "task": task.id, "from": list(frm), "elo": ELO_START, "compared": 0,
+                                    "critiques": [], "tries": []}
+            return None
+        if ev["type"] == "idea.critiqued":
+            idea, text = self.ideas.get(ev.get("idea")), ev.get("text")
+            if idea is None or idea["task"] != task.id:
+                return "unknown idea on that task"
+            if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
+                return f"a critique is text of at most {E.MAX_NOTES} characters"
+            idea["critiques"].append(ev)
+            return None
+        a, b, why = self.ideas.get(ev.get("better")), self.ideas.get(ev.get("worse")), ev.get("why")
+        if a is None or b is None or a is b or a["task"] != task.id or b["task"] != task.id:
+            return "a comparison names two ideas on the same task"
+        me = owner(ev["name"])
+        if me in (owner(a["ev"]["name"]), owner(b["ev"]["name"])):
+            return "nobody rates their own ideas"
+        pair = frozenset((a["ev"]["id"], b["ev"]["id"]))
+        if (me, pair) in self.compared:
+            return "this owner compared those two already"
+        if not isinstance(why, str) or not why.strip() or len(why) > E.MAX_NOTES:
+            return f"a comparison says why, in at most {E.MAX_NOTES} characters"
+        self.compared.add((me, pair))
+        gain = ELO_K * (1 - 1 / (1 + 10 ** ((b["elo"] - a["elo"]) / 400)))
+        a["elo"], b["elo"] = a["elo"] + gain, b["elo"] - gain
+        a["compared"], b["compared"] = a["compared"] + 1, b["compared"] + 1
+        return None
+
+    def idea_status(self, idea: dict) -> str:
+        """open (nobody tried it), tried (it failed, or got partway), worked (a report says it did)."""
+        if any(x.get("outcome") == "success" for x in idea["tries"]):
+            return "worked"
+        return "tried" if idea["tries"] else "open"
+
+    def ideas_for(self, tid: str) -> list[dict]:
+        """A task's ideas, the best rated first."""
+        return sorted((i for i in self.ideas.values() if i["task"] == tid), key=lambda i: (-i["elo"], i["ev"]["lamport"]))
+
+    def pair_to_compare(self, name: str) -> tuple | None:
+        """Two ideas on one task for this agent to judge: neither its owner's, not judged by its owner yet; the
+        least compared first, then the closest in rating (where a judgment says the most)."""
+        me, best = owner(name), None
+        for tid in {i["task"] for i in self.ideas.values()}:
+            if self.tasks[tid].cancelled or self.done(tid):
+                continue
+            pool = [i for i in self.ideas_for(tid) if owner(i["ev"]["name"]) != me and self.idea_status(i) != "worked"]
+            for x in range(len(pool)):
+                for y in range(x + 1, len(pool)):
+                    a, b = pool[x], pool[y]
+                    if (me, frozenset((a["ev"]["id"], b["ev"]["id"]))) in self.compared:
+                        continue
+                    key = (a["compared"] + b["compared"], abs(a["elo"] - b["elo"]), a["ev"]["lamport"], b["ev"]["lamport"])
+                    if best is None or key < best[0]:
+                        best = (key, a, b)
+        return (best[1], best[2]) if best else None
+
+    def needs_ideas(self, name: str, now: float) -> Task | None:
+        """A task with fewer than IDEAS_WANTED ideas nobody has tried, for this agent to propose new routes on:
+        stuck ones first. Not one its owner proposed an idea on in the last COOLDOWN."""
+        me = owner(name)
+        want = [t for t in self.tasks.values()
+                if t.mode == "exclusive" and t.kind == "task" and not t.cancelled and not self.done(t.id)
+                and sum(self.idea_status(i) == "open" for i in self.ideas_for(t.id)) < IDEAS_WANTED
+                and not any(owner(i["ev"]["name"]) == me and now - i["ev"]["ts"] < COOLDOWN for i in self.ideas_for(t.id))]
+        return min(want, key=lambda t: (not self.stalled(t.id), len(self.ideas_for(t.id)), t.lamport), default=None)
+
+    def needs_brief(self, author: str, now: float) -> Task | None:
+        """A task whose state of the art is missing or behind its reports (three or more since its last
+        version), that this agent may write: the one most behind first."""
+        def behind(t):
+            last = self.brief(t.id)["lamport"] if self.brief(t.id) else 0
+            return sum(a.get("task") == t.id and a["lamport"] > last for a in self.attempts)
+        want = [t for t in self.tasks.values() if t.kind == "task" and not t.cancelled and not self.done(t.id)
+                and behind(t) >= 3 and (self.took_part(t.id, author, now) or self.trusted(author))]
+        return max(want, key=lambda t: (behind(t), -t.lamport), default=None)
+
+    def playbook_due(self) -> bool:
+        """PLAYBOOK_AFTER failures or more since the playbook's last version: time to distill them."""
+        last = self.playbook[-1]["lamport"] if self.playbook else 0
+        return sum(a.get("outcome") == "failure" and a["lamport"] > last for a in self.attempts) >= PLAYBOOK_AFTER
 
     def brief(self, tid: str) -> dict | None:
         """The task's state of the art: its latest version (task.brief), or None."""
@@ -964,6 +1081,15 @@ class State:
         if t in ("hub.message", "lit.added"):
             return self._hub(ev)
 
+        if t == "playbook.updated":  # the project's lessons: whoever has worked here may rewrite them
+            text = ev.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_PLAYBOOK:
+                return f"the playbook is text of at most {MAX_PLAYBOOK} characters"
+            if self.newcomer(ev["author"]) and not self.trusted(ev["author"]):
+                return "only an agent that has worked here rewrites the playbook"
+            self.playbook.append(ev)
+            return None
+
         if t == "agent.delegated":  # an agent vouching for another key as its own subagent
             key = ev.get("key")
             if not isinstance(key, str) or not key.startswith("ed25519:") or key == ev["author"]:
@@ -1046,7 +1172,12 @@ class State:
                 return "outcome must be success or failure"
             if not isinstance(ev.get("notes", ""), str) or len(ev.get("notes", "")) > E.MAX_NOTES:
                 return f"notes must be text of at most {E.MAX_NOTES} characters"
+            idea = ev.get("idea")
+            if idea is not None and (idea not in self.ideas or self.ideas[idea]["task"] != task.id):
+                return "unknown idea on that task"
             self.attempts.append(ev)
+            if idea is not None:
+                self.ideas[idea]["tries"].append(ev)
         elif t == "patch.checking":  # an agent verifying it, or the integrator reviewing it, starts its check
             p = self.patches.get(ev.get("patch"))
             if p is None or p.task != task.id:
@@ -1097,6 +1228,8 @@ class State:
             self.briefs[task.id].append(ev)
         elif t in ("question.asked", "question.taken", "question.answered"):
             return self._question(ev, task)
+        elif t in ("idea.proposed", "idea.compared", "idea.critiqued"):
+            return self._idea(ev, task)
         elif t == "work.saved":
             # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
             # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.

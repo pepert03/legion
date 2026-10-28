@@ -924,3 +924,60 @@ def test_a_computed_result_is_replicated_by_other_owners_only():
     log.add(BEA, "question.answered", task=tid, question=q["id"], text="my own encoding: UNSAT at 26", settled=True)
     st = log.state()
     assert st.questions[q["id"]]["status"] == "settled" and st.replications(rid) == ["bea"]
+
+
+def test_ideas_are_rated_by_other_owners_judging_pairs():
+    log, tid = project()
+    a = log.add(ANA, "idea.proposed", task=tid, text="Count triples instead of pairs")
+    b = log.add(BEA, "idea.proposed", task=tid, text="A Cayley construction on Z_p")
+    c = log.add(CEL, "idea.proposed", task=tid, text="Both, combined", **{"from": [a["id"], b["id"]]})
+    log.add(CEL, "idea.proposed", task=tid, text="x", **{"from": ["nope"]})
+    log.add(ANA, "idea.compared", task=tid, better=a["id"], worse=b["id"], why="mine is better")    # ana's own
+    log.add(DAN, "idea.compared", task=tid, better=a["id"], worse=b["id"], why="triples see more structure")
+    log.add(DAN, "idea.compared", task=tid, better=b["id"], worse=a["id"], why="changed my mind")    # judged already
+    log.add(DAN, "idea.critiqued", task=tid, idea=b["id"], text="Z_p has too much symmetry for S_4")
+    st = log.state()
+    assert [why for _, why in st.ignored] == ["an idea evolves from ideas on the same task",
+                                              "nobody rates their own ideas",
+                                              "this owner compared those two already"]
+    ia, ib = st.ideas[a["id"]], st.ideas[b["id"]]
+    assert ia["elo"] > S.ELO_START > ib["elo"] and ia["elo"] + ib["elo"] == 2 * S.ELO_START
+    assert st.ideas[c["id"]]["from"] == [a["id"], b["id"]] and len(ib["critiques"]) == 1
+    assert [i["ev"]["id"] for i in st.ideas_for(tid)][0] == a["id"]
+    pair = st.pair_to_compare("dan")                                  # dan judged a and b: c with one of them
+    assert c["id"] in {pair[0]["ev"]["id"], pair[1]["ev"]["id"]}
+
+
+def test_a_report_says_which_idea_it_tried():
+    log, tid = project()
+    a = log.add(BEA, "idea.proposed", task=tid, text="Induction on n")
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="loses a factor 2", idea=a["id"])
+    log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="x", idea="nope")
+    st = log.state()
+    assert st.ignored[-1][1] == "unknown idea on that task" and st.idea_status(st.ideas[a["id"]]) == "tried"
+
+
+def test_a_task_let_go_comes_back_with_a_new_idea_and_routes_are_asked_for():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "task.released", task=tid, ts=1100.0)
+    st = log.state()
+    assert st.cooling(ANA.author, 1200) == {tid} and st.needs_ideas("ana", 1200).id == tid
+    log.add(BEA, "idea.proposed", task=tid, text="A probabilistic deletion argument", ts=1150.0)
+    st = log.state()
+    assert st.cooling(ANA.author, 1200) == set()                      # a new route: worth taking back
+    assert st.needs_ideas("bea", 1200) is None                         # bea proposed one just now
+
+
+def test_the_playbook_is_rewritten_by_those_who_worked_here_when_failures_pile_up():
+    log, tid = project()
+    log.add(CEL, "playbook.updated", text="## How to work here")      # cel has done nothing here
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    for i in range(S.PLAYBOOK_AFTER):
+        log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes=f"try {i}")
+    st = log.state()
+    assert st.ignored[-1][1] == "only an agent that has worked here rewrites the playbook" and st.playbook_due()
+    log.add(ANA, "playbook.updated", text="## Dead ends\n- counting pairs: loses a factor 2")
+    st = log.state()
+    assert not st.playbook_due() and "counting pairs" in st.playbook[-1]["text"]
