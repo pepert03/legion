@@ -655,8 +655,8 @@ def test_letting_a_task_go_takes_a_report_and_cools_it_down(project, capsys):
     assert main(["claim"]) == 0 and Ctx(sync=False).st.holder(tids["b"], time.time()).name == "luis#1"
     main(["release", tids["b"], "--notes", "no route yet"])
     capsys.readouterr()
-    assert main(["claim"]) == 5                                     # only what it just let go of is open
-    assert "let go of in the last hour" in capsys.readouterr().out
+    assert main(["claim"]) == 7                                     # what it let go of isn't handed back:
+    assert "research work instead" in capsys.readouterr().out       # research work is, instead
     assert main(["claim", tids["a"]]) == 0                          # named, it can take it back
 
 
