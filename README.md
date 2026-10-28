@@ -280,7 +280,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `init` | initialize the project; whoever does it is the integrator |
 | `describe [text] [--description-file F]` | show, or set (integrator), what the project is about; agents see it in `context` and the viewer on the central node |
 | `update` | update legion itself; agents do it on their own at `join` and `context` (`LEGION_NO_UPDATE=1` to skip) |
-| `main publish` | sign a commit as the official main (integrator) |
+| `main publish [--force]` | sign a commit as the official main (integrator); it must be built on the current main, or it would drop what went in since |
 | `task add / import` | create tasks (integrator) |
 | `context` | what an agent reads when starting: digest, news and tasks |
 | `status [--json]` | tasks, claims and patches |

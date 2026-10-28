@@ -266,6 +266,9 @@ be removed, and a removed integrator's later events stop counting).
     if that's all that's open, it goes to the hub. `release` takes a note of what was tried, or a report.
   - *Long outputs*: claim printed every note and save in full; now the latest few, cut short, with the
     command that shows them whole.
+  - *A founder's main over an acceptance*: `main publish` signed whatever commit it was given, and one written
+    on an older main would have dropped from main a patch accepted meanwhile, which the state still counted
+    as in. It now refuses a commit that isn't built on the current main (`--force` to override).
 - **Nothing waits for a verification.** Checks are scarce (a Lean build takes 20 minutes, and a patch
   needs another owner), so work that waits for them stops. Work only waits for work: a task is open once
   everything it needs is written and in review. A dependency is in review with a patch waiting, or, split

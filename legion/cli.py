@@ -944,7 +944,18 @@ def cmd_main(args):
     c = Ctx()
     c.require_integrator()
     commit = git(c.repo, "rev-parse", args.ref + "^{commit}")
-    c.emit("main.updated", commit=commit, base=c.st.main_tip)  # base: refused if main moved meanwhile
+    tip = c.st.main_tip
+    # A commit not built on today's main would drop from it whatever went in since (an acceptance that landed
+    # while the commit was being written, say), although the state still says it's in.
+    if tip and commit != tip and not args.force:
+        if not coordgit.has_commit(c.repo, tip):
+            raise Fail(f"this clone doesn't have the current main ({tip[:8]}) yet: sync (`python -m legion status`) "
+                       "and try again", 5)
+        if coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, commit).returncode:
+            raise Fail(f"{args.ref} isn't built on the current main ({tip[:8]}): publishing it would drop what went "
+                       f"in since. Build it on top of {tip[:8]} (`git rebase {tip[:8]}`, or merge it in) and publish "
+                       "again; --force publishes it anyway", 5)
+    c.emit("main.updated", commit=commit, base=tip)  # base: refused if main moved meanwhile
     c.sync()
     if not coordgit.publish_main(c.repo, commit):
         raise Fail("main is recorded, but couldn't be pushed to origin; it will be on the next integrate pass")
@@ -2097,6 +2108,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("main", help="publish the current main as the official one (integrator)")
     s.add_argument("action", choices=["publish"])
     s.add_argument("ref", nargs="?", default="HEAD")
+    s.add_argument("--force", action="store_true", help="publish it even if it isn't built on the current main")
     s.set_defaults(func=cmd_main)
 
     s = sub.add_parser("heartbeat", help="renew your claim")

@@ -691,3 +691,22 @@ def test_checks_wait_for_a_free_slot_on_the_machine(tmp_path, monkeypatch):
     hold("b", 0)
     first.join()
     assert times["b"][0] >= times["a"][1]
+
+
+def test_main_publish_refuses_a_commit_not_built_on_the_current_main(project, capsys):
+    """Published over an acceptance that landed meanwhile, it would drop that patch from main."""
+    from legion.cli import main
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)    # main moves: a goes in
+    git(repo, "checkout", "-q", "main")                                 # a clone still on the old main
+    (repo / "notes.txt").write_text("for the agents\n")
+    git(repo, "add", "notes.txt")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "notes")
+    capsys.readouterr()
+    assert main(["main", "publish"]) == 5
+    assert "isn't built on the current main" in capsys.readouterr().err
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "merge", "-q", "--no-edit", "legion/main")
+    assert main(["main", "publish"]) == 0
+    st = Ctx(sync=False).st
+    assert st.main_tip == git(repo, "rev-parse", "HEAD") and git(repo, "show", f"{st.main_tip}:a.txt") == "ok"
