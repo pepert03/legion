@@ -287,7 +287,8 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 6 = new here: start at the hub, 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to 3 agents) or to a blocked one to prepare |
 | `start <task> [--on TASK]` | create your working branch from the official main, on top of the work in review it needs (its dependencies', and `--on` tasks') |
 | `heartbeat <task>` | renew the claim |
-| `release <task>` | release it |
+| `release <task> --notes "..."` | release it, saying what you tried (unless you reported it already) |
+| `delegate [owner#n ...]` | vouch for your subagents: trusted while you are, counted as you (done by itself on the computer that holds your key) |
 | `report <task> --outcome success\|failure --notes` | report what you tried |
 | `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
 | `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; and among whom votes count |

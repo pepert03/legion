@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,7 +50,92 @@ beat = None
 BEAT_EVERY = 30
 
 
-def run_cmd(cmd: str, cwd, timeout: int) -> tuple[int | None, str]:
+# A check that broke on this machine says nothing about the patch: the build crashed (a Windows status code, a
+# signal, out of memory) or a tool it needs is missing. Such a run is never signed, nor held against a patch: in
+# Erdős #902, Lean builds that crashed with six agents compiling on one machine were signed as failing patches.
+BROKEN = re.compile(r"exited with code (3221[0-9]{6}|-?(6|9|11)|134|137|139)\b|out of memory|std::bad_alloc|"
+                    r"MemoryError|No such file or directory: '[^']*(lake|elan|lean)'|command not found|"
+                    r"is not recognized as an internal or external command|^Killed$", re.M)
+
+
+def broken(output: str) -> bool:
+    return bool(BROKEN.search(output or ""))
+
+
+# At most LEGION_CHECKS checks (acceptance commands, a result's check) run at once on one machine, among all its
+# agents; the others wait for a slot (0: no limit). The slots are locked files, freed when their process ends,
+# however it ends.
+CHECKS = 2
+
+
+def lock_file(f) -> bool:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def unlock_file(f) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextmanager
+def check_slot():
+    """One of this machine's check slots, waited for if they're all taken (renewing the claim meanwhile)."""
+    from .identity import home
+    limit, held = int(os.environ.get("LEGION_CHECKS", CHECKS)), None
+    if limit > 0:
+        folder = home() / "check-slots"
+        folder.mkdir(parents=True, exist_ok=True)
+        said, last = False, time.time()
+        while held is None:
+            for i in range(limit):
+                f = open(folder / f"{i}.lock", "a+b")
+                if lock_file(f):
+                    held = f
+                    break
+                f.close()
+            else:
+                if not said:
+                    print(f"legion: {limit} checks are running on this machine already; waiting for one to end "
+                          "(LEGION_CHECKS sets how many)", file=sys.stderr, flush=True)
+                    said = True
+                time.sleep(2)
+                if beat and threading.current_thread() is threading.main_thread() and time.time() - last > BEAT_EVERY:
+                    last = time.time()
+                    try:
+                        beat()
+                    except Exception:  # noqa: BLE001 - a failed renewal is retried on the next beat
+                        pass
+    try:
+        yield
+    finally:
+        if held:
+            unlock_file(held)
+            held.close()
+
+
+def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True) -> tuple[int | None, str]:
+    """Run a check's command; with `slot`, in one of the machine's check slots (see LEGION_CHECKS)."""
+    if slot:
+        with check_slot():
+            return run_cmd(cmd, cwd, timeout, slot=False)
     # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
     cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', portable(cmd.strip()), count=1)
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -209,6 +295,10 @@ def resolve_parents(c: Ctx, timeout: int, log=print, mine=lambda tid: True) -> i
         finally:
             for tmp in scratch:
                 remove_tree(tmp)
+        if code is None or code != 0 and broken(out):  # says nothing about the parent: try again later
+            log(f"the check of {task.key} didn't finish here ({'out of time' if code is None else 'it broke'}); "
+                "will retry")
+            return done
         if code == 0:
             c.emit("task.resolved", task=task.id, sketch=k.id)
             log(f"RESOLVED {task.key}: its {len(k.child_ids)} subtasks are done and it passes its own test")
@@ -343,6 +433,8 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
         return reject("the task was already done by another patch", "done")
     if code is None:  # ran out of time: on a busy machine that says nothing about the patch
         return "retry", {"reason": out}
+    if code != 0 and broken(out):  # nor does a crash, or a missing tool
+        return "retry", {"reason": f"the check broke on this machine:\n{tail(out)}"}
     if code != 0:
         return reject(f"the acceptance command fails:\n{tail(out)}", "tests")
     payload = {}
@@ -377,7 +469,7 @@ def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
     cmd = c.st.policy.get("reads")
     if not cmd:
         return ["*"]
-    code, out = run_cmd(f'{cmd} "{job.task.accept}"', write_contract(folder, job.task), 300)
+    code, out = run_cmd(f'{cmd} "{job.task.accept}"', write_contract(folder, job.task), 300, slot=False)
     paths = sorted({line.strip() for line in out.splitlines() if line.strip()})
     if code != 0 or not paths or "*" in paths:
         return ["*"]
@@ -655,7 +747,7 @@ def integrate_once(c: Ctx, timeout: int, log=print, keep_branches: bool = False)
                 if TIMED_OUT[job.patch.id] < 2:
                     log(f"patch {job.patch.id[:8]}'s check ran out of time ({verdict[1]['reason']}); will try again")
                     break  # the ones after it were checked on top of it
-                verdict = reject(f"the acceptance command ran out of time twice: {verdict[1]['reason']}", "timeout")
+                verdict = reject(f"the acceptance command couldn't finish, twice: {verdict[1]['reason']}", "timeout")
                 verdict[1].update(base_tree=job.base_tree, tree=job.tree)
             if not publish_verdict(c, job.patch, verdict, log, keep_branches):
                 break
@@ -810,6 +902,8 @@ def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
     result = check(c.repo, job, "verify", timeout)
     if result[0] is None:  # out of time: that says nothing about the patch, so nothing is signed
         return job, "timed out"
+    if result[0] != 0 and broken(result[1]):  # a crash, a missing tool: nothing to sign either
+        return job, "broken"
     if job.patch.verdict == "accepted":  # an audit: does the accepted merge still pass its own check?
         passed = result[0] == 0 and (not job.task.metric or result[2] is not None)
         verdict, payload = ("accepted", {}) if passed else reject(f"audit: the check fails:\n{tail(result[1])}", "tests")

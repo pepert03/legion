@@ -376,8 +376,21 @@ def storage(repo) -> str:
 
 
 def _storage_refs(repo) -> list[str]:
-    return run("git", "--git-dir", storage(repo), "for-each-ref", "--format=%(refname)", "refs/namespaces/",
-               repo=repo, timeout=60).stdout.splitlines()
+    return list(_storage_values(repo))
+
+
+def _storage_values(repo) -> dict[str, str]:
+    """Every ref in the Radicle storage, and the commit it points to."""
+    out = run("git", "--git-dir", storage(repo), "for-each-ref", "--format=%(objectname) %(refname)",
+              "refs/namespaces/", repo=repo, timeout=60).stdout
+    return {ref: sha for sha, ref in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
+
+
+def local_values(repo, *prefixes: str) -> dict[str, str]:
+    """This repository's refs under these prefixes, and the commit each points to."""
+    out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", *prefixes], cwd=repo,
+                         capture_output=True, text=True).stdout
+    return {ref: sha for sha, ref in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
 
 
 PUB_RE = re.compile(r"refs/namespaces/([^/]+)/refs/legion/pub/(?:([0-9a-f]{16})/)?coord$")
@@ -434,19 +447,24 @@ def batches(specs: list[str]) -> list[list[str]]:
 def fetch_all(repo) -> list[str]:
     """Copy every publisher's legion refs from the Radicle storage into this repository."""
     tidy(repo)  # the fetch runs in WSL too: packed, it reads a few files instead of thousands
-    refs = _storage_refs(repo)
+    held = _storage_values(repo)
+    refs = list(held)
     pubs = publishers(repo, refs)
     if pubs:
-        specs = [f"+{prefix}*:refs/legion/peers/{name}/*" for name, prefix in pubs.items()]
+        wanted = {f"refs/legion/peers/{name}/{ref[len(prefix):]}": ref
+                  for name, prefix in pubs.items() for ref in refs if ref.startswith(prefix)}
         # Every node re-publishes the patches it has seen (that's the gossip), so one patch can sit in
         # several namespaces. Patches are immutable, so take each one from the first namespace that has it.
-        chosen, gone = {}, judged(repo)
+        gone = judged(repo)
         for ref in refs:
             m = re.match(r"refs/namespaces/[^/]+/(refs/legion/patches/.+)$", ref)
-            if m and m.group(1) not in chosen and m.group(1) not in gone:
-                chosen[m.group(1)] = ref
-        specs += [f"+{src}:{dest}" for dest, src in sorted(chosen.items())]
-        for batch in batches(specs):
+            if m and m.group(1) not in wanted and m.group(1) not in gone:
+                wanted[m.group(1)] = ref
+        # Only what changed since the last fetch: fetching all of it again on every command, from /mnt/c, took
+        # minutes even when nothing was new.
+        have = local_values(repo, "refs/legion/peers/", "refs/legion/patches/")
+        specs = [f"+{src}:{dest}" for dest, src in sorted(wanted.items()) if have.get(dest) != held[src]]
+        for batch in batches(specs) if specs else []:
             for attempt in range(3):
                 try:
                     rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *batch, timeout=120)

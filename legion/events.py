@@ -11,6 +11,7 @@ TYPES = {
     "project.init",
     "project.described",
     "agent.joined",
+    "agent.delegated",
     "task.created",
     "task.claimed",
     "task.heartbeat",

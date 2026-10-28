@@ -20,6 +20,9 @@ build.mkdir(exist_ok=True)
 runs = build / "runs"
 runs.write_text(str(int(runs.read_text()) + 1) if runs.exists() else "1")
 text = (here / (sys.argv[1] + ".txt")).read_text().strip()
+if text == "crash":  # what a build that runs out of memory on Windows says
+    print("error: Lean exited with code 3221226505")
+    sys.exit(1)
 if text == "slow":
     import time
     time.sleep(30)
@@ -445,7 +448,7 @@ def test_saved_work_lets_the_next_agent_carry_on(project, capsys):
     main(["save", tid, "--notes", "stage 1 compiles; stage 2 left"])
     commit("stage 2, broken\n")
     capsys.readouterr()
-    main(["release", tid])
+    main(["release", tid, "--notes", "stage 2 is broken"])
     assert "nobody else can see" in capsys.readouterr().out  # the second commit wasn't saved
     git(repo, "checkout", "-q", "main")
     as_(repo, "marta")
@@ -626,3 +629,65 @@ def test_a_result_is_checked_like_a_patch_and_lands_in_main(project, capsys):
     assert st.status(r.id, time.time()) == "accepted" and git(repo, "show", "legion/main:res/lemma.txt") == "ok"
     as_(repo, "luis")
     assert main(["result", tids["a"], "res/lemma.txt", "--title", "again"]) == 5  # main has it: only new files
+
+
+def test_a_check_that_crashes_is_never_signed(project, capsys):
+    """A crash or a missing tool says nothing about the patch: in Erdős #902 such runs were signed as failures."""
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "crash\n")
+    job, outcome = integrator.verify_one(as_(repo, "luis"), 60)
+    assert outcome == "broken" and Ctx(sync=False).st.verifications.get(job.patch.id, []) == []
+    capsys.readouterr()
+    main(["verify"])
+    assert "broke on this machine" in capsys.readouterr().out
+
+
+def test_letting_a_task_go_takes_a_report_and_cools_it_down(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    assert main(["claim", tids["a"]]) == 0
+    capsys.readouterr()
+    assert main(["release", tids["a"]]) == 2                       # nothing said about what was tried
+    assert main(["release", tids["a"], "--notes", "the counting loses a factor 2"]) == 0
+    assert main(["claim"]) == 0 and Ctx(sync=False).st.holder(tids["b"], time.time()).name == "luis#1"
+    main(["release", tids["b"], "--notes", "no route yet"])
+    capsys.readouterr()
+    assert main(["claim"]) == 5                                     # only what it just let go of is open
+    assert "let go of in the last hour" in capsys.readouterr().out
+    assert main(["claim", tids["a"]]) == 0                          # named, it can take it back
+
+
+def test_a_subagent_is_vouched_for_by_its_owner_on_the_same_computer(project):
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    as_(repo, "luis")
+    main(["context", "--no-update"])
+    sub = Identity.generate("luis#2")
+    identity.bind(repo, sub)
+    main(["context", "--no-update"])
+    st = Ctx(sync=False).st
+    assert st.delegates[sub.author] == make_project.people["luis"].author and st.trusted(sub.author)
+
+
+def test_checks_wait_for_a_free_slot_on_the_machine(tmp_path, monkeypatch):
+    import threading
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path))
+    monkeypatch.setenv("LEGION_CHECKS", "1")
+    times = {}
+
+    def hold(name, secs):
+        with integrator.check_slot():
+            start = time.time()
+            time.sleep(secs)
+            times[name] = (start, time.time())
+
+    first = threading.Thread(target=hold, args=("a", 0.8))
+    first.start()
+    time.sleep(0.2)
+    hold("b", 0)
+    first.join()
+    assert times["b"][0] >= times["a"][1]

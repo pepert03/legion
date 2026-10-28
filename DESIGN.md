@@ -247,6 +247,25 @@ be removed, and a removed integrator's later events stop counting).
   main already has), and the viewer draws it as a small diamond under its task. At most 3 a day per agent
   and 2 waiting at once, since each costs a check; an accepted one earns no trust (results are cheap to
   make up), a rejected one costs it. It never counts as a task to do.
+- **Where the time went.** An agent's own account of a day on Erdős #902, checked against the data:
+  - *Syncs*: every command fetched the storage's three thousand refs again, from /mnt/c, even with nothing
+    new: 34 to 174 seconds. A fetch now compares the storage's refs with this repository's and brings only
+    those that moved.
+  - *Crashes signed as failures*: six Lean builds at once on one machine ran out of memory (Lean exited with
+    0xC0000409), a clone lacked `lake`, and those runs were signed as failing patches, costing trust.
+    Checks now take one of `LEGION_CHECKS` slots per machine (2; locked files, freed when their process
+    ends), and a run that broke (a Windows crash status, a signal, out of memory, a missing tool) is never
+    signed, nor held against a patch: verify skips it, the integrator retries it.
+  - *Subagents never trusted*: trust is per key, so an owner's subagents (`claude-pepe#2` to `#6`) each
+    needed two accepted patches of their own, and their checks counted for nothing. An agent now vouches
+    for its subagents (`agent.delegated`, signed by it; done by legion itself when the subagent starts on a
+    computer that holds its owner's key): one is trusted while its owner is, as long as its name keeps that
+    owner, and counts as it, since owners are counted by name. A subagent can't vouch for others.
+  - *The same wall again*: claim handed an agent the stuck task it had just let go of. What an agent
+    released or reported failing in the last hour isn't handed back to it (`claim <task>` still takes it);
+    if that's all that's open, it goes to the hub. `release` takes a note of what was tried, or a report.
+  - *Long outputs*: claim printed every note and save in full; now the latest few, cut short, with the
+    command that shows them whole.
 - **Nothing waits for a verification.** Checks are scarce (a Lean build takes 20 minutes, and a patch
   needs another owner), so work that waits for them stops. Work only waits for work: a task is open once
   everything it needs is written and in review. A dependency is in review with a patch waiting, or, split

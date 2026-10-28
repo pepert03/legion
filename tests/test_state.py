@@ -834,3 +834,31 @@ def test_a_rejected_result_is_gone_and_frees_its_files():
     again = log.add(ANA, "result.submitted", **dict(r, key="lemma-2"))
     st = log.state()
     assert st.status(S.task_id(ev), 1001) == "cancelled" and S.task_id(again) in st.tasks
+
+
+def test_a_subagent_vouched_for_by_its_owner_is_trusted_while_it_is():
+    log, tid = open_project()
+    ana2, bea2, ana3, cel2 = (Identity.generate(n) for n in ("ana#2", "bea#2", "ana#3", "cel#2"))
+    for who in (ana2, bea2, ana3, cel2):
+        log.add(who, "agent.joined")
+    assert not log.state().trusted(ana2.author)
+    log.add(ANA, "agent.delegated", key=ana2.author, member="ana#2")
+    log.add(ANA, "agent.delegated", key=bea2.author, member="bea#2")    # not one of ana's: no trust from it
+    log.add(ana2, "agent.delegated", key=ana3.author, member="ana#3")   # a subagent can't vouch for others
+    log.add(BEA, "agent.delegated", key=ana2.author, member="ana#2")    # vouched for already
+    log.add(CEL, "agent.delegated", key=cel2.author, member="cel#2")    # cel isn't trusted, so neither is cel#2
+    st = log.state()
+    assert st.trusted(ana2.author) and not st.trusted(bea2.author) and not st.trusted(cel2.author)
+    assert [why for _, why in st.ignored] == ["a subagent can't vouch for others: its owner's agent does",
+                                              "that agent is already vouched for"]
+
+
+def test_claim_cools_down_on_what_an_agent_let_go():
+    log, tid = project()
+    b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true"))
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "task.released", task=tid, ts=1100.0)
+    log.add(ANA, "attempt.reported", task=b, outcome="failure", notes="no", ts=1200.0)
+    st = log.state()
+    assert st.cooling(ANA.author, 1300) == {tid, b} and st.cooling(BEA.author, 1300) == set()
+    assert st.cooling(ANA.author, 1100 + S.COOLDOWN + 1) == {b}

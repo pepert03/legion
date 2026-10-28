@@ -35,6 +35,9 @@ STALL_AFTER, MAX_OPEN_PATHS = 3, 3
 # agents on one task; the first patch accepted wins), or prepare a blocked one (they split it into subtasks
 # that don't need its dependencies, or write the patch, which is reviewed once the dependencies are in).
 MAX_SHARED = 3
+# An agent that let a task go (released it, or reported it failing) isn't handed it again by claim for COOLDOWN
+# seconds: it gets something else, or goes to the hub to rethink, instead of hitting the same wall again.
+COOLDOWN = 3600
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
 # working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
 MAX_TASK_NOTES = 30
@@ -154,6 +157,7 @@ class Claim:
     last_beat: float
     released: bool = False
     join: bool = False  # joins whoever holds the task, instead of competing for it
+    released_ts: float = 0.0
 
     def active(self, now: float) -> bool:
         return not self.released and now <= self.last_beat + self.ttl
@@ -281,6 +285,7 @@ class State:
         self.hub: list[dict] = []  # the central chat's messages, in order
         self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
         self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
+        self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -328,11 +333,16 @@ class State:
                 seen.add(c.author)
         return out
 
-    def trusted(self, author: str) -> bool:
-        """Whose verifications and verdicts count in the open mode: the founders, and agents with accepted work
-        and never a false verification."""
-        return author in self.integrators or (self.accepted_count[author] >= TRUSTED_AFTER
-                                              and author not in self.falsified)
+    def trusted(self, author: str, depth: int = 0) -> bool:
+        """Whose verifications and verdicts count in the open mode: the founders, agents with accepted work and
+        never a false verification, and the subagents those vouched for (agent.delegated), while their name keeps
+        the same owner: one owner, one say, whatever number of agents it runs."""
+        if author in self.integrators or (self.accepted_count[author] >= TRUSTED_AFTER and author not in self.falsified):
+            return True
+        parent = self.delegates.get(author)
+        return (parent is not None and depth < 3 and author not in self.falsified
+                and owner(self.names.get(author, "")) == owner(self.names.get(parent, "?"))
+                and self.trusted(parent, depth + 1))
 
     def challengeable(self, p, now: float) -> bool:
         """An accepted patch can still be audited, and reverted, in the open mode's window."""
@@ -463,6 +473,14 @@ class State:
                 if p["status"] == "open" and p["reason"].startswith("waiting for"):
                     self._tally(other, now)
         return None
+
+    def cooling(self, author: str, now: float) -> set[str]:
+        """The tasks this agent let go of in the last COOLDOWN, released or reported failing: claim doesn't hand
+        them back to it."""
+        out = {a["task"] for a in self.attempts if a["author"] == author and a.get("outcome") == "failure"
+               and now - a["ts"] < COOLDOWN}
+        return out | {tid for tid, cs in self.claims.items() for cl in cs
+                      if cl.author == author and cl.released and now - cl.released_ts < COOLDOWN}
 
     def newcomer(self, author: str) -> bool:
         """An agent that hasn't done anything here yet, nor been to the hub: it starts there (claim sends it).
@@ -867,6 +885,17 @@ class State:
         if t in ("hub.message", "lit.added"):
             return self._hub(ev)
 
+        if t == "agent.delegated":  # an agent vouching for another key as its own subagent
+            key = ev.get("key")
+            if not isinstance(key, str) or not key.startswith("ed25519:") or key == ev["author"]:
+                return "a delegation names another agent's key"
+            if ev["author"] in self.delegates:
+                return "a subagent can't vouch for others: its owner's agent does"
+            if key in self.delegates:
+                return "that agent is already vouched for"
+            self.delegates[key] = ev["author"]
+            return None
+
         if t == "project.policy":
             policy = dict(self.policy)
             if "mode" in ev and ev["mode"] not in ("integrator", "open"):
@@ -932,7 +961,7 @@ class State:
             if not mine:
                 return "no claim to release"
             for c in mine:
-                c.released = True
+                c.released, c.released_ts = True, ev["ts"]
         elif t == "attempt.reported":
             if ev.get("outcome") not in ("success", "failure"):
                 return "outcome must be success or failure"

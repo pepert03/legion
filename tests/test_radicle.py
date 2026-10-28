@@ -195,3 +195,19 @@ def test_a_sync_pushes_only_the_patches_the_node_lacks(network):
     git(bob, "update-ref", "refs/legion/patches/t-1/bob-2", "HEAD")
     assert radicle.publish_specs(bob, "b") == ["refs/legion/pub/*:refs/legion/pub/b/*",
                                                "refs/legion/patches/t-1/bob-2:refs/legion/patches/t-1/bob-2"]
+
+
+def test_a_fetch_brings_only_what_changed(network, monkeypatch):
+    """Fetching every ref again on every command took minutes from /mnt/c, even with nothing new."""
+    alice, bob = network["z6MkAlice"], network["z6MkBob"]
+    boss = Identity.generate("boss")
+    coordgit.append(bob, boss, E.create(boss, "project.init", 1, project="p"))
+    coordgit.sync(bob, boss)
+    fetches = []
+    real = radicle.rgit
+    monkeypatch.setattr(radicle, "rgit", lambda repo, *args, **kw: fetches.append(args[0]) or real(repo, *args, **kw))
+    radicle.fetch_all(alice)
+    assert fetches.count("fetch") == 1      # bob's coord, new here
+    fetches.clear()
+    radicle.fetch_all(alice)
+    assert fetches.count("fetch") == 0      # nothing changed: nothing fetched

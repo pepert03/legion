@@ -103,7 +103,7 @@ class FakeAgent:
         p = legion("sketch", tid, str(Path("..", f"sketch-{tid}.json")), "--json")
         if p.returncode:
             log(f"{key}: couldn't propose the sketch: {p.stderr.strip()}")
-            legion("release", tid)
+            legion("release", tid, "--notes", f"couldn't propose the sketch: {p.stderr.strip()[:300]}")
             return
         sid = json.loads(p.stdout)["sketch"]
         log(f"{key}: proposing to split it into subtasks (sketch {sid[:8]})")
@@ -185,7 +185,7 @@ class FakeAgent:
                 self.report(tid, "success", f"Implemented {task['key']} following the task description.")
                 return
             self.report(tid, "failure", f"Patch rejected: {reason}")
-        legion("release", tid)
+        legion("release", tid, "--notes", "out of attempts for now")
 
     def compete(self, task: dict) -> None:
         tid, key = task["id"], task["key"]
@@ -221,7 +221,7 @@ class FakeAgent:
                     self.work(task)
                 except Exception as e:  # an agent that fails must let go of the task, not hold it
                     log(f"error working on {task['key']}: {e}; releasing the task")
-                    legion("release", task["id"])
+                    legion("release", task["id"], "--notes", f"error working on it: {e}"[:300])
                 continue
             if p.returncode == 3:
                 log("another agent claimed the same task first; trying another")
