@@ -416,6 +416,21 @@ def network_sync(repo, force: bool = False) -> bool:
     return ok
 
 
+MAX_ARGS = 20000  # characters of refspecs per fetch: Windows caps a command line at 32767
+
+
+def batches(specs: list[str]) -> list[list[str]]:
+    """The refspecs in groups short enough for one command line."""
+    out, size = [[]], 0
+    for s in specs:
+        if out[-1] and size + len(s) + 1 > MAX_ARGS:
+            out.append([])
+            size = 0
+        out[-1].append(s)
+        size += len(s) + 1
+    return out
+
+
 def fetch_all(repo) -> list[str]:
     """Copy every publisher's legion refs from the Radicle storage into this repository."""
     tidy(repo)  # the fetch runs in WSL too: packed, it reads a few files instead of thousands
@@ -431,14 +446,15 @@ def fetch_all(repo) -> list[str]:
             if m and m.group(1) not in chosen and m.group(1) not in gone:
                 chosen[m.group(1)] = ref
         specs += [f"+{src}:{dest}" for dest, src in sorted(chosen.items())]
-        for attempt in range(3):
-            try:
-                rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *specs, timeout=120)
-                break
-            except RadError as e:  # another legion process (a viewer) fetching into the same refs right now
-                if "cannot lock ref" not in str(e) or attempt == 2:
-                    raise
-                time.sleep(1)
+        for batch in batches(specs):
+            for attempt in range(3):
+                try:
+                    rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *batch, timeout=120)
+                    break
+                except RadError as e:  # another legion process (a viewer) fetching into the same refs right now
+                    if "cannot lock ref" not in str(e) or attempt == 2:
+                        raise
+                    time.sleep(1)
     # Peers that aren't published any more (a repository that moved to per-identity refs): forget them.
     local = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/legion/peers/"], cwd=repo,
                            capture_output=True, text=True).stdout.splitlines()

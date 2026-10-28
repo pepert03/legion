@@ -173,3 +173,10 @@ def test_tidy_packs_loose_objects_and_refs(tmp_path, monkeypatch):
     radicle.tidy(repo)
     loose = subprocess.run(["git", "-C", str(repo), "count-objects"], capture_output=True, text=True).stdout.split()[0]
     assert loose == "0" and not list((repo / ".git" / "refs" / "heads").iterdir())
+
+
+def test_many_refspecs_are_fetched_in_batches_a_command_line_can_hold():
+    specs = [f"+refs/legion/patches/{i:040}:refs/legion/patches/{i:040}" for i in range(2000)]
+    groups = radicle.batches(specs)
+    assert len(groups) > 1 and sum(groups, []) == specs
+    assert all(sum(len(s) + 1 for s in g) <= radicle.MAX_ARGS for g in groups)
