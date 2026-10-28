@@ -614,11 +614,18 @@ def cmd_claim(args):
                         "Every exclusive task is done, and you have made your attempts at the competitive ones: "
                         "you are done.")
                     return 4
-                waiting = [t.key for t in c.st.tasks.values()
+                waiting = [t for t in c.st.tasks.values()
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled]
+                if all(c.st.in_review(t.id) is not None for t in waiting):
+                    out(args, {"won": False, "task": None, "done": False, "in_review": True},
+                        verify_first(c) + "Every exclusive task left is written and in review: there's nothing "
+                        "more to write until a verdict sends one back. Verify others' patches (`python -m legion "
+                        "verify`), or improve the competitive tasks.")
+                    return 5
                 out(args, {"won": False, "task": None, "done": False},
-                    f"Nothing is open right now, but these are unfinished: {', '.join(waiting)} "
-                    "(claimed, in review or blocked). Run `python -m legion claim --wait` again.")
+                    verify_first(c) + f"Nothing is open right now, but these are unfinished: "
+                    f"{', '.join(t.key for t in waiting)} (claimed, in review or blocked). Run `python -m legion "
+                    "claim --wait` again.")
                 return 5
             else:
                 # Deterministic spread: each agent prefers a different order, so they collide less; tasks this
@@ -659,6 +666,7 @@ def cmd_claim(args):
                     "`start --from <id>` brings in just those files:\n"
                     + "\n".join(f"  [{w['id'][:8]}] {w['name']} on {c.st.tasks[w['task']].key}: {', '.join(files)}"
                                 for w, files in other) + "\n")
+        how = verify_first(c) + how
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
@@ -669,6 +677,18 @@ def cmd_claim(args):
     out(args, {"won": False, "task": task_dict(c.st, t, time.time())},
         f"{h.name if h else 'Another agent'} claimed {t.key} first. Try again with `claim`.")
     return 3
+
+
+def verify_first(c: Ctx) -> str:
+    """Patches that have waited too long for a check this agent can give: what to do about them first."""
+    ps = integrator.waiting_for(c.st, c.me, c.ident.name, time.time())
+    if not ps:
+        return ""
+    keys = ", ".join(f"{c.st.tasks[p.task].key} ({p.id[:8]})" for p in ps[:5])
+    return (f"First: {len(ps)} patch{'es' if len(ps) > 1 else ''} waited over {integrator.WAITED // 60} min for a "
+            f"check yours would count for: {keys}. Run `python -m legion verify` before going on. If you and "
+            f"your subagents are all busy on tasks, start one more subagent ({trust.owner_of(c.ident.name)}#<n>, "
+            "its own identity) to verify, and go on with this.\n")
 
 
 # A claim lasts this long without a sign of life: an agent that stops (a session ends, a machine sleeps) frees its
@@ -706,20 +726,27 @@ def cmd_start(args):
                    "Commit or discard your changes, or use --force to discard them.")
     if args.force:
         coordgit.run(c.repo, "clean", "-qfd")
-    # Dependencies still in review: build on their patches, so what this task needs from them is here.
+    # Work still in review: the dependencies', and whatever else --on names. Build on its patches, so what this
+    # task needs from them is here, without waiting for anyone to verify them.
+    wanted = list(c.st.deps_in_review(t))
+    for ref in [r for arg in args.on or [] for r in arg.split(",") if r.strip()]:
+        other = c.task(ref.strip())
+        if c.st.in_review(other.id) is None:
+            raise Fail(f"{other.key} isn't in review: there's nothing of it to build on yet "
+                       f"({c.st.status(other.id, time.time())})", 3)
+        wanted.append(other.id)
     on = []
-    for dep in c.st.deps_in_review(t):
-        p = c.st.review_patch(dep)
+    for p in c.st.review_patches(wanted):
         if not coordgit.fetch_patch(c.repo, p.branch) or not coordgit.has_commit(c.repo, p.commit):
-            raise Fail(f"the patch in review for {c.st.tasks[dep].key} ({p.id[:8]}) hasn't reached this clone yet: "
-                       "run `python -m legion context` in a minute and `start` again")
-        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {c.st.tasks[dep].key} (patch "
+            raise Fail(f"the patch in review for {c.st.tasks[p.task].key} ({p.id[:8]}) hasn't reached this clone "
+                       "yet: run `python -m legion context` in a minute and `start` again")
+        m = coordgit.run(c.repo, "merge", "-q", "--no-edit", "-m", f"Build on {c.st.tasks[p.task].key} (patch "
                          f"{p.id[:8]}, in review)", p.commit, env=coordgit.author_env(c.ident))
         if m.returncode:
             coordgit.run(c.repo, "merge", "--abort")
-            raise Fail(f"the patches in review of this task's dependencies conflict with each other: "
+            raise Fail(f"the patches in review this task builds on conflict with each other: "
                        f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
-        on.append(f"{c.st.tasks[dep].key} ({p.id[:8]})")
+        on.append(f"{c.st.tasks[p.task].key} ({p.id[:8]})")
     built = f", on top of the patches in review of {', '.join(on)}" if on else ""
     if args.from_:  # someone's unfinished work: carry on from it
         built += carry_on(c, t, args.from_)
@@ -727,8 +754,8 @@ def cmd_start(args):
     c.sync()
     print(f"You are on {branch}, created from {main}{built}. Work inside the zone: {', '.join(t.zone)}")
     if on:
-        print("Those patches aren't accepted yet: yours is reviewed once they are. If one is rejected, this task "
-              "waits for its dependency again.")
+        print("Those patches aren't accepted yet: don't wait for them. Yours is checked once they are; if one is "
+              "rejected, yours is too, and you build again on what replaces it.")
     if put_contract(c.repo, t):
         print(f"The task's contract is in {S.contract_dir(t.key)}/ ({', '.join(t.contract)}): your patch must pass "
               "it as it is. Legion writes it before every check, and git ignores it here.")
@@ -1057,7 +1084,8 @@ def cmd_propose(args):
         kind = "task.created"
     elif args.what == "policy":
         payload = {k: v for k, v in (("quorum", args.quorum), ("audit", args.audit), ("reads", args.reads),
-                                     ("window", int(args.window * 3600) if args.window is not None else None))
+                                     ("window", int(args.window * 3600) if args.window is not None else None),
+                                     ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None))
                    if v is not None}
         if not payload:
             raise Fail("say what to change: --quorum, --window, --audit or --reads")
@@ -1110,7 +1138,8 @@ def cmd_policy(args):
     change = {k: v for k, v in (("quorum", args.quorum), ("verifier_trust", args.verifier_trust),
                                 ("spot_check", args.spot_check), ("mode", args.mode), ("reads", args.reads),
                                 ("audit", args.audit),
-                                ("window", int(args.window * 3600) if args.window is not None else None))
+                                ("window", int(args.window * 3600) if args.window is not None else None),
+                                ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None))
               if v is not None}
     if change:
         c.require_integrator()
@@ -1123,7 +1152,8 @@ def cmd_policy(args):
                      f"{p['window'] / 3600:g} h after that, anyone may audit it, and two trusted owners who see it fail "
                      f"revert it; each node audits {p['audit']:.0%} of them. "
                      + (f"Verifications record what `{p['reads']}` says the check reads." if p["reads"] else
-                        "Verifications hold only for the exact tree (no `reads` command set)."))
+                        "Verifications hold only for the exact tree (no `reads` command set).")
+                     + f" Votes count among the trusted owners active in the last {p['vote_window'] / 3600:g} h.")
         return
     out(args, p, f"Verification: a patch is accepted without the integrator's check when {p['quorum']} trusted "
                  f"people verify it (trust {p['verifier_trust']} or more); the integrator still checks "
@@ -1222,6 +1252,29 @@ def unsaved(c: Ctx, t: S.Task) -> bool:
                    for x in published if coordgit.has_commit(c.repo, x))
 
 
+def built_on(c: Ctx, t: S.Task) -> list:
+    """The patches in review, of other tasks, that this branch contains: it was built on them."""
+    return [p for p in c.st.patches.values() if p.verdict is None and p.task != t.id and not c.st.doomed(p)
+            and coordgit.has_commit(c.repo, p.commit)
+            and coordgit.run(c.repo, "merge-base", "--is-ancestor", p.commit, "HEAD").returncode == 0]
+
+
+def blob(repo, rev: str, path: str) -> str:
+    """The file's content id at that commit ("" if it isn't there)."""
+    p = coordgit.run(repo, "rev-parse", "--verify", "-q", f"{rev}:{path}")
+    return p.stdout.decode().strip() if p.returncode == 0 else ""
+
+
+def brought(repo, main: str, patches) -> dict[str, set]:
+    """The files these patches change, and the contents each leaves them with."""
+    out = {}
+    for p in patches:
+        base = git(repo, "merge-base", main, p.commit)
+        for f in filter(None, git(repo, "diff", "--name-only", base, p.commit).splitlines()):
+            out.setdefault(f, set()).add(blob(repo, p.commit, f))
+    return out
+
+
 SAVE_HINT = ("You have commits on work/{tid} that nobody else can see: publish them with `python -m legion save "
              "{tid} --notes \"what's done, what's left\"`, or whoever takes the task next starts from zero.")
 
@@ -1234,18 +1287,19 @@ def cmd_submit(args):
             raise Fail(f"task {t.key} is already done", 3)
         if not c.holder_is_me(t.id):
             raise Fail(f"you don't hold the claim on {t.key}: claim it before submitting", 3)
-    waits = not c.st.deps_ok(t)  # prepared ahead: the integrator reviews it once its dependencies are in
     repo = c.repo
     coordgit.refresh_base(repo)
     main = coordgit.base_ref(repo)
     base = git(repo, "merge-base", "HEAD", main)
     files = [f for f in git(repo, "diff", "--name-only", base, "HEAD").splitlines() if f]
+    on = built_on(c, t)  # written ahead, on work in review: it's checked once that work is accepted
     if not args.no_check:
         if git(repo, "status", "--porcelain", "--untracked-files=no"):
             raise Fail("you have uncommitted changes: commit before submitting", 5)
         if not files:
             raise Fail(f"your branch changes nothing compared to {main}", 5)
-        outside = [f for f in files if not S.in_zone(f, t.zone)]
+        theirs = brought(repo, main, on)  # what those patches bring isn't this patch's change
+        outside = [f for f in files if not S.in_zone(f, t.zone) and blob(repo, "HEAD", f) not in theirs.get(f, ())]
         if outside:
             raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}", 5)
         keep_claim(c, t)  # the check can take minutes: start it with a fresh claim
@@ -1257,12 +1311,15 @@ def cmd_submit(args):
     mine = [p for p in c.st.patches_for(t.id) if p.author == c.me]
     branch = coordgit.patch_branch(repo, t.id, c.ident.short, len(mine) + 1)
     coordgit.publish_patch(repo, branch)
-    ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch)
+    ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch,
+                **({"on": [p.id for p in on]} if on else {}))
     c.sync()
-    out(args, {"patch": ev["id"], "branch": branch},
+    waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
+                          + [c.st.tasks[p.task].key for p in on])
+    out(args, {"patch": ev["id"], "branch": branch, "on": [p.id for p in on]},
         f"Patch {ev['id'][:8]} submitted for {t.key} (branch {branch}). "
-        + (f"It waits for {', '.join(c.st.tasks[d].key for d in t.deps if not c.st.done(d))} to be accepted; "
-           "then the integrator reviews it. " if waits else "")
+        + (f"It's built on work still in review ({', '.join(waits)}): it's checked once that is accepted. Don't "
+           "wait for it: whatever needs this task can be worked on now, on top of this patch. " if waits else "")
         + f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
         f"for the verdict: `context` will show it to you. {KEEP_GOING}")
 
@@ -1400,13 +1457,18 @@ def cmd_context(args):
         for t in talk:
             lines += [f"{t.key}:"] + notes_text(st, t.id)
     mine = sorted((p for p in st.patches.values() if p.author == c.me), key=lambda p: p.lamport)
+    first = verify_first(c)
+    if first:
+        lines += ["", "## Patches waiting for your check", first.strip()]
     lines += ["", "## Your patches"]
     for p in mine[-10:]:
         key = st.tasks[p.task].key if p.task in st.tasks else p.task
         reason = f": {p.reason.splitlines()[0][:200]}" if p.verdict == "rejected" and p.reason else ""
         fix = (f" -> its task is open: claim it (`claim {p.task}`) and fix it"
                if p.verdict == "rejected" and st.status(p.task, now) == "open" else "")
-        lines.append(f"- {p.id[:8]} {key}: {p.verdict or 'waiting for the integrator'}{reason}{fix}")
+        under = [st.tasks[st.patches[x].task].key for x in p.on if st.patches[x].verdict is None]
+        waits = f"waiting for {', '.join(under)} to be accepted (built on it)" if under else "waiting for its checks"
+        lines.append(f"- {p.id[:8]} {key}: {p.verdict or waits}{reason}{fix}")
     if not mine:
         lines.append("(none yet)")
     stuck = [t for t in st.tasks.values() if st.stalled(t.id)]
@@ -1667,6 +1729,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("--force", action="store_true", help="discard uncommitted changes")
     s.add_argument("--from", dest="from_", metavar="SAVE", help="build on someone's saved work on the task")
+    s.add_argument("--on", action="append", metavar="TASK", help="build on another task's work in review too "
+                   "(comma-separated keys or ids), when this one needs it and doesn't list it as a dependency")
     s.set_defaults(func=cmd_start)
 
     s = sub.add_parser("save", help="publish your unfinished work on a task, so whoever takes it next builds on it")
@@ -1750,6 +1814,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--goal", default="min", choices=["min", "max"])
     s.add_argument("--quorum", type=int)
     s.add_argument("--window", type=float, help="hours")
+    s.add_argument("--vote-window", type=float, help="hours since their last event that owners count as active for votes")
     s.add_argument("--audit", type=float)
     s.add_argument("--reads")
     s.set_defaults(func=cmd_propose)
@@ -1774,6 +1839,8 @@ def parser() -> argparse.ArgumentParser:
                    help="open: no integrator; trusted agents finalize on verifications, and challenges revert")
     s.add_argument("--window", type=float, help="open mode: hours an accepted patch can be challenged (default 24)")
     s.add_argument("--audit", type=float, help="open mode: share of accepted patches each node checks again")
+    s.add_argument("--vote-window", type=float, help="open mode: hours since their last event that trusted owners "
+                   "count as active for votes (default a week; 1 lets whoever is here decide)")
     s.add_argument("--reads", help="the command that lists the files an acceptance command reads, e.g. "
                                    "'python check.py --reads' (verifications then survive changes elsewhere)")
     s.add_argument("--json", action="store_true")

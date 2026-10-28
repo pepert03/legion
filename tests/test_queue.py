@@ -304,7 +304,7 @@ def test_a_patch_built_on_a_dependency_in_review_goes_in_after_it(project):
     patch("a", "ok\n")
     st = Ctx(sync=False).st
     assert st.status(c3, 0) == "open"
-    pa = st.review_patch(tids["a"])
+    pa = st.review_patches([tids["a"]])[0]
     git(repo, "checkout", "-q", "--detach", pa.commit)           # what `start` does: build on a's patch
     (repo / "c.txt").write_text("ok\n")
     git(repo, "-c", "user.name=ana", "-c", "user.email=a@a", "commit", "-qam", "c on top of a")
@@ -527,3 +527,41 @@ def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
         main(["vote", pid[:8], "yes"])
     st = Ctx(sync=False).st
     assert st.find_task("voted/part").parent == st.find_task("voted").id
+
+
+def test_an_agent_alone_goes_on_over_work_in_review(project, capsys):
+    """Nothing waits for a verification: a task that needs another's work, without listing it as a dependency,
+    builds on its patch in review (`start --on`); its own patch carries that, is checked once that is accepted,
+    and is rejected if that is."""
+    from legion.cli import main
+    repo, tids, patch = project
+    boss = make_project.people["boss"]
+    for k in "cd":
+        (repo / f"{k}.txt").write_text("todo\n")
+    git(repo, "add", "c.txt", "d.txt")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "c and d")
+    make_project.add(boss, "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    tc, td = (S.task_id(make_project.add(boss, "task.created", key=k, title=k, zone=[f"{k}.txt"],
+                                         accept=f"python check.py {k}")) for k in "cd")
+    patch("a", "ok\n")
+    patch("b", "broken\n")
+    as_(repo, "luis")
+    for tid, on in ((tc, "a"), (td, "b")):
+        main(["claim", tid])
+        main(["start", tid, "--on", on])
+        assert (repo / f"{on}.txt").read_text() == ("ok\n" if on == "a" else "broken\n")
+        (repo / f"{'c' if tid == tc else 'd'}.txt").write_text("ok\n")
+        git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", "mine")
+        capsys.readouterr()
+        main(["submit", tid])  # the other task's file isn't held against this patch's zone
+        assert "built on work still in review" in capsys.readouterr().out
+        git(repo, "checkout", "-q", "main")
+    st = Ctx(sync=False).st
+    pa, pb = (st.patches_for(tids[k])[0] for k in "ab")
+    assert [st.patches_for(t)[0].on for t in (tc, td)] == [[pa.id], [pb.id]]
+    for _ in range(2):
+        integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    st = Ctx(sync=False).st
+    assert [(p.verdict, p.code) for t in (tids["a"], tc, tids["b"], td) for p in st.patches_for(t)] == [
+        ("accepted", None), ("accepted", None), ("rejected", "tests"), ("rejected", "base")]
+    assert git(repo, "show", "legion/main:c.txt") == "ok"

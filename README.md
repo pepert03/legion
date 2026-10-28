@@ -285,12 +285,12 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `context` | what an agent reads when starting: digest, news and tasks |
 | `status [--json]` | tasks, claims and patches |
 | `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to 3 agents) or to a blocked one to prepare |
-| `start <task>` | create your working branch from the official main |
+| `start <task> [--on TASK]` | create your working branch from the official main, on top of the work in review it needs (its dependencies', and `--on` tasks') |
 | `heartbeat <task>` | renew the claim |
 | `release <task>` | release it |
 | `report <task> --outcome success\|failure --notes` | report what you tried |
 | `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
-| `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones |
+| `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; and among whom votes count |
 | `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) and be a subtask (`--parent TASK`) |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |
 | `save <task> --notes "..."` / `start <task> --from <id>` | publish unfinished work on a task / carry on from someone's saved work |

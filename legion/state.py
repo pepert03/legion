@@ -50,19 +50,24 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
           # mode "open": no integrator. Any trusted node finalizes what verifications support, at once, and for a
           # `window` of seconds afterwards any accepted patch can be challenged and reverted; nodes audit
           # accepted patches at random (`audit`). `reads`: the project's command that lists the files an
-          # acceptance command reads, so a verification stays valid while main changes elsewhere.
-          "mode": "integrator", "window": 86400, "audit": 0.25, "reads": ""}
+          # acceptance command reads, so a verification stays valid while main changes elsewhere. `vote_window`:
+          # seconds since their last event that trusted owners count as active for votes (see PROPOSABLE).
+          "mode": "integrator", "window": 86400, "audit": 0.25, "reads": "", "vote_window": 7 * 86400}
 # What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
 # Rejections any node can confirm with git alone; the others need failing verifications behind them.
-PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout"}
+PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout", "base"}
 # In the open mode, what only founders publish can also pass by a vote: a trusted agent proposes it, and it applies
-# once enough trusted owners active in the last ACTIVE_DAYS say yes (each owner counts once): a majority, two
-# thirds for the policy, and never fewer than MIN_YES (or all the active ones, if they are fewer). While fewer than
-# FOUNDERS_UNTIL trusted owners aren't founders, a founder's no blocks it. It lapses after ACTIVE_DAYS.
+# once enough of the trusted owners active in the policy's vote_window say yes (each owner counts once): a
+# majority, and never fewer than MIN_YES (or all the active ones, if they are fewer). The window is a week unless
+# the policy shortens it (an hour: who is away doesn't hold the others back, and an agent working alone can add
+# the tasks it needs); proposals are then counted again as people come and go. The policy itself always needs two
+# thirds of those active in the last ACTIVE_DAYS, so nobody changes the rules while the others sleep. While fewer
+# than FOUNDERS_UNTIL trusted owners aren't founders, a founder's no blocks it. A proposal lapses after ACTIVE_DAYS.
 PROPOSABLE = {"task.created", "project.policy", "project.described", "digest.published"}
 ACTIVE_DAYS, MIN_YES, FOUNDERS_UNTIL = 7, 3, 5
+MAX_ON = 50  # patches in review one patch may be built on
 TRUSTED_AFTER = 2  # accepted patches, and never a false verification, to be trusted without being a founder
 
 
@@ -152,6 +157,7 @@ class Patch:
     accepted_ts: float = 0.0  # when it was accepted: the open mode's challenge window counts from here
     base_tree: str | None = None  # the trees the verdict was reached on: they tell a true verification from a
     tree: str | None = None       # false one
+    on: list = field(default_factory=list)  # patches in review it was built on: it waits for them to be accepted
 
 
 def task_id(ev: dict) -> str:
@@ -311,15 +317,24 @@ class State:
             return self.backed(p, ev.get("verified_by"), "fail", tree=p.tree)
         return None
 
-    def active_owners(self, now: float) -> set[str]:
-        """Trusted owners with an event in the last ACTIVE_DAYS: who a vote is counted among."""
-        return {owner(self.names[a]) for a, ts in self.last_seen.items()
-                if now - ts <= ACTIVE_DAYS * 86400 and self.trusted(a)}
+    def active_owners(self, now: float, kind: str = "project.policy") -> set[str]:
+        """Trusted owners with an event recently: who a vote on this kind is counted among (see ACTIVE_NOW)."""
+        window = ACTIVE_DAYS * 86400 if kind == "project.policy" else self.policy["vote_window"]
+        return {owner(self.names[a]) for a, ts in self.last_seen.items() if now - ts <= window and self.trusted(a)}
 
     def votes_needed(self, kind: str, now: float) -> int:
-        active = len(self.active_owners(now))
+        active = len(self.active_owners(now, kind))
         share = active * 2 // 3 + (1 if active * 2 % 3 else 0) if kind == "project.policy" else active // 2 + 1
         return max(share, min(MIN_YES, active), 1)
+
+    def recount(self, now: float) -> None:
+        """Count the open proposals again, with a short vote window: those voting on them may have gone away
+        since. (With a week's, a proposal is counted on its votes alone, as it always was.)"""
+        if self.policy["vote_window"] >= ACTIVE_DAYS * 86400:
+            return
+        for pid, prop in list(self.proposals.items()):
+            if prop["status"] == "open" and now - prop["ev"]["ts"] <= ACTIVE_DAYS * 86400                     and sum(prop["votes"].values()) >= self.votes_needed(prop["ev"]["kind"], now):
+                self._tally(pid, now)
 
     def _proposal(self, ev: dict) -> str | None:
         if self.policy["mode"] != "open":
@@ -364,7 +379,7 @@ class State:
         prop = self.proposals[pid]
         kind = prop["ev"]["kind"]
         founders = {owner(self.names.get(a, "")) for a in self.integrators}
-        others = self.active_owners(now) - founders
+        others = self.active_owners(now) - founders  # the founders' word weighs while the project is young
         if len(others) < FOUNDERS_UNTIL and any(prop["votes"].get(f) is False for f in founders):
             prop["status"], prop["reason"] = "vetoed", "a founder said no"
             return None
@@ -457,7 +472,7 @@ class State:
     def competitive_for(self, author: str) -> list[Task]:
         """Competitive tasks this agent hasn't exhausted, the ones with no result yet first."""
         ts = [t for t in self.tasks.values() if t.mode == "competitive" and not t.cancelled
-              and self.deps_ok(t) and self.attempts_by(t.id, author) < COMPETITIVE_TRIES
+              and (self.deps_ok(t) or self.deps_in_review(t)) and self.attempts_by(t.id, author) < COMPETITIVE_TRIES
               and not any(p.author == author and p.verdict is None for p in self.patches_for(t.id))]
         return sorted(ts, key=lambda t: (self.best(t.id) is not None, self.attempts_by(t.id, author), t.lamport))
 
@@ -522,15 +537,38 @@ class State:
         return all(self.done(d) for d in task.deps)
 
     def deps_in_review(self, task: Task) -> list[str]:
-        """The dependencies not done yet, if every one of them has a patch waiting for its verdict: the task can
-        be worked on now, on top of those patches (empty if some dependency has none)."""
+        """The dependencies not done yet, if every one of them is in review: the task can be worked on now, on
+        top of their work (empty if some dependency isn't in review)."""
         pending = [d for d in task.deps if not self.done(d)]
-        return pending if pending and all(self.patches_for(d, None) for d in pending) else []
+        return pending if pending and all(self.in_review(d) is not None for d in pending) else []
 
-    def review_patch(self, tid: str):
-        """The patch of a task in review to build on: its latest one waiting for a verdict."""
-        waiting = self.patches_for(tid, None)
-        return waiting[-1] if waiting else None
+    def in_review(self, tid: str) -> list | None:
+        """What a task waiting only for verdicts would bring, to build on before anyone verifies it: its latest
+        patch in review, or, split by a sketch, those of its subtasks (each done or in review). [] if it's done,
+        None if some of it isn't written yet. Nothing ever waits for a verification to go on working."""
+        if self.done(tid):
+            return []
+        waiting = [p for p in self.patches_for(tid, None) if not self.doomed(p)]
+        if waiting:
+            return [waiting[-1]]
+        k = self.active_sketch(tid)
+        if k is None or not k.child_ids:
+            return None
+        parts = [self.in_review(c) for c in k.child_ids]
+        return None if any(x is None for x in parts) else [p for x in parts for p in x]
+
+    def review_patches(self, tids) -> list:
+        """The patches in review to build on, to have what these tasks bring, oldest first."""
+        found = {p.id: p for t in tids for p in self.in_review(t) or []}
+        return sorted(found.values(), key=lambda p: (p.lamport, p.id))
+
+    def ready(self, p: Patch) -> bool:
+        """Its dependencies are done and the patches it was built on accepted: it can be checked now."""
+        return self.deps_ok(self.tasks[p.task]) and all(self.patches[x].verdict == "accepted" for x in p.on)
+
+    def doomed(self, p: Patch):
+        """A patch it was built on was rejected: it can't go in as it is (that patch, or None)."""
+        return next((self.patches[x] for x in p.on if self.patches[x].verdict == "rejected"), None)
 
     def status(self, tid: str, now: float) -> str:
         task = self.tasks[tid]
@@ -674,7 +712,7 @@ class State:
             policy.update({k: ev[k] for k in ("mode", "reads") if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
                                       ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
-                                      ("audit", (int, float), 0, 1)):
+                                      ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400)):
                 if key in ev:
                     v = ev[key]
                     if not isinstance(v, kind) or isinstance(v, bool) or not lo <= v <= hi:
@@ -786,8 +824,12 @@ class State:
                 return "missing commit or branch"
             if not valid_branch(ev["branch"]):
                 return "a patch branch must be under legion/ or refs/legion/patches/"
+            on = ev.get("on") or []
+            if not isinstance(on, list) or len(on) > MAX_ON or not all(isinstance(x, str) and x in self.patches
+                                                                       for x in on):
+                return f"`on` lists at most {MAX_ON} patches sent before this one"
             self.patches[ev["id"]] = Patch(ev["id"], task.id, ev["author"], ev["name"], ev["commit"],
-                                           ev["branch"], ev["lamport"], ts=ev["ts"])
+                                           ev["branch"], ev["lamport"], ts=ev["ts"], on=on)
         elif t in ("patch.accepted", "patch.rejected"):
             p = self.patches.get(ev.get("patch"))
             if p is None:
@@ -982,7 +1024,7 @@ class State:
         """Top-level tasks with work waiting for an integrator, and how much."""
         work = defaultdict(int)
         for p in self.patches.values():
-            if p.verdict is None and self.deps_ok(self.tasks[p.task]):
+            if p.verdict is None and (self.ready(p) or self.doomed(p)):
                 work[self.root_of(p.task)] += 1
         for k in self.sketches.values():
             if k.verdict is None:
@@ -1033,4 +1075,6 @@ def build(events: list[dict], trusted=None) -> State:
             continue
         st.events.append(ev)
         st.max_lamport = max(st.max_lamport, ev["lamport"])
+        if st.proposals and ev["type"] not in ("proposal.made", "proposal.voted"):
+            st.recount(ev["ts"])
     return st

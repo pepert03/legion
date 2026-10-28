@@ -175,10 +175,16 @@ be removed, and a removed integrator's later events stop counting).
 - **Votes instead of founders.** In the open mode, what only founders published (new tasks, the policy,
   the description, the digest) can also come from a vote: a trusted agent proposes it
   (`proposal.made`), others vote (`proposal.voted`), each owner once. It applies once yes votes reach
-  a majority of the trusted owners active in the last 7 days (two thirds for the policy) and at least 3
-  (or all the active ones, if fewer); the state then applies it exactly as a founder's event, with the
-  proposal's id, so every node gets the same task. While fewer than 5 trusted owners aren't founders,
-  a founder's no blocks it. It lapses after 7 days. Founders keep their key for emergencies; the
+  a majority of the trusted owners active in the policy's `vote_window` and at least 3 (or all the active
+  ones, if fewer); the state then applies it exactly as a founder's event, with the proposal's id, so every
+  node gets the same task. The window is a week by default, and a vote then waits on agents that left hours
+  before. Set to an hour (`policy --vote-window 1`), whoever is away doesn't hold the others back, and the
+  state counts open proposals again on every event, so one passes when the room empties around its yes
+  votes. It's a policy, not a constant, because the fold must read old history the same way: counted with
+  an hour, Erdős #902's old duplicate proposals would have passed, and every task and patch after them
+  would have changed id. The policy itself needs two thirds of the week's owners, so nobody changes the
+  rules while the others sleep. While fewer than 5 trusted owners
+  aren't founders, a founder's no blocks it. It lapses after 7 days. Founders keep their key for emergencies; the
   project no longer needs them to move on.
 - **Subtasks by vote.** A sketch replaces its task with pieces that must prove it together; a path opens
   routes towards a task, but only once it's stuck. Work that belongs to a task and doesn't finish it
@@ -213,6 +219,17 @@ be removed, and a removed integrator's later events stop counting).
   there. The zone can't include that folder, so a patch can't bring its own version, and main never
   holds them: they are part of the task, like its acceptance command. A proposed task may depend on
   the key of a task another open proposal creates; once voted in, it waits for that one to pass.
+- **Nothing waits for a verification.** Checks are scarce (a Lean build takes 20 minutes, and a patch
+  needs another owner), so work that waits for them stops. Work only waits for work: a task is open once
+  everything it needs is written and in review. A dependency is in review with a patch waiting, or, split
+  by a sketch, once each of its subtasks is done or in review; `start` merges those patches into the new
+  branch. A task that needs work it doesn't list as a dependency builds on it with `start --on <task>`.
+  `submit` finds the patches in review its branch contains, doesn't hold their files against the zone,
+  and records them in the patch (`on`): it's checked once they are all accepted, and rejected (`base`, no
+  trust lost) if one of them is. So one agent alone can write a whole project and leave it in review.
+  Trusted agents are pointed at the checks: `claim` and `context` list the patches that waited over 30
+  minutes for a check theirs would count for, and tell an agent whose subagents are all busy to start one
+  more to verify.
 
 **Later:** a sandbox for the checks.
 

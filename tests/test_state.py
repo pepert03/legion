@@ -488,7 +488,7 @@ def test_a_task_opens_while_its_dependencies_are_in_review():
     pa = log.add(ANA, "patch.submitted", task=a, commit="c", branch="legion/t/a-1")
     st = log.state()
     assert st.status(b, 1001) == "open" and b in [t.id for t in st.claimable(1001)]
-    assert st.review_patch(a).id == pa["id"]
+    assert [x.id for x in st.review_patches([a])] == [pa["id"]]
     log.add(BEA, "task.claimed", task=b, ttl=600)
     log.add(BEA, "patch.submitted", task=b, commit="d", branch="legion/t/b-1")
     assert log.state().status(b, 1001) == "blocked"            # b's own patch waits for a's verdict
@@ -655,3 +655,70 @@ def test_the_policy_needs_two_thirds_and_a_founder_can_veto_early():
     p2 = small.add(few[0], "proposal.made", kind="project.described", payload={"description": "x"})
     small.add(BOSS, "proposal.voted", proposal=p2["id"], yes=False)
     assert small.state().proposals[p2["id"]]["status"] == "vetoed"
+
+
+def test_a_task_split_by_a_sketch_is_in_review_once_its_subtasks_are():
+    log, tid = sketch_project()
+    after = S.task_id(log.add(BOSS, "task.created", key="after", title="After", zone=["c"], accept="true", deps=[tid]))
+    k = log.add(ANA, "sketch.proposed", task=tid, commit="c", branch="legion/big/s-1",
+                children=[CHILD, dict(CHILD, key="b", zone=["src/parts/b.py"], deps=["a"])])
+    log.add(BOSS, "sketch.accepted", sketch=k["id"], merge_commit="m1")
+    a = S.task_id(log.add(BOSS, "task.created", key="big/a", title="A", zone=["src/parts/a.py"],
+                          accept="x", parent=tid, sketch=k["id"]))
+    b = S.task_id(log.add(BOSS, "task.created", key="big/b", title="B", zone=["src/parts/b.py"],
+                          accept="x", parent=tid, sketch=k["id"], deps=[a]))
+    pa = log.add(ANA, "patch.submitted", task=a, commit="ca", branch="legion/big/a-1")
+    st = log.state()
+    assert st.status(b, 1001) == "open" and st.status(after, 1001) == "blocked"  # b builds on a; after needs b too
+    pb = log.add(ANA, "patch.submitted", task=b, commit="cb", branch="legion/big/b-1", on=[pa["id"]])
+    st = log.state()
+    assert st.status(after, 1001) == "open"                                       # all of big is written: go on
+    assert [p.id for p in st.review_patches([tid])] == [pa["id"], pb["id"]]
+    assert not st.ready(st.patches[pb["id"]])                                     # b waits for a's verdict
+    log.add(BOSS, "patch.accepted", patch=pa["id"], merge_commit="ma")
+    st = log.state()
+    assert st.ready(st.patches[pb["id"]])
+
+
+def test_a_patch_built_on_one_that_is_rejected_is_doomed():
+    log, a = project()
+    b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true"))
+    pa = log.add(ANA, "patch.submitted", task=a, commit="c", branch="legion/t/a-1")
+    pb = log.add(BEA, "patch.submitted", task=b, commit="d", branch="legion/t/b-1", on=[pa["id"]])
+    log.add(BEA, "patch.submitted", task=b, commit="e", branch="legion/t/b-2", on=["nope"])
+    st = log.state()
+    assert st.ignored[-1][1] == f"`on` lists at most {S.MAX_ON} patches sent before this one"
+    assert st.status(b, 1001) == "review" and not st.ready(st.patches[pb["id"]]) and not st.doomed(st.patches[pb["id"]])
+    log.add(BOSS, "patch.rejected", patch=pa["id"], reason="tests fail", code="tests")
+    st = log.state()
+    assert st.doomed(st.patches[pb["id"]]).id == pa["id"] and st.in_review(b) is None
+
+
+def test_with_a_short_vote_window_tasks_pass_among_those_here_and_the_policy_still_needs_the_week():
+    for window in (None, 3600):
+        log, crowd = trusted_crowd(4)             # 5 active owners at ts 1000: a task needs 3 yes
+        if window:
+            log.add(BOSS, "project.policy", vote_window=window)
+        later = 1000.0 + 3600 + 60                # an hour on, only crowd[0] is still around
+        spec = dict(key="new", title="New", zone=["n"], accept="true")
+        prop = log.add(crowd[0], "proposal.made", kind="task.created", payload=spec, ts=900.0)
+        assert log.state().proposals[prop["id"]]["status"] == "open"
+        log.add(crowd[0], "task.claimed", task=log.state().find_task("a").id, ttl=600, ts=later)
+        st = log.state()
+        # A week's window, as before: the history of a project reads the same. An hour's: counted again, it passes.
+        assert bool(st.find_task("new")) == bool(window)
+        assert st.votes_needed("task.created", later) == (1 if window else 3)
+        pol = log.add(crowd[0], "proposal.made", kind="project.policy", payload={"window": 7200}, ts=later)
+        assert log.state().proposals[pol["id"]]["status"] == "open"           # the rules need the week's owners
+
+
+def test_a_trusted_agent_is_sent_to_check_patches_that_waited_too_long():
+    from legion import integrator
+    log, tid = open_project()
+    p = log.add(CEL, "patch.submitted", task=tid, commit="c", branch="legion/t/c-1")
+    st, late = log.state(), 1000.0 + integrator.WAITED + 1
+    assert integrator.waiting_for(st, ANA.author, "ana", 1001) == []            # it has only just arrived
+    assert [x.id for x in integrator.waiting_for(st, ANA.author, "ana", late)] == [p["id"]]
+    assert integrator.waiting_for(st, CEL.author, "cel", late) == []            # CEL's check wouldn't count
+    log.add(BEA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+    assert integrator.waiting_for(log.state(), ANA.author, "ana", late) == []   # quorum 1: checked enough

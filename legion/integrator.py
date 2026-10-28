@@ -291,8 +291,12 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
     st, task = c.st, c.st.tasks[p.task]
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
-    if not st.deps_ok(task):
-        return None  # written ahead, while the task was blocked: it waits for its dependencies
+    gone = st.doomed(p)
+    if gone:
+        return reject(f"it was built on patch {gone.id[:8]} ({st.tasks[gone.task].key}), rejected since: build on "
+                      "what replaces it (`start` again) and submit again", "base")
+    if not st.ready(p):
+        return None  # written ahead, on work still in review: it waits for its dependencies and that work
     prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})",
                              onto=onto)
     missing = isinstance(prepared, tuple) and prepared[0] == "rejected" and prepared[1].get("code") == "missing"
@@ -735,6 +739,26 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
 
 
 CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
+WAITED = 1800  # a patch waiting this long for checks is checked before anyone takes new work
+
+
+def waiting_for(st: S.State, me: str, name: str, now: float) -> list[S.Patch]:
+    """Patches ready to check that have waited over WAITED for verifications, and that this agent's check would
+    count for (trusted, another owner's, not enough checks done or under way): its next job, or a subagent's.
+    Work never waits for them, but nothing is finished until they are checked."""
+    if st.policy["mode"] != "open" or not st.trusted(me):
+        return []
+    mine, need = trust.owner_of(name), max(1, st.policy["quorum"])
+    ok, checking = trusted_verifiers(st, now), checks_under_way(st, now, me)
+    out = []
+    for p in queue_order(st):
+        if now - p.ts < WAITED or st.doomed(p) or trust.owner_of(p.name) == mine:
+            continue
+        have = {trust.owner_of(v["name"]) for v in st.verifications.get(p.id, [])
+                if v["outcome"] == "pass" and v["author"] in ok}
+        if mine not in have and len(have | checking.get(p.id, set())) < need:
+            out.append(p)
+    return out
 
 
 def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
@@ -949,8 +973,8 @@ def review_sketches(c: Ctx, log, keep_branches: bool, mine) -> int:
 def queue_order(st: S.State) -> list[S.Patch]:
     """The patches waiting for a verdict, in the order the queue takes them: every node works it out the same
     way, which is what lets verifiers check ahead of the integrator. The one that unblocks the most tasks
-    first, then the oldest; patches written ahead of their dependencies wait."""
-    return sorted((p for p in st.patches.values() if p.verdict is None and st.deps_ok(st.tasks[p.task])),
+    first, then the oldest; patches written ahead, on work still in review, wait for it."""
+    return sorted((p for p in st.patches.values() if p.verdict is None and (st.ready(p) or st.doomed(p))),
                   key=lambda p: (-st.unblocks(p.task), p.lamport, p.id))
 
 

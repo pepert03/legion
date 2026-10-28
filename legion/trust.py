@@ -18,7 +18,7 @@ GOOD = {"accepted": 1.0, "competitive": 1.0, "sketch_resolved": 1.5, "verified":
 # How much each kind of rejection says about the agent. A conflict or someone merging first is
 # mostly bad luck; failing tests or leaving the zone is not.
 BAD = {"tests": 1.0, "zone": 1.5, "scaffold": 0.8, "invalid": 0.8, "metric": 0.5, "empty": 0.5,
-       "missing": 0.3, "deps": 0.2, "conflict": 0.15, "done": 0.0, "no_gain": 0.0,
+       "missing": 0.3, "deps": 0.2, "conflict": 0.15, "done": 0.0, "base": 0.0, "no_gain": 0.0,
        "sketch_failed": 1.0, "abandoned": 0.4, "timeout": 0.1, "reverted": 4.0,
        # A verification the integrator's own check contradicted: a false pass would have let a broken patch in.
        "false_pass": 4.0, "false_fail": 1.0}
@@ -27,7 +27,8 @@ LABEL = {"accepted": "patch accepted", "competitive": "improved a competitive ta
          "zone": "touched files outside its zone", "scaffold": "sketch without subtask tests",
          "invalid": "invalid sketch", "metric": "metric did not run", "empty": "empty patch",
          "missing": "patch not found", "deps": "submitted before its dependencies",
-         "conflict": "conflict with main", "done": "task already done", "no_gain": "did not beat the best",
+         "conflict": "conflict with main", "done": "task already done",
+         "base": "built on a patch that was then rejected", "no_gain": "did not beat the best",
          "sketch_failed": "split a task whose parent then failed", "abandoned": "let a claim expire",
          "verified": "verified a patch correctly", "timeout": "its check ran out of time twice",
          "reverted": "an accepted patch of its was proved wrong and reverted", "false_pass": "verified as passing a patch that fails",
