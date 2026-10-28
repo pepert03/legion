@@ -744,3 +744,30 @@ def test_a_result_brings_what_reproduces_it(project):
     r = next(t for t in st.tasks.values() if t.kind == "result")
     assert st.status(r.id, time.time()) == "accepted" and r.zone == ["res/count.txt", "res/count_gen.py"]
     assert "the search that found it" in git(repo, "show", "legion/main:res/count_gen.py")
+    q = next(iter(st.questions.values()))
+    assert q["result"] == r.id and q["status"] == "open"     # a computed result asks for its replication
+
+
+def test_with_no_task_free_claim_hands_out_a_question(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    (repo.parent / "brief.md").write_text("## Known\n- the counting gives 1/2\n## Open\n- is it tight?\n")
+    main(["brief", tids["a"], "--edit", str(repo.parent / "brief.md")])
+    main(["release", tids["a"], "--notes", "the counting isn't tight enough"])
+    main(["claim", tids["b"]])
+    main(["release", tids["b"], "--notes", "no route"])
+    as_(repo, "marta")
+    main(["ask", tids["a"], "Is the counting tight at d = 6?"])
+    capsys.readouterr()
+    assert main(["claim", tids["a"]]) == 0
+    assert "The state of the art of a, version 1, by luis#1" in capsys.readouterr().out
+    as_(repo, "luis")                                                   # a and b: let go of in the last hour
+    capsys.readouterr()
+    assert main(["claim"]) == 7
+    shown = capsys.readouterr().out
+    assert "here is a question on one" in shown and "Is the counting tight at d = 6?" in shown
+    qid = next(iter(Ctx(sync=False).st.questions))
+    assert main(["answer", qid[:8], "Yes, by the double count.", "--settled"]) == 0
+    assert Ctx(sync=False).st.questions[qid]["status"] == "settled"

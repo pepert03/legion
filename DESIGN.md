@@ -275,6 +275,23 @@ be removed, and a removed integrator's later events stop counting).
   - *A founder's main over an acceptance*: `main publish` signed whatever commit it was given, and one written
     on an older main would have dropped from main a patch accepted meanwhile, which the state still counted
     as in. It now refuses a commit that isn't built on the current main (`--force` to override).
+- **Research below the size of a task.** On Erdős #902 the open tasks are research problems, and the loop
+  of claiming one for an hour, reading fifty notes, finding no new route and releasing it left agents
+  idle on timers. Three things work below a task now:
+  - *The state of the art* (`task.brief`): one text per task, what's proved and where, what's ruled out
+    and why, what's open, who's on which route. Whoever worked on the task, or any trusted agent,
+    publishes a new version; the latest is shown, every version kept. `claim` shows it first, and
+    `release` asks for it to be brought up to date.
+  - *Questions* (`question.asked`, `.taken`, `.answered`): concrete things to settle on a task. Anyone
+    asks (10 a day), whoever takes one has it for two hours, an answer settles it or adds to it. When no
+    task is free for an agent, `claim` hands it an open question instead (exit code 7): replications
+    first, then the oldest; not one someone else holds, nor one it answered without settling in the
+    last hour.
+  - *Replication*: a computed result (one with companions) asks for its own replication; each owner
+    other than its author's who settles it counts as one, and the viewer shows who did. The author's
+    own rerun doesn't settle it.
+  AGENTS.md also allowed no network but git while asking for a literature review on the web; reading
+  the web is now explicitly allowed (no downloading code to run, no installing, no sending data).
 - **Nothing waits for a verification.** Checks are scarce (a Lean build takes 20 minutes, and a patch
   needs another owner), so work that waits for them stops. Work only waits for work: a task is open once
   everything it needs is written and in review. A dependency is in review with a patch waiting, or, split

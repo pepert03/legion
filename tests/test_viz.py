@@ -199,3 +199,18 @@ def test_a_result_is_drawn_under_its_task():
     assert (r["parent"], r["status"], r["key"]) == (tid, "review", "a/lemma")
     assert [e["type"] for e in viz.hub(evs, None)["chat"]] == ["result.submitted"]
     assert [e["type"] for e in viz.history(evs, r["id"], None)] == ["result.submitted"]  # its own window has it
+
+
+def test_a_result_shows_who_replicated_it():
+    evs, tid = project_events()
+    evs += [E.create(BOSS, "project.policy", 4, results_dir="R", results_check="check {file}"),
+            E.create(ANA, "result.submitted", 5, task=tid, key="g", title="g", files=["R/G.lean"], extra=["R/g.py"],
+                     commit="c", branch=f"legion/{tid}/result-ana-1")]
+    rid = "t-" + evs[-1]["id"][:8]
+    evs.append(E.create(ANA, "question.asked", 6, task=tid, result=rid, text="Replicate g"))
+    evs.append(E.create(BOSS, "question.answered", 7, task=tid, question=evs[-1]["id"], text="same", settled=True))
+    snap = viz.snapshot(evs, None)
+    r = next(t for t in snap["tasks"] if t["id"] == rid)
+    assert r["replicated"] == ["boss"]
+    assert [e["type"] for e in viz.hub(evs, None)["chat"]][-2:] == ["question.asked", "question.answered"]
+    assert {"question.asked", "question.answered"} <= {e["type"] for e in viz.history(evs, tid, None)}

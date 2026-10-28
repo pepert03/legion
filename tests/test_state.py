@@ -878,3 +878,49 @@ def test_a_result_carries_companions_unchecked():
     rt = st.tasks[S.task_id(ev)]
     assert rt.zone == ["Results/G32.lean", "Results/g32_cnf.py", "Results/g32.drat"]
     assert rt.accept == "lake build Results.G32"                                        # only the checked file
+
+
+def test_a_task_keeps_its_state_of_the_art_and_every_version():
+    log, tid = project()
+    log.add(CEL, "task.brief", task=tid, text="## Known\n- nothing")             # never worked on it
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    first = log.add(ANA, "task.brief", task=tid, text="## Known\n- the counting gives 1/2")
+    log.add(BOSS, "task.brief", task=tid, text="## Known\n- 1/2, and 8d+8 is tight", base=first["id"])
+    st = log.state()
+    assert st.ignored[-1][1].startswith("only someone who works on the task")
+    assert [b["name"] for b in st.briefs[tid]] == ["ana", "boss"] and "tight" in st.brief(tid)["text"]
+
+
+def test_questions_are_asked_taken_and_settled():
+    log, tid = project()
+    q = log.add(ANA, "question.asked", task=tid, text="Is the counting tight at d = 6?")
+    log.add(BEA, "question.taken", task=tid, question=q["id"])
+    st = log.state()
+    assert st.question_for(CEL.author, "cel", 1001) is None                       # bea has it right now
+    assert st.question_for(CEL.author, "cel", 1000 + S.QUESTION_TTL + 1)["ev"]["id"] == q["id"]
+    log.add(BEA, "question.answered", task=tid, question=q["id"], text="Not at 57 vertices: a host fails it.")
+    st = log.state()
+    assert st.questions[q["id"]]["status"] == "open"                              # a step, not the answer
+    assert st.question_for(BEA.author, "bea", 1001) is None                       # it tried just now
+    log.add(CEL, "question.answered", task=tid, question=q["id"], text="Yes, by the double count.", settled=True)
+    st = log.state()
+    assert st.questions[q["id"]]["status"] == "settled" and st.question_for(DAN.author, "dan", 1001) is None
+
+
+def test_a_computed_result_is_replicated_by_other_owners_only():
+    log, tid = project(key="upper")
+    log.add(BOSS, "project.policy", results_dir="R", results_check="check {file}")
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    r = log.add(ANA, "result.submitted", task=tid, key="g32", title="g(3,2) = 27", files=["R/G.lean"],
+                extra=["R/gen.py"], commit="c", branch=f"refs/legion/patches/{tid}/result-ana-1")
+    rid = S.task_id(r)
+    q = log.add(ANA, "question.asked", task=tid, result=rid, text="Replicate it")
+    other = log.add(ANA, "question.asked", task=tid, text="Something else")
+    st = log.state()
+    assert st.question_for(BEA.author, "bea", 1001)["ev"]["id"] == q["id"]       # replications first
+    assert st.question_for(Identity.generate("ana#2").author, "ana#2", 1001)["ev"]["id"] == other["id"]  # not ana's
+    log.add(ANA, "question.answered", task=tid, question=q["id"], text="reran: UNSAT at 26", settled=True)
+    assert log.state().questions[q["id"]]["status"] == "open" and log.state().replications(rid) == []
+    log.add(BEA, "question.answered", task=tid, question=q["id"], text="my own encoding: UNSAT at 26", settled=True)
+    st = log.state()
+    assert st.questions[q["id"]]["status"] == "settled" and st.replications(rid) == ["bea"]

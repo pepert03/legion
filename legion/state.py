@@ -38,6 +38,15 @@ MAX_SHARED = 3
 # An agent that let a task go (released it, or reported it failing) isn't handed it again by claim for COOLDOWN
 # seconds: it gets something else, or goes to the hub to rethink, instead of hitting the same wall again.
 COOLDOWN = 3600
+# Research, below the size of a task. A task's state of the art (task.brief) is one text that whoever works on it
+# keeps current: what's proved and where, what's ruled out and why, what's open, who's on which route. Questions
+# (question.asked) are concrete things to settle on a task, a computation, a lemma, a reference, or replicating a
+# computed result; anyone may ask, at most MAX_QUESTIONS_PER_DAY a day. Whoever takes one (question.taken) has it
+# for QUESTION_TTL; an answer (question.answered) settles it, or adds to it and leaves it open. claim hands questions
+# out when an agent has no task with a new route. A computed result asks for its own replication, and each owner
+# other than its author's that settles it counts as one replication.
+MAX_BRIEF, MAX_QUESTION = 6000, 1000
+MAX_QUESTIONS_PER_DAY, QUESTION_TTL = 10, 7200
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
 # working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
 MAX_TASK_NOTES = 30
@@ -288,6 +297,8 @@ class State:
         self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
         self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
         self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
+        self.briefs: dict[str, list[dict]] = defaultdict(list)  # task -> its state of the art, every version
+        self.questions: dict[str, dict] = {}  # id -> {ev, task, result, taken: [(author, ts)], answers, status}
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -541,6 +552,68 @@ class State:
         self.patches[ev["id"]] = Patch(ev["id"], tid, ev["author"], ev["name"], ev["commit"], ev["branch"],
                                        ev["lamport"], ts=ev["ts"])
         return None
+
+    def _question(self, ev: dict, task: Task) -> str | None:
+        """A question on a task: asked, taken, answered (see MAX_QUESTION)."""
+        if ev["type"] == "question.asked":
+            text = ev.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_QUESTION:
+                return f"a question is text of at most {MAX_QUESTION} characters"
+            if task.cancelled:
+                return "the task is cancelled"
+            if sum(q["ev"]["author"] == ev["author"] and ev["ts"] - 86400 < q["ev"]["ts"] <= ev["ts"]
+                   for q in self.questions.values()) >= MAX_QUESTIONS_PER_DAY:
+                return f"at most {MAX_QUESTIONS_PER_DAY} questions a day per agent"
+            result = ev.get("result")
+            if result is not None and (result not in self.tasks or self.tasks[result].kind != "result"):
+                return "a replication names a result"
+            self.questions[ev["id"]] = {"ev": ev, "task": task.id, "result": result, "taken": [], "answers": [],
+                                        "status": "open"}
+            return None
+        q = self.questions.get(ev.get("question"))
+        if q is None or q["task"] != task.id:
+            return "unknown question on that task"
+        if ev["type"] == "question.taken":
+            if q["status"] != "open":
+                return "the question is settled already"
+            q["taken"].append((ev["author"], ev["ts"]))
+            return None
+        text = ev.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
+            return f"an answer is text of at most {E.MAX_NOTES} characters"
+        if not isinstance(ev.get("settled", False), bool):
+            return "settled is true or false"
+        if ev.get("result") is not None and ev["result"] not in self.tasks:
+            return "an answer's result is a task"
+        q["answers"].append(ev)
+        # Rerunning your own result isn't a replication: it leaves the question open for someone else.
+        own = q["result"] is not None and any(owner(p.name) == owner(ev["name"]) for p in self.patches_for(q["result"]))
+        if ev.get("settled") and not own:
+            q["status"] = "settled"
+        return None
+
+    def brief(self, tid: str) -> dict | None:
+        """The task's state of the art: its latest version (task.brief), or None."""
+        return self.briefs[tid][-1] if self.briefs.get(tid) else None
+
+    def replications(self, rid: str) -> list[str]:
+        """The owners, other than its author's, who reran a computed result and settled its replication."""
+        mine = {owner(p.name) for p in self.patches_for(rid)}
+        return sorted({owner(a["name"]) for q in self.questions.values() if q["result"] == rid
+                       for a in q["answers"] if a.get("settled") and owner(a["name"]) not in mine})
+
+    def question_for(self, author: str, name: str, now: float) -> dict | None:
+        """An open question for this agent, when it has no task with a new route: not someone else's right now
+        (taken in the last QUESTION_TTL), not one it answered lately without settling, and not a replication of its
+        owner's own result. Replications first, since a computed result is only worth what its reruns say; then
+        the oldest."""
+        def free(q):
+            return (q["status"] == "open" and not self.tasks[q["task"]].cancelled
+                    and not any(a != author and now - ts < QUESTION_TTL for a, ts in q["taken"])
+                    and not any(x["author"] == author and now - x["ts"] < COOLDOWN for x in q["answers"])
+                    and not (q["result"] and any(owner(p.name) == owner(name) for p in self.patches_for(q["result"]))))
+        return min((q for q in self.questions.values() if free(q)),
+                   key=lambda q: (q["result"] is None, q["ev"]["lamport"]), default=None)
 
     def _hub(self, ev: dict) -> str | None:
         if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
@@ -1015,6 +1088,15 @@ class State:
             self.notes[task.id].append(ev)
         elif t == "result.submitted":
             return self._result(ev, task)
+        elif t == "task.brief":
+            text = ev.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_BRIEF:
+                return f"a state of the art is text of at most {MAX_BRIEF} characters"
+            if not self.took_part(task.id, ev["author"], ev["ts"]) and not self.trusted(ev["author"]):
+                return "only someone who works on the task, or has, or a trusted agent, writes its state of the art"
+            self.briefs[task.id].append(ev)
+        elif t in ("question.asked", "question.taken", "question.answered"):
+            return self._question(ev, task)
         elif t == "work.saved":
             # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
             # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.

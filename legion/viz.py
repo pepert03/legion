@@ -69,7 +69,8 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         tasks.append({"id": t.id, "key": t.key, "title": t.title, "status": status, "mode": t.mode,
                       # Where it's drawn: under its parent, or the task its key starts with (see State.under).
                       "depth": st.depth_under(t), "parent": st.under(t), "deps": t.deps, "size": t.size,
-                      "kind": t.kind,
+                      "kind": t.kind, "replicated": st.replications(t.id) if t.kind == "result" else [],
+                      "questions": sum(q["task"] == t.id and q["status"] == "open" for q in st.questions.values()),
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
@@ -177,6 +178,8 @@ TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.re
 
 ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed
 HUB_TYPES = {"hub.message", "lit.added"}  # what agents do in the hub, the centre of the project
+# What the hub's chat shows besides its own messages: what's proposed, proved, asked and answered on the tasks.
+RESEARCH = {"proposal.made", "result.submitted", "question.asked", "question.answered"}
 
 
 def timeline(events: list[dict]) -> list[dict]:
@@ -197,7 +200,11 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
                if ev["type"] == "lit.added" else {}),
             **({"note": ev.get("notes", ""), "outcome": ev.get("outcome")} if ev["type"] == "attempt.reported" else {}),
             **({"note": ev.get("notes", "")} if ev["type"] == "work.saved" else {}),
-            **({"note": ev.get("notes", ""), "title": ev.get("title", "")} if ev["type"] == "result.submitted" else {})}
+            **({"note": ev.get("notes", ""), "title": ev.get("title", "")} if ev["type"] == "result.submitted" else {}),
+            **({"note": ev.get("text", "")} if ev["type"] in ("task.brief", "question.asked") else {}),
+            **({"result": ev.get("result")} if ev["type"] == "question.asked" else {}),
+            **({"note": ev.get("text", ""), "question": ev.get("question"), "settled": bool(ev.get("settled"))}
+               if ev["type"] == "question.answered" else {})}
 
 
 def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
@@ -213,7 +220,7 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
     # task's conversation is read whole, so it doesn't share that budget.
     keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine
                                              if e["type"] in ("task.note", "attempt.reported", "work.saved",
-                                                              "result.submitted", *HUB_TYPES)}
+                                                              "task.brief", *RESEARCH, *HUB_TYPES)}
     return [item(e, st) for e in mine if e["id"] in keep]
 
 
@@ -221,7 +228,7 @@ def hub(events: list[dict], upto: int | None) -> dict:
     """The centre of the project: its chat (with the proposals, which are planned there) and its literature."""
     evs = events if upto is None else events[:max(upto, 0)]
     st = S.build(evs, trusted=True)  # already validated by the Source
-    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | {"proposal.made", "result.submitted"}][-300:]
+    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | RESEARCH][-300:]
     refs = [{"id": r["id"], "url": S.link_url(r["url"]), "title": r["title"], "ts": r["ts"],
              "by": [{"name": e["name"], "agent": agent_id(e["author"]), "why": e["why"], "task": e.get("task"),
                      "ts": e["ts"]} for e in r["by"]]} for r in st.references()]

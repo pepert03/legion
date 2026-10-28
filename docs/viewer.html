@@ -125,6 +125,8 @@
   .lit .ref { font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
   .lit .host { font-size: 12px; font-style: italic; color: var(--ink3); margin: 2px 0 4px; }
   .lit .why { font-size: 13.5px; line-height: 1.45; color: var(--ink2); overflow-wrap: anywhere; margin-top: 3px; }
+  .brief .who { font-size: 12.5px; font-style: italic; color: var(--ink3); margin-bottom: 8px; }
+  .brief .text { font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
   .chat .tag.success { color: var(--accepted); border-color: var(--accepted); }
   .chat .tag.failure { color: var(--cancelled); border-color: var(--cancelled); }
 
@@ -636,7 +638,14 @@ const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "pa
   "path.proposed": "sketched", "path.accepted": "sketched", "path.rejected": "cancelled",
   "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
   "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink",
-  "result.submitted": "review" };
+  "result.submitted": "review", "task.brief": "ink", "question.asked": "review", "question.answered": "accepted" };
+
+// A task's state of the art: one text its agents keep current (legion brief), the latest version.
+function briefView(e) {
+  const a = data.agents.find((x) => x.id === e.agent) || { id: e.agent, name: e.name, kinds: [] };
+  return h("div", { class: "brief" }, h("div", { class: "who" }, "by ", nameNode(a), ` · ${ago(e.ts)}`),
+    h("div", { class: "text" }, e.note));
+}
 const taskKey = (id) => (data.tasks.find((t) => t.id === id) || {}).key || id;
 const shownFeed = new Set();
 
@@ -732,7 +741,12 @@ async function viewTask(n) {
   // What was said about it in the hub, and the references brought for it, belong to its conversation too.
   const TALK = new Set(["task.note", "attempt.reported", "work.saved", "hub.message", "lit.added", "result.submitted"]);
   const notes = items.filter((e) => TALK.has(e.type));
-  const others = items.filter((e) => !["task.note", "hub.message", "lit.added"].includes(e.type));
+  const others = items.filter((e) => !["task.note", "hub.message", "lit.added", "task.brief", "question.asked",
+                                       "question.answered"].includes(e.type));
+  // Its state of the art (the latest version), and its questions, each followed by its answers.
+  const brief = items.filter((e) => e.type === "task.brief").pop();
+  const asked = items.filter((e) => e.type === "question.asked");
+  const thread = asked.flatMap((q) => [q, ...items.filter((e) => e.type === "question.answered" && e.question === q.id)]);
   return [
     h("div", { class: "head" },
       h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
@@ -740,6 +754,8 @@ async function viewTask(n) {
     h("dl", { class: "kv" },
       n.kind === "result" ? [h("dt", {}, "result"), h("dd", { style: "font-style:italic" },
         "proved along the way, under its task: it doesn't finish it, and it's checked like a patch")] : null,
+      n.kind === "result" && (n.replicated || []).length ? [h("dt", {}, "replicated by"),
+        h("dd", {}, n.replicated.join(", "))] : null,
       h("dt", {}, "status"), h("dd", { style: `color:${col}` }, STATUS[n.status] + (n.status === "sketched" ? `, ${n.children_done} of ${n.children} subtasks` : "")),
       workers.length ? [h("dt", {}, "working"), h("dd", {}, ...workers.flatMap((a, i) => [i ? ", " : "", nameNode(a)]))] : null,
       n.parent ? [h("dt", {}, "part of"), h("dd", { style: "font-style:italic" }, taskKey(n.parent))] : null,
@@ -747,7 +763,11 @@ async function viewTask(n) {
       h("dt", {}, "acceptance"), h("dd", {}, h("code", {}, n.accept)),
       n.best != null ? [h("dt", {}, "best"), h("dd", {}, String(n.best))] : null,
       n.body ? [h("dt", {}, "what"), h("dd", {}, n.body)] : null),
-    tabs(n.id, notes.length ? "conversation" : "history", [
+    tabs(n.id, brief ? "brief" : notes.length ? "conversation" : "history", [
+      ["brief", "State of the art", brief ? 1 : 0, () => brief ? briefView(brief)
+        : h("p", { class: "empty" }, "Nobody has written it yet: the agents on this task do, with legion brief.")],
+      ["questions", "Questions", asked.length, () => asked.length ? chatList(thread)
+        : h("p", { class: "empty" }, "No questions yet: agents ask them with legion ask.")],
       ["conversation", "Conversation", notes.length, () => notes.length ? chatList(notes)
         : h("p", { class: "empty" }, "No notes yet: the agents on this task post them with legion note.")],
       ["history", "History", others.length, () => eventList(others, true)]]),
@@ -778,6 +798,9 @@ function chatList(notes, hubView = false) {
           e.type === "work.saved" ? h("span", { class: "tag" }, "saved work") : null,
           e.type === "lit.added" ? h("span", { class: "tag" }, "reference") : null,
           e.type === "result.submitted" ? h("span", { class: "tag" }, "result") : null,
+          e.type === "question.asked" ? h("span", { class: "tag" }, e.result ? "replication asked" : "question") : null,
+          e.type === "question.answered" ? h("span", { class: e.settled ? "tag success" : "tag" },
+            e.settled ? "settles it" : "answer") : null,
           e.type === "proposal.made" ? h("span", { class: "tag" }, "proposal") : null,
           e.type === "hub.message" && e.task && hubView ? h("span", { class: "tag" }, `on ${taskKey(e.task)}`) : null,
           e.type === "hub.message" && !hubView ? h("span", { class: "tag" }, "in the hub") : null,
