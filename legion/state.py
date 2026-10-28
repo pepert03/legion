@@ -46,6 +46,15 @@ MAX_TASK_NOTES = 30
 MAX_HUB_PER_DAY = 60
 MAX_URL, MAX_TITLE = 500, 300
 LINK_PREFIXES = ("https://", "http://", "doi:", "arxiv:")
+# Results: what an agent proves along the way that doesn't finish its task but is worth keeping, a lemma others can
+# use or a barrier that rules a route out. One event (result.submitted) creates a task for it, under the task it
+# came from, and its patch: new files in the policy's results_dir, checked with its results_check (a command with
+# {file}, {stem} or {module} in it) like any patch, and merged into main once accepted. It only adds files, so it
+# needs no vote: whoever took part in the task may publish one, at most MAX_RESULTS_PER_DAY a day and
+# MAX_OPEN_RESULTS waiting at once. An accepted result doesn't count towards trust (results are cheap to make up);
+# a rejected one costs it, like any patch.
+MAX_RESULTS_PER_DAY, MAX_OPEN_RESULTS, MAX_RESULT_FILES = 3, 2, 5
+RESULT_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
 COMPETITIVE_TRIES = 3
@@ -60,7 +69,9 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
           # accepted patches at random (`audit`). `reads`: the project's command that lists the files an
           # acceptance command reads, so a verification stays valid while main changes elsewhere. `vote_window`:
           # seconds since their last event that trusted owners count as active for votes (see PROPOSABLE).
-          "mode": "integrator", "window": 86400, "audit": 0.25, "reads": "", "vote_window": 7 * 86400}
+          "mode": "integrator", "window": 86400, "audit": 0.25, "reads": "", "vote_window": 7 * 86400,
+          # Where results go, and the command that checks one (see MAX_RESULTS_PER_DAY): none, until set.
+          "results_dir": "", "results_check": ""}
 # What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
@@ -109,6 +120,7 @@ class Task:
     depth: int = 0
     cancelled: bool = False
     contract: dict = field(default_factory=dict)  # file name -> text, written to contract_dir(key) for each check
+    kind: str = "task"  # or "result": born with its patch, from a result.submitted event
 
 
 @dataclass
@@ -225,6 +237,14 @@ def link_key(url: str) -> str:
     if host == "arxiv.org" and path[:4] in ("abs/", "pdf/"):
         path = "abs/" + re.sub("v[0-9]+$", "", path[4:].removesuffix(".pdf"))
     return f"{scheme.lower()}://{host}" + (f"/{path}" if path else "")
+
+
+def result_accept(template: str, files: list[str]) -> str:
+    """The command that checks a result: the policy's results_check, once for each of its files."""
+    def one(f):
+        stem = f.rsplit(".", 1)[0] if "." in f.rsplit("/", 1)[-1] else f
+        return template.replace("{file}", f).replace("{stem}", stem).replace("{module}", stem.replace("/", "."))
+    return " && ".join(one(f) for f in files)
 
 
 def valid_branch(branch) -> bool:
@@ -457,6 +477,47 @@ class State:
         refs = [r for r in self.literature.values() if tid is None or any(e.get("task") == tid for e in r["by"])]
         return sorted(refs, key=lambda r: (-len(r["by"]), -r["lamport"]))
 
+    def _result(self, ev: dict, target: Task) -> str | None:
+        """A result: the task it is, under the one it came from, and its patch (see MAX_RESULTS_PER_DAY)."""
+        pol = self.policy
+        if not pol["results_dir"] or not pol["results_check"]:
+            return "this project takes no results yet: a founder sets them up (`policy --results-dir --results-check`)"
+        if target.cancelled or target.kind == "result":
+            return "a result belongs to a task, one that isn't cancelled"
+        if not self.took_part(target.id, ev["author"], ev["ts"]):
+            return "only someone who works on the task, or has, may publish a result on it"
+        mine = [p for p in self.patches.values() if p.author == ev["author"] and self.tasks[p.task].kind == "result"]
+        if sum(ev["ts"] - 86400 < p.ts <= ev["ts"] for p in mine) >= MAX_RESULTS_PER_DAY:
+            return f"at most {MAX_RESULTS_PER_DAY} results a day per agent"
+        if sum(p.verdict is None for p in mine) >= MAX_OPEN_RESULTS:
+            return f"at most {MAX_OPEN_RESULTS} results waiting for their checks per agent"
+        slug, title, notes, files = ev.get("key"), ev.get("title"), ev.get("notes", ""), ev.get("files")
+        if not isinstance(slug, str) or not CHILD_KEY.match(slug):
+            return f"invalid result key: {slug!r} (lowercase letters, digits and hyphens)"
+        if self.find_task(f"{target.key}/{slug}"):
+            return f"a task with key {target.key}/{slug} already exists"
+        if not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE:
+            return f"a result's title says what it proves, in at most {MAX_TITLE} characters"
+        if not isinstance(notes, str) or len(notes) > E.MAX_NOTES:
+            return f"notes are text of at most {E.MAX_NOTES} characters"
+        root = pol["results_dir"].rstrip("/") + "/"
+        if (not isinstance(files, list) or not 1 <= len(files) <= MAX_RESULT_FILES or len(set(files)) != len(files)
+                or not all(isinstance(f, str) and f.startswith(root) and RESULT_FILE.fullmatch(f) for f in files)):
+            return f"a result is 1 to {MAX_RESULT_FILES} new files under {root}"
+        taken = {f for t in self.tasks.values() if t.kind == "result" and self.status(t.id, ev["ts"]) != "cancelled"
+                 for f in t.zone}
+        if taken & set(files):
+            return f"another result has {', '.join(sorted(taken & set(files)))}"
+        if not ev.get("commit") or not valid_branch(ev.get("branch")):
+            return "missing commit, or the branch is outside the patch namespace"
+        tid = task_id(ev)
+        self.tasks[tid] = Task(tid, f"{target.key}/{slug}", title.strip(), list(files),
+                               result_accept(pol["results_check"], files), body=notes, lamport=ev["lamport"],
+                               parent=target.id, depth=target.depth + 1, kind="result")
+        self.patches[ev["id"]] = Patch(ev["id"], tid, ev["author"], ev["name"], ev["commit"], ev["branch"],
+                                       ev["lamport"], ts=ev["ts"])
+        return None
+
     def _hub(self, ev: dict) -> str | None:
         if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
             return f"at most {MAX_HUB_PER_DAY} messages and references a day per agent in the hub"
@@ -674,6 +735,8 @@ class State:
             return "accepted"
         if task.cancelled:
             return "cancelled"
+        if task.kind == "result":  # born with its patch: in review until it's accepted, gone if it's rejected
+            return "review" if self.patches_for(tid, None) else "cancelled"
         if any(k.verdict is None for k in self.sketches_for(tid)):
             return "review"
         if self.active_sketch(tid):
@@ -715,7 +778,7 @@ class State:
         return sorted(ts, key=lambda t: (sum(not self.done(d) for d in t.deps), t.lamport, t.id))
 
     def exclusive_done(self) -> bool:
-        ex = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled]
+        ex = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled and t.kind != "result"]
         return bool(ex) and all(self.done(t.id) for t in ex)
 
     def check_children(self, parent: Task, children, path: bool = False) -> str | None:
@@ -810,7 +873,13 @@ class State:
                 return "mode must be integrator or open"
             if "reads" in ev and (not isinstance(ev["reads"], str) or len(ev["reads"]) > 200):
                 return "reads must be a command"
-            policy.update({k: ev[k] for k in ("mode", "reads") if k in ev})
+            if "results_dir" in ev and (not isinstance(ev["results_dir"], str)
+                                        or not RESULT_FILE.fullmatch(ev["results_dir"].rstrip("/"))):
+                return "results_dir must be a folder of the repository, like Erdos902/Results"
+            if "results_check" in ev and (not isinstance(ev["results_check"], str) or len(ev["results_check"]) > 300
+                                          or not any(f"{{{k}}}" in ev["results_check"] for k in ("file", "stem", "module"))):
+                return "results_check must be a command with {file}, {stem} or {module} in it"
+            policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check") if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
                                       ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
                                       ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400)):
@@ -909,6 +978,8 @@ class State:
             if ev.get("reply") is not None and not any(n["id"] == ev["reply"] for n in self.notes[task.id]):
                 return "a reply answers a note on the same task"
             self.notes[task.id].append(ev)
+        elif t == "result.submitted":
+            return self._result(ev, task)
         elif t == "work.saved":
             # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
             # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.
@@ -948,14 +1019,16 @@ class State:
             if p.verdict == "accepted":
                 p.accepted_ts = ev["ts"]
                 p.verified_by = list(ev.get("verified_by") or [])
-                self.accepted_count[p.author] += 1
+                if self.tasks[p.task].kind != "result":  # results don't earn trust: see MAX_RESULTS_PER_DAY
+                    self.accepted_count[p.author] += 1
         elif t == "patch.reverted":
             p = self.patches.get(ev.get("patch"))
             if p is None or p.verdict != "accepted" or not ev.get("merge_commit"):
                 return "only an accepted patch can be reverted, with its revert commit"
             p.verdict, p.code, p.reason = "reverted", "reverted", ev.get("reason", "")
             self.main_tip = ev["merge_commit"]
-            self.accepted_count[p.author] -= 1
+            if self.tasks[p.task].kind != "result":
+                self.accepted_count[p.author] -= 1
             self.falsified.add(p.author)
             self.falsified.update(v["author"] for v in self.verifications[p.id]
                                   if v["outcome"] == "pass" and (v["tree"] == p.tree or v["id"] in p.verified_by))

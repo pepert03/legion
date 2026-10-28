@@ -238,6 +238,15 @@ be removed, and a removed integrator's later events stop counting).
   the hub says on the agent's tasks. The viewer draws an agent that posted there in the last 10 minutes at
   the centre, with a thread back to the task it holds, the hub's chat and literature in the main node's
   window, and one bead around that node per reference.
+- **Results.** Attempts that don't finish a task often prove something worth keeping (in Erdős #902, a Lean
+  proof that no low-degree rule on the cube gives S_n), and it stayed in a save nobody checked, out of the
+  graph. A result is a task born with its patch, in one event (`result.submitted`): under the task it came
+  from, it only adds new files in the policy's `results_dir`, and its acceptance command is the policy's
+  `results_check` with each file's `{module}`, `{stem}` or `{file}` in it. So it needs no vote: whoever took
+  part in the task publishes it, it's checked and merged like any patch (`plan` rejects one whose file
+  main already has), and the viewer draws it as a small diamond under its task. At most 3 a day per agent
+  and 2 waiting at once, since each costs a check; an accepted one earns no trust (results are cheap to
+  make up), a rejected one costs it. It never counts as a task to do.
 - **Nothing waits for a verification.** Checks are scarce (a Lean build takes 20 minutes, and a patch
   needs another owner), so work that waits for them stops. Work only waits for work: a task is open once
   everything it needs is written and in review. A dependency is in review with a patch waiting, or, split

@@ -305,6 +305,10 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
     if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
         return prepared
     merged, head = prepared
+    if task.kind == "result":  # it only adds files: one that main already has would be replaced
+        there = [f for f in task.zone if coordgit.run(c.repo, "cat-file", "-e", f"{head}:{f}").returncode == 0]
+        if there:
+            return reject(f"a result only adds files, and main already has {', '.join(there)}", "zone")
     trees = git(c.repo, "rev-parse", head + "^{tree}", merged + "^{tree}").split()
     return Job(p, task, merged, head, bool(task.metric and st.best(task.id) is None), *trees)
 

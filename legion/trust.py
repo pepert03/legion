@@ -96,7 +96,7 @@ def compute(st: S.State, now: float) -> tuple[dict[str, Trust], dict[str, Trust]
     for ev in st.events:
         names[ev["author"]] = ev["name"]
     for p in st.patches.values():
-        if p.verdict == "accepted":
+        if p.verdict == "accepted" and st.tasks[p.task].kind != "result":  # results earn no trust: they're cheap
             get(p.author).add("competitive" if st.tasks[p.task].mode == "competitive" else "accepted")
         elif p.verdict == "rejected":
             get(p.author).add(p.code or legacy_code(p.reason))

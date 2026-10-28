@@ -69,6 +69,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         tasks.append({"id": t.id, "key": t.key, "title": t.title, "status": status, "mode": t.mode,
                       # Where it's drawn: under its parent, or the task its key starts with (see State.under).
                       "depth": st.depth_under(t), "parent": st.under(t), "deps": t.deps, "size": t.size,
+                      "kind": t.kind,
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
@@ -171,7 +172,7 @@ def split_name(name: str) -> tuple[str, int | None]:
 
 TIMELINE_TYPES = {"task.claimed", "patch.submitted", "patch.accepted", "patch.rejected", "patch.reverted", "sketch.proposed",
                   "sketch.accepted", "sketch.failed", "task.resolved", "task.created", "project.init", "agent.joined",
-                  "path.proposed", "path.accepted"}
+                  "path.proposed", "path.accepted", "result.submitted"}
 
 
 ROUTINE = {"task.heartbeat", "integrator.renew"}  # renewals every few seconds: kept out of the activity feed
@@ -195,7 +196,8 @@ def item(ev: dict, st: S.State, full: bool = False) -> dict:
                 "title": ev.get("title") or st.literature.get(S.link_key(ev.get("url", "")), {}).get("title", "")}
                if ev["type"] == "lit.added" else {}),
             **({"note": ev.get("notes", ""), "outcome": ev.get("outcome")} if ev["type"] == "attempt.reported" else {}),
-            **({"note": ev.get("notes", "")} if ev["type"] == "work.saved" else {})}
+            **({"note": ev.get("notes", "")} if ev["type"] == "work.saved" else {}),
+            **({"note": ev.get("notes", ""), "title": ev.get("title", "")} if ev["type"] == "result.submitted" else {})}
 
 
 def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
@@ -205,11 +207,13 @@ def history(events: list[dict], node: str, upto: int | None) -> list[dict]:
         mine = [e for e in evs if agent_id(e["author"]) == node and e["type"] not in ROUTINE]
     else:
         patches = {p.id for p in st.patches.values() if p.task == node}
-        mine = [e for e in evs if e.get("task") == node or e.get("patch") in patches]
+        mine = [e for e in evs if e.get("task") == node or e.get("patch") in patches  # a result: its own event too
+                or e["type"] == "result.submitted" and S.task_id(e) == node]
     # The latest 80 events (short versions: a test's whole output doesn't fit in a timeline), and every note: a
     # task's conversation is read whole, so it doesn't share that budget.
     keep = {e["id"] for e in mine[-80:]} | {e["id"] for e in mine
-                                             if e["type"] in ("task.note", "attempt.reported", "work.saved", *HUB_TYPES)}
+                                             if e["type"] in ("task.note", "attempt.reported", "work.saved",
+                                                              "result.submitted", *HUB_TYPES)}
     return [item(e, st) for e in mine if e["id"] in keep]
 
 
@@ -217,7 +221,7 @@ def hub(events: list[dict], upto: int | None) -> dict:
     """The centre of the project: its chat (with the proposals, which are planned there) and its literature."""
     evs = events if upto is None else events[:max(upto, 0)]
     st = S.build(evs, trusted=True)  # already validated by the Source
-    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | {"proposal.made"}][-300:]
+    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | {"proposal.made", "result.submitted"}][-300:]
     refs = [{"id": r["id"], "url": S.link_url(r["url"]), "title": r["title"], "ts": r["ts"],
              "by": [{"name": e["name"], "agent": agent_id(e["author"]), "why": e["why"], "task": e.get("task"),
                      "ts": e["ts"]} for e in r["by"]]} for r in st.references()]

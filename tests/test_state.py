@@ -792,3 +792,45 @@ def test_a_task_voted_without_its_parent_shows_under_the_one_its_key_starts_with
     assert st.under(st.tasks[loose]) == a and st.depth_under(st.tasks[loose]) == 1
     assert st.tasks[loose].parent is None and st.children(a) == []   # only shown there: it isn't its parent
     assert st.under(st.tasks[other]) is None and st.depth_under(st.tasks[other]) == 0
+
+
+def test_a_result_is_a_task_born_with_its_patch_under_the_one_it_came_from():
+    log, tid = project(key="upper")
+    r = dict(task=tid, key="barrier", title="Low-degree rules can't give S_n", files=["Results/Barrier.lean"],
+             commit="c", branch=f"refs/legion/patches/{tid}/result-ana-1")
+    log.add(ANA, "result.submitted", **r)                                     # no results set up yet
+    log.add(BOSS, "project.policy", results_dir="Results", results_check="python check.py --module {module}")
+    log.add(ANA, "result.submitted", **r)                                     # ana never worked on it
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "result.submitted", **dict(r, files=["src/a.py"]))           # outside the results folder
+    ev = log.add(ANA, "result.submitted", **r)
+    log.add(ANA, "result.submitted", **dict(r, key="again"))                  # the same file as another result
+    st = log.state()
+    assert [why for _, why in st.ignored] == [
+        "this project takes no results yet: a founder sets them up (`policy --results-dir --results-check`)",
+        "only someone who works on the task, or has, may publish a result on it",
+        "a result is 1 to 5 new files under Results/", "another result has Results/Barrier.lean"]
+    rt = st.tasks[S.task_id(ev)]
+    assert (rt.kind, rt.key, rt.parent, rt.zone) == ("result", "upper/barrier", tid, ["Results/Barrier.lean"])
+    assert rt.accept == "python check.py --module Results.Barrier" and st.patches[ev["id"]].task == rt.id
+    assert st.status(rt.id, 1001) == "review" and rt not in st.claimable(1001)
+    log.add(BOSS, "patch.accepted", patch=ev["id"], merge_commit="m1")
+    st = log.state()
+    assert st.status(rt.id, 1001) == "accepted" and st.accepted_count[ANA.author] == 0  # it earns no trust
+    assert not st.exclusive_done()                                            # upper itself is still to do
+    for i in range(3):
+        log.add(ANA, "result.submitted", **dict(r, key=f"more-{i}", files=[f"Results/More{i}.lean"]))
+    assert log.state().ignored[-1][1] == "at most 3 results a day per agent"
+
+
+def test_a_rejected_result_is_gone_and_frees_its_files():
+    log, tid = project(key="upper")
+    log.add(BOSS, "project.policy", results_dir="Results", results_check="lake build {module}")
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    r = dict(task=tid, key="lemma", title="A lemma", files=["Results/L.lean"], commit="c",
+             branch=f"refs/legion/patches/{tid}/result-ana-1")
+    ev = log.add(ANA, "result.submitted", **r)
+    log.add(BOSS, "patch.rejected", patch=ev["id"], reason="it doesn't build", code="tests")
+    again = log.add(ANA, "result.submitted", **dict(r, key="lemma-2"))
+    st = log.state()
+    assert st.status(S.task_id(ev), 1001) == "cancelled" and S.task_id(again) in st.tasks

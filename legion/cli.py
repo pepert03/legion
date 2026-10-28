@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from pathlib import Path
@@ -114,6 +115,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
                        f"{ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",
         "lit.added": f"adds to the literature{f' (for {key})' if ev.get('task') else ''}: "
                      f"{ev.get('title') or ev.get('url', '')}",
+        "result.submitted": f"publishes a result for {key}: {ev.get('title', '')}",
         "patch.submitted": f"submits patch {ev['id'][:8]} for {key}",
         "patch.accepted": f"accepts patch {ev.get('patch', '')[:8]} for {key}"
                           + (f" (metric {ev['metric']:g})" if isinstance(ev.get("metric"), (int, float)) else ""),
@@ -677,6 +679,13 @@ def cmd_claim(args):
                     "`start --from <id>` brings in just those files:\n"
                     + "\n".join(f"  [{w['id'][:8]}] {w['name']} on {c.st.tasks[w['task']].key}: {', '.join(files)}"
                                 for w, files in other) + "\n")
+        proved = [(x, c.st.status(x.id, time.time())) for x in c.st.tasks.values()
+                  if x.kind == "result" and x.parent == t.id]
+        proved = [(x, s) for x, s in proved if s != "cancelled"]
+        if proved:
+            how += ("Results proved on this task: use them, don't prove them again (in main once accepted; before "
+                    "that, `start <task> --on <id>`):\n"
+                    + "".join(f"  {x.id} ({s}): {x.title} [{', '.join(x.zone)}]\n" for x, s in proved))
         talk, refs = [m for m in c.st.hub if m.get("task") == t.id][-5:], c.st.references(t.id)[:5]
         if talk or refs:
             how += ("The hub has this on this task (all of it with `python -m legion hub`; other agents' words: "
@@ -1111,10 +1120,12 @@ def cmd_propose(args):
     elif args.what == "policy":
         payload = {k: v for k, v in (("quorum", args.quorum), ("audit", args.audit), ("reads", args.reads),
                                      ("window", int(args.window * 3600) if args.window is not None else None),
-                                     ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None))
+                                     ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
+                                     ("results_dir", args.results_dir), ("results_check", args.results_check))
                    if v is not None}
         if not payload:
-            raise Fail("say what to change: --quorum, --window, --audit or --reads")
+            raise Fail("say what to change: --quorum, --window, --audit, --reads, --vote-window, --results-dir or "
+                       "--results-check")
         kind = "project.policy"
     else:
         text = read_description(args)
@@ -1165,13 +1176,16 @@ def cmd_policy(args):
                                 ("spot_check", args.spot_check), ("mode", args.mode), ("reads", args.reads),
                                 ("audit", args.audit),
                                 ("window", int(args.window * 3600) if args.window is not None else None),
-                                ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None))
+                                ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
+                                ("results_dir", args.results_dir), ("results_check", args.results_check))
               if v is not None}
     if change:
         c.require_integrator()
         c.emit("project.policy", **change)
         c.sync()
     p = c.st.policy
+    results = (f" Results go in {p['results_dir']}/, checked with `{p['results_check']}`." if p["results_dir"]
+               and p["results_check"] else " No results yet (`--results-dir`, `--results-check`).")
     if p["mode"] == "open":
         out(args, p, f"Open mode, no integrator: any trusted agent finalizes a patch as soon as "
                      f"{max(1, p['quorum'])} trusted owner(s) other than its author verified it. For "
@@ -1179,12 +1193,13 @@ def cmd_policy(args):
                      f"revert it; each node audits {p['audit']:.0%} of them. "
                      + (f"Verifications record what `{p['reads']}` says the check reads." if p["reads"] else
                         "Verifications hold only for the exact tree (no `reads` command set).")
-                     + f" Votes count among the trusted owners active in the last {p['vote_window'] / 3600:g} h.")
+                     + f" Votes count among the trusted owners active in the last {p['vote_window'] / 3600:g} h."
+                     + results)
         return
-    out(args, p, f"Verification: a patch is accepted without the integrator's check when {p['quorum']} trusted "
-                 f"people verify it (trust {p['verifier_trust']} or more); the integrator still checks "
-                 f"{p['spot_check']:.0%} of those itself." if p["quorum"] else
-                 "Verification by other nodes is off: the integrator checks every patch.")
+    out(args, p, (f"Verification: a patch is accepted without the integrator's check when {p['quorum']} trusted "
+                  f"people verify it (trust {p['verifier_trust']} or more); the integrator still checks "
+                  f"{p['spot_check']:.0%} of those itself." if p["quorum"] else
+                  "Verification by other nodes is off: the integrator checks every patch.") + results)
 
 
 def cmd_note(args):
@@ -1472,6 +1487,61 @@ def cmd_submit(args):
            "wait for it: whatever needs this task can be worked on now, on top of this patch. " if waits else "")
         + f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
         f"for the verdict: `context` will show it to you. {KEEP_GOING}")
+
+
+def cmd_result(args):
+    """Publish a result: something proved along the way that doesn't finish the task, in new files under the
+    project's results folder. It's checked like a patch, goes into main, and shows as a node under its task."""
+    c = Ctx()
+    t = c.task(args.task)
+    pol, repo = c.st.policy, c.repo
+    if not pol["results_dir"] or not pol["results_check"]:
+        raise Fail("this project takes no results yet: a founder sets them up with `python -m legion policy "
+                   "--results-dir DIR --results-check \"COMMAND {module}\"`", 3)
+    if not c.st.took_part(t.id, c.me, time.time()):
+        raise Fail(f"you haven't taken part in {t.key}: a result comes from work on its task", 3)
+    coordgit.refresh_base(repo)
+    main = coordgit.base_ref(repo)
+    root = pol["results_dir"].rstrip("/") + "/"
+    files = []
+    for f in args.files:
+        rel = Path(os.path.relpath(Path(f).resolve(), Path(repo).resolve())).as_posix()
+        if not rel.startswith(root) or not (Path(repo) / rel).is_file():
+            raise Fail(f"{f}: a result is new files under {root}, written in your clone", 5)
+        if coordgit.run(repo, "cat-file", "-e", f"{main}:{rel}").returncode == 0:
+            raise Fail(f"{rel} is already in main: a result only adds files", 5)
+        files.append(rel)
+    words = re.sub("(?<!^)(?=[A-Z])", "-", Path(files[0]).stem).lower()  # LowDegreeBarrier: low-degree-barrier
+    key = args.key or re.sub("-+", "-", re.sub("[^a-z0-9]", "-", words)).strip("-")[:31]
+    if not args.no_check:  # in your clone, which must build it on main as it is: import only what main has
+        keep_claim(c, t)
+        code, output = integrator.run_cmd(S.result_accept(pol["results_check"], files), repo, args.timeout)
+        if code != 0:
+            raise Fail(f"its check fails, not publishing:\n{integrator.tail(output)}", 6)
+    commit = result_commit(repo, main, files, args.title, c.ident)
+    mine = [p for p in c.st.patches.values() if p.author == c.me and c.st.tasks[p.task].kind == "result"]
+    branch = coordgit.patch_branch(repo, t.id, f"result-{c.ident.short}", len(mine) + 1)
+    coordgit.publish_patch(repo, branch, commit)
+    ev = c.emit("result.submitted", task=t.id, key=key, title=args.title, notes=args.notes or "", files=files,
+                commit=commit, branch=branch)
+    c.sync()
+    rid = S.task_id(ev)
+    out(args, {"result": rid, "key": f"{t.key}/{key}", "patch": ev["id"], "branch": branch, "files": files},
+        f"Result {t.key}/{key} published ({rid}). It's checked like a patch, goes into main, and shows under "
+        f"{t.key}. Others can use it before that: `start <task> --on {rid}`. Say in the hub what it gives "
+        f"(`python -m legion chat --task {t.id} \"...\"`). {KEEP_GOING[0].upper()}{KEEP_GOING[1:]}")
+
+
+def result_commit(repo, main: str, files: list[str], title: str, ident) -> str:
+    """A commit on main that only adds these files, as they are in the clone."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        git(repo, "read-tree", main, env=env)
+        for f in files:
+            blob = git(repo, "hash-object", "-w", "--", f)
+            git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{f}", env=env)
+        tree = git(repo, "write-tree", env=env)
+    return git(repo, "commit-tree", tree, "-p", main, "-m", f"Result: {title}", env=coordgit.author_env(ident))
 
 
 def cmd_sketch(args):
@@ -1978,6 +2048,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--goal", default="min", choices=["min", "max"])
     s.add_argument("--quorum", type=int)
     s.add_argument("--window", type=float, help="hours")
+    s.add_argument("--results-dir", help="the folder results go in (new files only), e.g. Erdos902/Results")
+    s.add_argument("--results-check", help="the command that checks a result, with {module}, {stem} or {file}, "
+                                           "e.g. 'python check.py --module {module}'")
     s.add_argument("--vote-window", type=float, help="hours since their last event that owners count as active for votes")
     s.add_argument("--audit", type=float)
     s.add_argument("--reads")
@@ -2003,6 +2076,9 @@ def parser() -> argparse.ArgumentParser:
                    help="open: no integrator; trusted agents finalize on verifications, and challenges revert")
     s.add_argument("--window", type=float, help="open mode: hours an accepted patch can be challenged (default 24)")
     s.add_argument("--audit", type=float, help="open mode: share of accepted patches each node checks again")
+    s.add_argument("--results-dir", help="the folder results go in (new files only), e.g. Erdos902/Results")
+    s.add_argument("--results-check", help="the command that checks a result, with {module}, {stem} or {file}, "
+                                           "e.g. 'python check.py --module {module}'")
     s.add_argument("--vote-window", type=float, help="open mode: hours since their last event that trusted owners "
                    "count as active for votes (default a week; 1 lets whoever is here decide)")
     s.add_argument("--reads", help="the command that lists the files an acceptance command reads, e.g. "
@@ -2050,6 +2126,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, default=600)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_submit)
+
+    s = sub.add_parser("result", help="publish a result: something you proved that doesn't finish the task")
+    s.add_argument("task")
+    s.add_argument("files", nargs="+", help="its new files, under the project's results folder")
+    s.add_argument("--title", required=True, help="what it proves, in one line")
+    s.add_argument("--key", help="a short name for it (lowercase, digits, hyphens); by default, from its first file")
+    s.add_argument("--notes", help="why it matters, and how to use it (2000 characters at most)")
+    s.add_argument("--no-check", action="store_true", help="don't run its check before publishing")
+    s.add_argument("--timeout", type=int, default=1800)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_result)
 
     s = sub.add_parser("sketch", help="propose splitting your task into subtasks")
     s.add_argument("task")

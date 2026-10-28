@@ -188,3 +188,14 @@ def test_the_hub_sits_at_the_centre_with_its_chat_and_literature():
     assert [(r["url"], [b["name"] for b in r["by"]]) for r in hub["literature"]] == [
         ("https://arxiv.org/abs/2101.00001", ["boss", "ana"])]
     assert "hub.message" in [e["type"] for e in viz.history(evs, tid, None)]  # it's part of the task's conversation
+
+
+def test_a_result_is_drawn_under_its_task():
+    evs, tid = project_events()
+    evs += [E.create(BOSS, "project.policy", 4, results_dir="R", results_check="check {file}"),
+            E.create(ANA, "result.submitted", 5, task=tid, key="lemma", title="A lemma", files=["R/L.lean"],
+                     commit="c", branch=f"legion/{tid}/result-ana-1")]
+    r = next(t for t in viz.snapshot(evs, None)["tasks"] if t["kind"] == "result")
+    assert (r["parent"], r["status"], r["key"]) == (tid, "review", "a/lemma")
+    assert [e["type"] for e in viz.hub(evs, None)["chat"]] == ["result.submitted"]
+    assert [e["type"] for e in viz.history(evs, r["id"], None)] == ["result.submitted"]  # its own window has it

@@ -602,3 +602,27 @@ def test_a_new_agent_starts_at_the_hub_and_a_stuck_one_goes_back(project, capsys
     main(["claim", tids["a"]])
     shown = capsys.readouterr().out
     assert "The hub has this on this task" in shown and "Tournaments <https://arxiv.org/abs/2101.00001>" in shown
+
+
+def test_a_result_is_checked_like_a_patch_and_lands_in_main(project, capsys):
+    """Proved along the way: a new file under the results folder, published with `result`, checked and merged
+    like any patch, under the task it came from."""
+    from legion.cli import main
+    repo, tids, patch = project
+    make_project.add(make_project.people["boss"], "project.policy", results_dir="res",
+                     results_check="python check.py {stem}")
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    (repo / "res").mkdir()
+    (repo / "res" / "lemma.txt").write_text("ok\n")
+    capsys.readouterr()
+    assert main(["result", tids["a"], "res/lemma.txt", "--title", "The lemma a needs"]) == 0
+    assert "Result a/lemma published" in capsys.readouterr().out
+    st = Ctx(sync=False).st
+    r = next(t for t in st.tasks.values() if t.kind == "result")
+    assert r.key == "a/lemma" and r.parent == tids["a"] and st.status(r.id, time.time()) == "review"
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    st = Ctx(sync=False).st
+    assert st.status(r.id, time.time()) == "accepted" and git(repo, "show", "legion/main:res/lemma.txt") == "ok"
+    as_(repo, "luis")
+    assert main(["result", tids["a"], "res/lemma.txt", "--title", "again"]) == 5  # main has it: only new files

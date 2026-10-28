@@ -19,6 +19,7 @@ TYPES = {
     "task.note",
     "hub.message",
     "lit.added",
+    "result.submitted",
     "work.saved",
     "patch.verified",
     "proposal.made",

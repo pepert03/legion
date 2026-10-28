@@ -400,11 +400,11 @@ def patch_branch(repo, tid: str, who: str, n: int) -> str:
     return f"{PATCHES}{tid}/{who}-{n}" if is_p2p(repo) else f"legion/{tid}/{who}-{n}"
 
 
-def publish_patch(repo, branch: str) -> None:
+def publish_patch(repo, branch: str, commit: str = "HEAD") -> None:
     if is_p2p(repo):
-        git(repo, "update-ref", branch, "HEAD")
+        git(repo, "update-ref", branch, commit)
     else:
-        git(repo, "push", "-q", "-f", "origin", f"HEAD:refs/heads/{branch}")
+        git(repo, "push", "-q", "-f", "origin", f"{commit}:refs/heads/{branch}")
 
 
 def fetch_patch(repo, branch: str) -> bool:

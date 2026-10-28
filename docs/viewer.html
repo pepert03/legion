@@ -353,6 +353,7 @@ const LABEL_PX = 9;  // on-screen radius (px) from which a node's label shows
 
 function radius(n) {
   if (n.id === GOAL) return 17;
+  if (n.kind === "result") return 3.6;
   const base = { S: 6, M: 7.5, L: 9.5 }[n.size] || 7;
   return Math.max(4, base - n.depth * 1.3 + Math.min(n.children, 6) * 0.5);
 }
@@ -363,7 +364,8 @@ function applySnapshot(d) {
   let structural = false;
   if (!nodes.has(GOAL)) { nodes.set(GOAL, { id: GOAL, depth: -1, x: 0, y: 0, ripples: [] }); structural = true; }
   const goal = nodes.get(GOAL);
-  const exclusive = d.tasks.filter((t) => t.mode === "exclusive" && t.status !== "cancelled");
+  // Results are proved along the way: they don't count as tasks to do.
+  const exclusive = d.tasks.filter((t) => t.mode === "exclusive" && t.status !== "cancelled" && t.kind !== "result");
   Object.assign(goal, { label: d.project || "project", children: d.tasks.filter((t) => !t.parent).length,
                         done: exclusive.filter((t) => t.status === "accepted").length, total: exclusive.length });
   const want = new Set([GOAL]);
@@ -493,7 +495,11 @@ function drawNode(n, ctx, scale) {
     ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.5 + p * 2.5, 0, Math.PI * 2);
     ctx.fillStyle = rgba(col, 0.09 + p * 0.06); ctx.fill();
   }
-  ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+  ctx.beginPath();
+  if (n.kind === "result") {  // a result, proved along the way under its task: a small diamond
+    const d = r * 1.3;
+    ctx.moveTo(n.x, n.y - d); ctx.lineTo(n.x + d, n.y); ctx.lineTo(n.x, n.y + d); ctx.lineTo(n.x - d, n.y); ctx.closePath();
+  } else ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
   if (n.status === "accepted") {
     ctx.fillStyle = col; ctx.fill();
   } else {
@@ -629,7 +635,8 @@ const TYPE_COLOR = { "task.claimed": "claimed", "patch.submitted": "review", "pa
   "patch.rejected": "cancelled", "patch.reverted": "cancelled", "sketch.proposed": "sketched", "sketch.accepted": "sketched", "sketch.rejected": "cancelled",
   "path.proposed": "sketched", "path.accepted": "sketched", "path.rejected": "cancelled",
   "sketch.failed": "cancelled", "task.resolved": "accepted", "attempt.reported": "ink3", "task.released": "ink3",
-  "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink" };
+  "task.created": "ink", "main.updated": "ink", "project.init": "ink", "agent.joined": "ink",
+  "result.submitted": "review" };
 const taskKey = (id) => (data.tasks.find((t) => t.id === id) || {}).key || id;
 const shownFeed = new Set();
 
@@ -723,7 +730,7 @@ async function viewTask(n) {
   const workers = data.agents.filter((a) => a.holds.includes(n.id));
   // The conversation: the notes agents post to each other, and their reports, which say what they tried.
   // What was said about it in the hub, and the references brought for it, belong to its conversation too.
-  const TALK = new Set(["task.note", "attempt.reported", "work.saved", "hub.message", "lit.added"]);
+  const TALK = new Set(["task.note", "attempt.reported", "work.saved", "hub.message", "lit.added", "result.submitted"]);
   const notes = items.filter((e) => TALK.has(e.type));
   const others = items.filter((e) => !["task.note", "hub.message", "lit.added"].includes(e.type));
   return [
@@ -731,6 +738,8 @@ async function viewTask(n) {
       h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
       h("div", {}, h("div", { class: "name", style: "font-style:italic" }, n.key), h("div", { class: "sub" }, n.title))),
     h("dl", { class: "kv" },
+      n.kind === "result" ? [h("dt", {}, "result"), h("dd", { style: "font-style:italic" },
+        "proved along the way, under its task: it doesn't finish it, and it's checked like a patch")] : null,
       h("dt", {}, "status"), h("dd", { style: `color:${col}` }, STATUS[n.status] + (n.status === "sketched" ? `, ${n.children_done} of ${n.children} subtasks` : "")),
       workers.length ? [h("dt", {}, "working"), h("dd", {}, ...workers.flatMap((a, i) => [i ? ", " : "", nameNode(a)]))] : null,
       n.parent ? [h("dt", {}, "part of"), h("dd", { style: "font-style:italic" }, taskKey(n.parent))] : null,
@@ -768,12 +777,14 @@ function chatList(notes, hubView = false) {
           e.type === "attempt.reported" ? h("span", { class: `tag ${e.outcome}` }, `report · ${e.outcome}`) : null,
           e.type === "work.saved" ? h("span", { class: "tag" }, "saved work") : null,
           e.type === "lit.added" ? h("span", { class: "tag" }, "reference") : null,
+          e.type === "result.submitted" ? h("span", { class: "tag" }, "result") : null,
           e.type === "proposal.made" ? h("span", { class: "tag" }, "proposal") : null,
           e.type === "hub.message" && e.task && hubView ? h("span", { class: "tag" }, `on ${taskKey(e.task)}`) : null,
           e.type === "hub.message" && !hubView ? h("span", { class: "tag" }, "in the hub") : null,
           h("span", { class: "when" }, ago(e.ts))),
         e.reply ? replyTo(notes, e.reply) : null,
         e.type === "lit.added" ? h("div", { class: "text" }, link(e.url, e.title || e.url), "\n", e.note)
+          : e.type === "result.submitted" ? h("div", { class: "text" }, h("i", {}, e.title), e.note ? ["\n", e.note] : null)
           : h("div", { class: "text" }, e.note == null ? e.text : mentions(e.note))));
   }));
 }
@@ -1050,7 +1061,9 @@ async function init() {
       const hb = data.hub || { literature: 0, messages: 0 };
       content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`), h("br"),
                                  h("i", {}, `the hub: ${hb.literature} references, ${hb.messages} messages`)]
-                              : [h("i", {}, n.key), h("br"), `${STATUS[n.status]} · ${n.title}`];
+                              : [h("i", {}, n.key), h("br"),
+                                 `${n.kind === "result" ? `result, ${n.status === "accepted" ? "checked" : STATUS[n.status]}`
+                                   : STATUS[n.status]} · ${n.title}`];
     }
     if (hoverAgent) el.style.cursor = "pointer";
     if (content) { tip.replaceChildren(...content.flat().filter(Boolean)); tip.style.display = "block"; tip.style.left = `${ev.clientX + 14}px`; tip.style.top = `${ev.clientY + 16}px`; }
