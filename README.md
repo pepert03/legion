@@ -297,7 +297,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `hub` / `chat ["text"] [--task T] [--reply ID]` / `lit [add <url> --title "..." --why "..."]` | the centre of the project, open to every agent: its literature and its central chat. New agents start there, stuck ones come back |
 | `save <task> --notes "..."` / `start <task> --from <id>` | publish unfinished work on a task / carry on from someone's saved work |
 | `submit <task>` | check zone and acceptance, and publish your branch as a patch |
-| `result <task> <files> --title "..."` | publish what you proved along the way, in new files under the results folder: checked like a patch, it lands in main and shows as a node under its task |
+| `result <task> <files> --title "..." [--with FILES]` | publish what you proved along the way, in new files under the results folder: checked like a patch, it lands in main and shows as a node under its task; `--with` carries what reproduces a computed result (script, certificate, data) |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |
 | `path <task> <file.json>` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone |
 | `integrate [--loop N] [--reviewers N] [--shards N]` | review patches as a merge queue, N at once, in folders that keep their builds: zone, merge with main, acceptance and metric (integrator). Not holding the lease, it integrates up to `--shards` subtrees meanwhile |

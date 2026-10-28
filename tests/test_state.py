@@ -862,3 +862,19 @@ def test_claim_cools_down_on_what_an_agent_let_go():
     st = log.state()
     assert st.cooling(ANA.author, 1300) == {tid, b} and st.cooling(BEA.author, 1300) == set()
     assert st.cooling(ANA.author, 1100 + S.COOLDOWN + 1) == {b}
+
+
+def test_a_result_carries_companions_unchecked():
+    log, tid = project(key="upper")
+    log.add(BOSS, "project.policy", results_dir="Results", results_check="lake build {module}")
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    r = dict(task=tid, key="g32", title="g(3,2) = 27", files=["Results/G32.lean"], commit="c",
+             branch=f"refs/legion/patches/{tid}/result-ana-1")
+    log.add(ANA, "result.submitted", **dict(r, extra=["elsewhere/gen.py"]))            # outside the folder
+    log.add(ANA, "result.submitted", **dict(r, extra=["Results/G32.lean"]))            # the checked file again
+    ev = log.add(ANA, "result.submitted", **dict(r, extra=["Results/g32_cnf.py", "Results/g32.drat"]))
+    st = log.state()
+    assert [why for _, why in st.ignored] == ["a result's companions are at most 10 other new files under Results/"] * 2
+    rt = st.tasks[S.task_id(ev)]
+    assert rt.zone == ["Results/G32.lean", "Results/g32_cnf.py", "Results/g32.drat"]
+    assert rt.accept == "lake build Results.G32"                                        # only the checked file

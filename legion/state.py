@@ -55,8 +55,10 @@ LINK_PREFIXES = ("https://", "http://", "doi:", "arxiv:")
 # {file}, {stem} or {module} in it) like any patch, and merged into main once accepted. It only adds files, so it
 # needs no vote: whoever took part in the task may publish one, at most MAX_RESULTS_PER_DAY a day and
 # MAX_OPEN_RESULTS waiting at once. An accepted result doesn't count towards trust (results are cheap to make up);
-# a rejected one costs it, like any patch.
-MAX_RESULTS_PER_DAY, MAX_OPEN_RESULTS, MAX_RESULT_FILES = 3, 2, 5
+# a rejected one costs it, like any patch. A computed result brings what makes it reproducible along (the script
+# that made it, a certificate, its data): up to MAX_RESULT_EXTRA companion files, in the same folder, new too, which
+# go into main with it but aren't checked.
+MAX_RESULTS_PER_DAY, MAX_OPEN_RESULTS, MAX_RESULT_FILES, MAX_RESULT_EXTRA = 3, 2, 5, 10
 RESULT_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
@@ -522,14 +524,18 @@ class State:
         if (not isinstance(files, list) or not 1 <= len(files) <= MAX_RESULT_FILES or len(set(files)) != len(files)
                 or not all(isinstance(f, str) and f.startswith(root) and RESULT_FILE.fullmatch(f) for f in files)):
             return f"a result is 1 to {MAX_RESULT_FILES} new files under {root}"
+        extra = ev.get("extra") or []
+        if (not isinstance(extra, list) or len(extra) > MAX_RESULT_EXTRA or len(set(files + extra)) != len(files + extra)
+                or not all(isinstance(f, str) and f.startswith(root) and RESULT_FILE.fullmatch(f) for f in extra)):
+            return f"a result's companions are at most {MAX_RESULT_EXTRA} other new files under {root}"
         taken = {f for t in self.tasks.values() if t.kind == "result" and self.status(t.id, ev["ts"]) != "cancelled"
                  for f in t.zone}
-        if taken & set(files):
-            return f"another result has {', '.join(sorted(taken & set(files)))}"
+        if taken & set(files + extra):
+            return f"another result has {', '.join(sorted(taken & set(files + extra)))}"
         if not ev.get("commit") or not valid_branch(ev.get("branch")):
             return "missing commit, or the branch is outside the patch namespace"
         tid = task_id(ev)
-        self.tasks[tid] = Task(tid, f"{target.key}/{slug}", title.strip(), list(files),
+        self.tasks[tid] = Task(tid, f"{target.key}/{slug}", title.strip(), list(files + extra),
                                result_accept(pol["results_check"], files), body=notes, lamport=ev["lamport"],
                                parent=target.id, depth=target.depth + 1, kind="result")
         self.patches[ev["id"]] = Patch(ev["id"], tid, ev["author"], ev["name"], ev["commit"], ev["branch"],

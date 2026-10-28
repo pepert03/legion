@@ -710,3 +710,37 @@ def test_main_publish_refuses_a_commit_not_built_on_the_current_main(project, ca
     assert main(["main", "publish"]) == 0
     st = Ctx(sync=False).st
     assert st.main_tip == git(repo, "rev-parse", "HEAD") and git(repo, "show", f"{st.main_tip}:a.txt") == "ok"
+
+
+def test_a_check_that_doesnt_finish_here_doesnt_stop_a_submit(project, capsys):
+    """Out of time, or a test's own time limit on a busy machine: that says nothing about the patch, so it goes
+    to the verifiers instead of being refused."""
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    main(["start", tids["a"]])
+    (repo / "a.txt").write_text("slow\n")
+    git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", "slow")
+    capsys.readouterr()
+    assert main(["submit", tids["a"], "--timeout", "2"]) == 0
+    assert "didn't finish here (out of time)" in capsys.readouterr().err
+    assert [p.author for p in Ctx(sync=False).st.patches_for(tids["a"])] == [make_project.people["luis"].author]
+
+
+def test_a_result_brings_what_reproduces_it(project):
+    from legion.cli import main
+    repo, tids, patch = project
+    make_project.add(make_project.people["boss"], "project.policy", results_dir="res",
+                     results_check="python check.py {stem}")
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    (repo / "res").mkdir()
+    (repo / "res" / "count.txt").write_text("ok\n")
+    (repo / "res" / "count_gen.py").write_text("print('the search that found it')\n")
+    assert main(["result", tids["a"], "res/count.txt", "--title", "The count", "--with", "res/count_gen.py"]) == 0
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    st = Ctx(sync=False).st
+    r = next(t for t in st.tasks.values() if t.kind == "result")
+    assert st.status(r.id, time.time()) == "accepted" and r.zone == ["res/count.txt", "res/count_gen.py"]
+    assert "the search that found it" in git(repo, "show", "legion/main:res/count_gen.py")

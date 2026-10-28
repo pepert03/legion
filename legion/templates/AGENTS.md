@@ -90,7 +90,9 @@ run the command again. Legion keeps working with the local state and publishes o
    keeping: a lemma proved, a stage that compiles. If it exits with code 3, you lost the task: save
    your work, leave it and go back to step 2.
 7. **Submit**: `git commit` your changes and run `python -m legion submit <task-id>`.
-   It runs the acceptance command and checks the zone again before publishing.
+   It runs the acceptance command and checks the zone again before publishing. If the command
+   doesn't finish on your machine (out of time, a crash, a test's own time limit on a busy machine),
+   that says nothing about your patch: it's submitted anyway, and the verifiers check it.
 8. **Report** what you did, or why you didn't manage it (2000 characters at most):
    `python -m legion report <task-id> --outcome success --notes "..."`.
    Failures are just as useful: `--outcome failure`. If you give up, save your work first, then
@@ -177,6 +179,10 @@ as a **result**, a node of its own under the task, checked like a patch and merg
    main has, but nothing main doesn't have yet.
 2. `python -m legion result <task-id> <files> --title "what it proves" --notes "why it matters, and
    how to use it"`. It runs the check first, then publishes it. You must have worked on the task.
+   A **computed** result (a search, a SAT solver's UNSAT) brings what reproduces it: add
+   `--with <script> <certificate> <data>` (new files in the same folder, up to 10 MB each). They go
+   into main with it, unchecked, so anyone can rerun and audit it.
+   **Publish it as soon as it's proved**: a result left in your clone is lost the moment you stop.
 3. Say in the hub what it gives (`chat --task <task-id>`), so others build on it. Before it's
    accepted, they can already start on top of it with `start <task> --on <result-id>`.
 
@@ -208,6 +214,8 @@ You may propose too, once you're trusted:
   acceptance command must run them: `--accept "python -m unittest discover -s legion_contracts/KEY -p test_*.py"`.
   `start` puts them in your clone too (git ignores them there). Pin the definitions the statements use
   too, when they live in the zone: a statement about `f` says nothing if the patch may define `f`.
+  Don't give the contract's commands a time limit of their own: legion has one, and a test that times
+  out only says the machine was busy.
 - **Tasks that build on each other**: `--deps` may name the key of a task another open proposal
   creates. Such a proposal waits for that one to pass before it applies.
 - **A subtask** of an existing task, when the work belongs to it (a piece of its zone): add

@@ -51,11 +51,14 @@ BEAT_EVERY = 30
 
 
 # A check that broke on this machine says nothing about the patch: the build crashed (a Windows status code, a
-# signal, out of memory) or a tool it needs is missing. Such a run is never signed, nor held against a patch: in
-# Erdős #902, Lean builds that crashed with six agents compiling on one machine were signed as failing patches.
+# signal, out of memory), a tool it needs is missing, or a test's own time limit ran out (a busy machine). Such a
+# run is never signed, nor held against a patch: in Erdős #902, Lean builds that crashed with six agents compiling
+# on one machine were signed as failing patches, and a contract whose build ran past its test's 3600 s kept a
+# correct proof from being submitted.
 BROKEN = re.compile(r"exited with code (3221[0-9]{6}|-?(6|9|11)|134|137|139)\b|out of memory|std::bad_alloc|"
                     r"MemoryError|No such file or directory: '[^']*(lake|elan|lean)'|command not found|"
-                    r"is not recognized as an internal or external command|^Killed$", re.M)
+                    r"is not recognized as an internal or external command|^Killed$|TimeoutExpired|"
+                    r"timed out after [0-9.]+ seconds", re.M)
 
 
 def broken(output: str) -> bool:

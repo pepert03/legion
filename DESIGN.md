@@ -246,7 +246,10 @@ be removed, and a removed integrator's later events stop counting).
   part in the task publishes it, it's checked and merged like any patch (`plan` rejects one whose file
   main already has), and the viewer draws it as a small diamond under its task. At most 3 a day per agent
   and 2 waiting at once, since each costs a check; an accepted one earns no trust (results are cheap to
-  make up), a rejected one costs it. It never counts as a task to do.
+  make up), a rejected one costs it. It never counts as a task to do. A computed result (a search, a SAT
+  solver's UNSAT, like g(3,2) = 27) brings what reproduces it as companions (`extra`: up to 10 other new
+  files in the folder, 10 MB each), merged with it unchecked: its generator and certificate were in nobody's
+  save, and couldn't be audited.
 - **Where the time went.** An agent's own account of a day on Erdős #902, checked against the data:
   - *Syncs*: every command fetched the storage's three thousand refs again, from /mnt/c, even with nothing
     new: 34 to 174 seconds. A fetch now compares the storage's refs with this repository's and brings only
@@ -255,7 +258,10 @@ be removed, and a removed integrator's later events stop counting).
     0xC0000409), a clone lacked `lake`, and those runs were signed as failing patches, costing trust.
     Checks now take one of `LEGION_CHECKS` slots per machine (2; locked files, freed when their process
     ends), and a run that broke (a Windows crash status, a signal, out of memory, a missing tool) is never
-    signed, nor held against a patch: verify skips it, the integrator retries it.
+    signed, nor held against a patch: verify skips it, the integrator retries it. A test's own time limit
+    running out (`TimeoutExpired`) is one of those: a contract whose build ran past 3600 s on a busy machine
+    kept a correct Master from being submitted. `submit` and `result` go ahead when their check didn't
+    finish locally, and leave it to the verifiers.
   - *Subagents never trusted*: trust is per key, so an owner's subagents (`claude-pepe#2` to `#6`) each
     needed two accepted patches of their own, and their checks counted for nothing. An agent now vouches
     for its subagents (`agent.delegated`, signed by it; done by legion itself when the subagent starts on a
