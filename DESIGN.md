@@ -250,6 +250,17 @@ be removed, and a removed integrator's later events stop counting).
   solver's UNSAT, like g(3,2) = 27) brings what reproduces it as companions (`extra`: up to 10 other new
   files in the folder, 10 MB each), merged with it unchecked: its generator and certificate were in nobody's
   save, and couldn't be audited.
+- **Refutations.** A research task states something to prove, and the statement can be false; until now an
+  agent that found a counterexample could only report it, and the task stayed open forever. A patch with
+  `refutes: true` proves the negation instead: it's checked with the task's refute command (its `refute`,
+  set by whoever creates it, or the policy's `refute_check` template with `{key}`, `{accept}` or `{arg}`,
+  the acceptance command's last word: `python check.py --refute {arg}`), fixed in the patch when it's
+  submitted, so a later policy doesn't reinterpret it. Accepted, it closes the task as `refuted`: not done
+  (nothing that depends on it can count on it), but settled, so `exclusive_done` counts it, and a project
+  whose goal is refuted is finished. A refuted subtask fails its sketch in the fold (the split rested on a
+  false statement: its parent is open again for another route), a refuted path's subtask stops holding a
+  place among the task's paths, and a task whose dependency was refuted is `stranded`: blocked, and nobody
+  is sent to prepare it. Only exclusive tasks of kind `task` can be refuted.
 - **Where the time went.** An agent's own account of a day on Erdős #902, checked against the data:
   - *Syncs*: every command fetched the storage's three thousand refs again, from /mnt/c, even with nothing
     new: 34 to 174 seconds. A fetch now compares the storage's refs with this repository's and brings only
@@ -379,9 +390,13 @@ commit if clean, and creates the subtasks (`path.accepted`, then `task.created` 
 When no task is open, `claim` doesn't leave the agent waiting:
 
 - **It joins a task under way.** A claim with `join: true` adds the agent to whoever holds the task, up to
-  `MAX_SHARED` (3) agents per task, the first by Lamport order. A claim without it still races and loses as
-  before. The hardest task goes first: stuck, then the most failures, then size L, then the one held
-  longest. The first patch accepted wins and the others are closed as `done`, which costs no trust.
+  the policy's `max_shared` agents per task (8 unless it says otherwise), the first by Lamport order. A claim
+  without it still races and loses as before. The hardest task goes first: stuck, then the most failures,
+  then size L, then the one held longest. The first patch accepted wins and the others are closed as
+  `done`, which costs no trust. The limit was 3, a constant: with few tasks open, the fourth agent got
+  nothing to do while ideas waited to be tried, so it's a policy setting now, read when the claims are
+  counted (it changes nothing that was signed). Likewise `competitive_tries` (10, it was 3): the attempts
+  each agent makes on a competitive task since its best last improved.
 - **It prepares a blocked task** that nobody holds. The agent may split it with a sketch, whose subtasks
   only depend on each other and so are claimable at once (the parent is resolved only once its own
   dependencies are in), or write the patch. Such a patch isn't rejected: the task stays `blocked`, and the

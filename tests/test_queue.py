@@ -799,3 +799,30 @@ def test_claim_hands_out_the_research_work_most_wanted(project, capsys):
     capsys.readouterr()
     assert main(["claim"]) == 0                                         # b comes back to luis, with its route
     assert "A probabilistic deletion argument" in capsys.readouterr().out
+
+
+def test_a_refutation_closes_a_task_whose_statement_is_false(project, capsys):
+    """Proved false: checked with the task's refute command instead of its acceptance, it closes the task."""
+    from legion.cli import main
+    repo, tids, patch = project
+    c = S.task_id(make_project.add(make_project.people["boss"], "task.created", key="c", title="c",
+                                   zone=["c.txt", "c_neg.txt"], accept="python check.py c",
+                                   refute="python check.py c_neg"))
+    as_(repo, "luis")
+    assert main(["claim", c]) == 0
+    assert "refutation:  python check.py c_neg" in capsys.readouterr().out
+    main(["start", c])
+    (repo / "c.txt").write_text("false\n")
+    (repo / "c_neg.txt").write_text("ok\n")
+    git(repo, "add", "c.txt", "c_neg.txt")
+    git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qm", "c is false")
+    assert main(["submit", c]) == 6                                     # as a proof of c, it fails
+    assert main(["submit", c, "--refutes"]) == 0
+    integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
+    st = Ctx(sync=False).st
+    assert st.status(c, time.time()) == "refuted" and not st.done(c)
+    assert git(repo, "show", "legion/main:c_neg.txt") == "ok"         # the refutation is in main
+    as_(repo, "luis")
+    capsys.readouterr()
+    assert main(["submit", c]) == 3
+    assert "was refuted" in capsys.readouterr().err

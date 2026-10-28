@@ -38,6 +38,7 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "holder": h.name if h else None, "holder_author": h.author if h else None,
             "working": [c.name for c in st.claimants(t.id, now)],
             "zone": t.zone, "accept": t.accept, "metric": t.metric, "goal": t.goal, "best": st.best(t.id),
+            "refute": st.refute_command(t) if t.mode == "exclusive" and t.kind == "task" else "",
             "deps": [st.tasks[d].key for d in t.deps], "size": t.size, "body": t.body,
             "contract": sorted(t.contract),
             "parent": st.tasks[t.parent].key if t.parent else None, "depth": t.depth,
@@ -65,6 +66,9 @@ def task_text(t: dict) -> str:
              f"  mode:        {t['mode']}",
              f"  zone:        {', '.join(t['zone'])}",
              f"  acceptance:  {t['accept']}"]
+    if t.get("refute"):
+        lines.append(f"  refutation:  {t['refute']} (if the statement is false, prove its negation and "
+                     "`submit --refutes`: that closes the task)")
     if t.get("contract"):
         lines.append(f"  contract:    {', '.join(t['contract'])} in {S.contract_dir(t['key'])}/ "
                      "(`start` writes it; the patch must pass it unchanged)")
@@ -129,7 +133,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "question.answered": f"answers question {str(ev.get('question', ''))[:8]} on {key}"
                              + (" (settles it)" if ev.get("settled") else "")
                              + f": {ev.get('text', '') if full else ev.get('text', '').replace(chr(10), ' ')[:200]}",
-        "patch.submitted": f"submits patch {ev['id'][:8]} for {key}",
+        "patch.submitted": f"submits {'a refutation' if ev.get('refutes') else 'patch'} {ev['id'][:8]} for {key}",
         "patch.accepted": f"accepts patch {ev.get('patch', '')[:8]} for {key}"
                           + (f" (metric {ev['metric']:g})" if isinstance(ev.get("metric"), (int, float)) else ""),
         "patch.rejected": f"rejects patch {ev.get('patch', '')[:8]} for {key}: {reason}",
@@ -544,7 +548,7 @@ def create_task(c: Ctx, spec: dict, keymap: dict) -> str:
     ev = c.emit("task.created", key=spec.get("key"), title=spec.get("title"),
                 zone=[zone] if isinstance(zone, str) else zone, accept=spec.get("accept"),
                 mode=spec.get("mode", "exclusive"), metric=spec.get("metric"), goal=spec.get("goal", "min"),
-                deps=deps, size=spec.get("size", "M"), body=spec.get("body", ""))
+                deps=deps, size=spec.get("size", "M"), body=spec.get("body", ""), refute=spec.get("refute"))
     tid = S.task_id(ev)
     if spec.get("key"):
         keymap[spec["key"]] = tid
@@ -557,7 +561,8 @@ def cmd_task(args):
     keymap = {}
     if args.action == "add":
         spec = {"key": args.key, "title": args.title, "zone": args.zone, "accept": args.accept, "mode": args.mode,
-                "metric": args.metric, "goal": args.goal, "deps": args.deps, "size": args.size, "body": args.body}
+                "metric": args.metric, "goal": args.goal, "deps": args.deps, "size": args.size, "body": args.body,
+                "refute": args.refute}
         print(f"Task created: {create_task(c, spec, keymap)}")
     else:
         specs = json.loads(Path(args.file).read_text(encoding="utf-8"))
@@ -1175,6 +1180,7 @@ def cmd_propose(args):
         if parent and not key.startswith(parent.key + "/"):  # a subtask's key carries its parent's, as in sketches
             key = f"{parent.key}/{key}"
         payload = {"key": key, "title": args.title, "zone": args.zone, "accept": args.accept,
+                   **({"refute": args.refute} if args.refute else {}),
                    "body": args.body or "", "size": args.size, "mode": args.mode, "deps": deps}
         if parent:
             payload["parent"] = parent.id
@@ -1199,11 +1205,13 @@ def cmd_propose(args):
         payload = {k: v for k, v in (("quorum", args.quorum), ("audit", args.audit), ("reads", args.reads),
                                      ("window", int(args.window * 3600) if args.window is not None else None),
                                      ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
-                                     ("results_dir", args.results_dir), ("results_check", args.results_check))
+                                     ("results_dir", args.results_dir), ("results_check", args.results_check),
+                                     ("refute_check", args.refute_check), ("max_shared", args.max_shared),
+                                     ("competitive_tries", args.competitive_tries))
                    if v is not None}
         if not payload:
-            raise Fail("say what to change: --quorum, --window, --audit, --reads, --vote-window, --results-dir or "
-                       "--results-check")
+            raise Fail("say what to change: --quorum, --window, --audit, --reads, --vote-window, --results-dir, "
+                       "--results-check, --refute-check, --max-shared or --competitive-tries")
         kind = "project.policy"
     else:
         text = read_description(args)
@@ -1255,7 +1263,9 @@ def cmd_policy(args):
                                 ("audit", args.audit),
                                 ("window", int(args.window * 3600) if args.window is not None else None),
                                 ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
-                                ("results_dir", args.results_dir), ("results_check", args.results_check))
+                                ("results_dir", args.results_dir), ("results_check", args.results_check),
+                                ("refute_check", args.refute_check), ("max_shared", args.max_shared),
+                                ("competitive_tries", args.competitive_tries))
               if v is not None}
     if change:
         c.require_integrator()
@@ -1264,6 +1274,9 @@ def cmd_policy(args):
     p = c.st.policy
     results = (f" Results go in {p['results_dir']}/, checked with `{p['results_check']}`." if p["results_dir"]
                and p["results_check"] else " No results yet (`--results-dir`, `--results-check`).")
+    results += (f" Up to {p['max_shared']} agents work on a task at once, and each makes up to "
+                f"{p['competitive_tries']} attempts on a competitive task since its best last improved."
+                + (f" Refutations are checked with `{p['refute_check']}`." if p["refute_check"] else ""))
     if p["mode"] == "open":
         out(args, p, f"Open mode, no integrator: any trusted agent finalizes a patch as soon as "
                      f"{max(1, p['quorum'])} trusted owner(s) other than its author verified it. For "
@@ -1792,8 +1805,16 @@ def cmd_submit(args):
     if t.mode == "exclusive":
         if c.st.done(t.id):
             raise Fail(f"task {t.key} is already done", 3)
+        if c.st.refuted(t.id):
+            raise Fail(f"task {t.key} was refuted: its statement is false, so nothing proves it now", 3)
         if not c.holder_is_me(t.id):
             raise Fail(f"you don't hold the claim on {t.key}: claim it before submitting", 3)
+    check, what = t.accept, "acceptance"
+    if args.refutes:  # a proof that the statement is false, checked with its refute command
+        check, what = c.st.refute_command(t), "refutation"
+        if t.mode != "exclusive" or t.kind != "task" or not check:
+            raise Fail(f"{t.key} can't be refuted: it has no refute command (`task add --refute`), and the policy "
+                       "gives none (`policy --refute-check`)", 5)
     repo = c.repo
     coordgit.refresh_base(repo)
     main = coordgit.base_ref(repo)
@@ -1812,18 +1833,18 @@ def cmd_submit(args):
         keep_claim(c, t)  # the check can take minutes: start it with a fresh claim
         c.sync()
         put_contract(repo, t)  # the contract as the task states it, whatever this clone has
-        code, output = integrator.run_cmd(t.accept, repo, args.timeout)
+        code, output = integrator.run_cmd(check, repo, args.timeout)
         if unfinished(code, output):
-            print(f"legion: the acceptance command didn't finish here ({unfinished(code, output)}), which says "
+            print(f"legion: the {what} command didn't finish here ({unfinished(code, output)}), which says "
                   "nothing about your patch: submitting it anyway, and the verifiers check it.\n"
                   f"{integrator.tail(output)}", file=sys.stderr)
         elif code != 0:
-            raise Fail(f"the acceptance command fails, not submitting:\n{integrator.tail(output)}", 6)
+            raise Fail(f"the {what} command fails, not submitting:\n{integrator.tail(output)}", 6)
     mine = [p for p in c.st.patches_for(t.id) if p.author == c.me]
     branch = coordgit.patch_branch(repo, t.id, c.ident.short, len(mine) + 1)
     coordgit.publish_patch(repo, branch)
     ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch,
-                **({"on": [p.id for p in on]} if on else {}))
+                **({"on": [p.id for p in on]} if on else {}), **({"refutes": True} if args.refutes else {}))
     c.sync()
     waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
                           + [c.st.tasks[p.task].key for p in on])
@@ -2305,6 +2326,13 @@ def cmd_update(args):
         print("legion updated.")
 
 
+REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without its own, with {key}, {accept} or {arg} "
+                     "(the acceptance command's last word), e.g. 'python check.py --refute {arg}'")
+MAX_SHARED_HELP = f"how many agents may work on one task at once (default {S.MAX_SHARED})"
+COMPETITIVE_TRIES_HELP = (f"attempts each agent makes on a competitive task since its best last improved "
+                          f"(default {S.COMPETITIVE_TRIES})")
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="legion", description="Coordinate many agents on one git repository.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2363,6 +2391,7 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--title", required=True)
     a.add_argument("--zone", nargs="+", required=True)
     a.add_argument("--accept", required=True)
+    a.add_argument("--refute", help="the command that checks a refutation: a proof that the statement is false")
     a.add_argument("--mode", choices=["exclusive", "competitive"], default="exclusive")
     a.add_argument("--metric")
     a.add_argument("--goal", choices=["min", "max"], default="min")
@@ -2505,6 +2534,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--title")
     s.add_argument("--zone", nargs="+")
     s.add_argument("--accept")
+    s.add_argument("--refute", help="the command that checks a refutation: a proof that the statement is false")
     s.add_argument("--body")
     s.add_argument("--deps", nargs="*", help="tasks, or keys of tasks other open proposals create")
     s.add_argument("--parent", help="make it a subtask of this task: its zone must lie inside the parent's, and the "
@@ -2522,6 +2552,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--results-check", help="the command that checks a result, with {module}, {stem} or {file}, "
                                            "e.g. 'python check.py --module {module}'")
     s.add_argument("--vote-window", type=float, help="hours since their last event that owners count as active for votes")
+    s.add_argument("--refute-check", help=REFUTE_CHECK_HELP)
+    s.add_argument("--max-shared", type=int, help=MAX_SHARED_HELP)
+    s.add_argument("--competitive-tries", type=int, help=COMPETITIVE_TRIES_HELP)
     s.add_argument("--audit", type=float)
     s.add_argument("--reads")
     s.set_defaults(func=cmd_propose)
@@ -2551,6 +2584,9 @@ def parser() -> argparse.ArgumentParser:
                                            "e.g. 'python check.py --module {module}'")
     s.add_argument("--vote-window", type=float, help="open mode: hours since their last event that trusted owners "
                    "count as active for votes (default a week; 1 lets whoever is here decide)")
+    s.add_argument("--refute-check", help=REFUTE_CHECK_HELP)
+    s.add_argument("--max-shared", type=int, help=MAX_SHARED_HELP)
+    s.add_argument("--competitive-tries", type=int, help=COMPETITIVE_TRIES_HELP)
     s.add_argument("--reads", help="the command that lists the files an acceptance command reads, e.g. "
                                    "'python check.py --reads' (verifications then survive changes elsewhere)")
     s.add_argument("--json", action="store_true")
@@ -2626,6 +2662,8 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("submit", help="submit your current branch as a patch")
     s.add_argument("task")
+    s.add_argument("--refutes", action="store_true", help="it proves the task's statement false: checked with the "
+                   "task's refute command instead of its acceptance command")
     s.add_argument("--no-check", action="store_true", help="don't check the zone or acceptance before submitting")
     s.add_argument("--timeout", type=int, default=600)
     s.add_argument("--json", action="store_true")

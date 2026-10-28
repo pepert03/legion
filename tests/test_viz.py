@@ -216,6 +216,15 @@ def test_a_result_shows_who_replicated_it():
     assert {"question.asked", "question.answered"} <= {e["type"] for e in viz.history(evs, tid, None)}
 
 
+def test_a_refuted_task_is_drawn_as_refuted_with_its_command():
+    evs, tid = project_events()
+    evs += [E.create(BOSS, "project.policy", 4, refute_check="check --refute {key}"),
+            E.create(ANA, "patch.submitted", 5, task=tid, commit="c", branch=f"legion/{tid}/ana-1", refutes=True)]
+    evs.append(E.create(BOSS, "patch.accepted", 6, patch=evs[-1]["id"], merge_commit="m"))
+    t = next(t for t in viz.snapshot(evs, None)["tasks"] if t["id"] == tid)
+    assert (t["status"], t["refute"]) == ("refuted", "check --refute a")
+
+
 def test_a_task_shows_its_ideas_and_the_hub_its_playbook():
     evs, tid = project_events()
     evs += [E.create(ANA, "idea.proposed", 4, task=tid, text="Count triples"),

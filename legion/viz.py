@@ -80,6 +80,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
                       "holder": h.author if h else None, "holder_name": h.name if h else None,
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
+                      "refute": st.refute_command(t) if t.mode == "exclusive" and t.kind == "task" else "",
                       "children": len(kids), "children_done": sum(st.done(k.id) for k in kids)})
 
     agents = {}

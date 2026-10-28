@@ -378,12 +378,19 @@ class Job:
     base_tree: str = ""
     tree: str = ""
 
+    @property
+    def accept(self) -> str:
+        """The command that checks it: the task's acceptance, or for a refutation, its refute command."""
+        return self.patch.check or self.task.accept
+
 
 def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
     """The patch merged and ready to check, its rejection, or None to retry it later."""
     st, task = c.st, c.st.tasks[p.task]
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
+    if st.refuted(task.id):
+        return reject("the task was refuted: its statement is false, so nothing proves it now", "done")
     gone = st.doomed(p)
     if gone:
         return reject(f"it was built on patch {gone.id[:8]} ({st.tasks[gone.task].key}), rejected since: build on "
@@ -415,7 +422,7 @@ def check(repo, job: Job, name: str, timeout: int) -> tuple:
         if job.baseline:
             baseline, _ = measure(job.task.metric, place(repo, job.head, name, scratch), timeout)
         wt = write_contract(place(repo, job.merged, name, scratch), job.task)
-        code, out = run_cmd(job.task.accept, wt, timeout)
+        code, out = run_cmd(job.accept, wt, timeout)
         value, mout = measure(job.task.metric, wt, timeout) if code == 0 and job.task.metric else (None, "")
         return code, out, value, mout, baseline
     finally:
@@ -434,12 +441,15 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
     st, task = c.st, job.task
     if task.mode == "exclusive" and st.done(task.id):
         return reject("the task was already done by another patch", "done")
+    if st.refuted(task.id):
+        return reject("the task was refuted: its statement is false, so nothing proves it now", "done")
     if code is None:  # ran out of time: on a busy machine that says nothing about the patch
         return "retry", {"reason": out}
     if code != 0 and broken(out):  # nor does a crash, or a missing tool
         return "retry", {"reason": f"the check broke on this machine:\n{tail(out)}"}
     if code != 0:
-        return reject(f"the acceptance command fails:\n{tail(out)}", "tests")
+        what = "refutation" if job.patch.refutes else "acceptance"
+        return reject(f"the {what} command fails:\n{tail(out)}", "tests")
     payload = {}
     if task.metric:
         if value is None:
@@ -472,7 +482,7 @@ def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
     cmd = c.st.policy.get("reads")
     if not cmd:
         return ["*"]
-    code, out = run_cmd(f'{cmd} "{job.task.accept}"', write_contract(folder, job.task), 300, slot=False)
+    code, out = run_cmd(f'{cmd} "{job.accept}"', write_contract(folder, job.task), 300, slot=False)
     paths = sorted({line.strip() for line in out.splitlines() if line.strip()})
     if code != 0 or not paths or "*" in paths:
         return ["*"]

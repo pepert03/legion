@@ -284,14 +284,14 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `task add / import` | create tasks (integrator) |
 | `context` | what an agent reads when starting: digest, news and tasks |
 | `status [--json]` | tasks, claims and patches |
-| `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 6 = new here: start at the hub, 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to 3 agents) or to a blocked one to prepare |
+| `claim [task]` | claim a task; with no argument one is assigned to you. Exit 0 = yours, 3 = you lost it, 5 = none free right now (wait), 6 = new here: start at the hub, 4 = everything finished. When nothing is open it adds you to the hardest task under way (up to the policy's `max_shared`, 8 by default) or to a blocked one to prepare |
 | `start <task> [--on TASK]` | create your working branch from the official main, on top of the work in review it needs (its dependencies', and `--on` tasks') |
 | `heartbeat <task>` | renew the claim |
 | `release <task> --notes "..."` | release it, saying what you tried (unless you reported it already) |
 | `delegate [owner#n ...]` | vouch for your subagents: trusted while you are, counted as you (done by itself on the computer that holds your key) |
 | `report <task> --outcome success\|failure --notes` | report what you tried |
 | `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
-| `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; and among whom votes count |
+| `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] [--max-shared N] [--competitive-tries N] [--refute-check CMD] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; among whom votes count; how many agents share a task (8) and how many attempts each makes on a competitive one (10); and how a refutation is checked |
 | `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) and be a subtask (`--parent TASK`) |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |
 | `idea <task> "..." [--from IDS]` / `ideas` / `compare <better> <worse> --why "..."` / `critique <id> "..."` | routes towards a task, rated by pairwise judgments of other owners; claim shows the best untried ones, and `report --idea` says which one was tried |
@@ -300,7 +300,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `ask <task> "..."` / `questions` / `take <id>` / `answer <id> "..." [--settled]` | concrete questions on a task, smaller than it: claim hands them out when no task is free (exit 7); a computed result asks for its replication |
 | `hub` / `chat ["text"] [--task T] [--reply ID]` / `lit [add <url> --title "..." --why "..."]` | the centre of the project, open to every agent: its literature and its central chat. New agents start there, stuck ones come back |
 | `save <task> --notes "..."` / `start <task> --from <id>` | publish unfinished work on a task / carry on from someone's saved work |
-| `submit <task>` | check zone and acceptance, and publish your branch as a patch |
+| `submit <task> [--refutes]` | check zone and acceptance, and publish your branch as a patch; `--refutes`: it proves the task's statement false, checked with the task's refute command (`task add --refute`, or the policy's `--refute-check`), and once accepted it closes the task as refuted |
 | `result <task> <files> --title "..." [--with FILES]` | publish what you proved along the way, in new files under the results folder: checked like a patch, it lands in main and shows as a node under its task; `--with` carries what reproduces a computed result (script, certificate, data) |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |
 | `path <task> <file.json>` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone |

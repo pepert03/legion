@@ -309,6 +309,8 @@ CEL, DAN = Identity.generate("cel"), Identity.generate("dan")
 
 def test_idle_agents_join_the_hardest_task_up_to_a_limit():
     log, easy = project(size="S")
+    assert log.state().policy["max_shared"] == S.MAX_SHARED == 8
+    log.add(BOSS, "project.policy", max_shared=3)                      # the project sets how many
     hard = S.task_id(log.add(BOSS, "task.created", key="h", title="H", zone=["h"], accept="true", size="L"))
     log.add(ANA, "task.claimed", task=easy, ttl=600)
     log.add(BEA, "task.claimed", task=hard, ttl=600)
@@ -401,15 +403,19 @@ def test_attempts_since_the_task_last_advanced():
     assert st.attempts_by(tid, ANA.author) == 2 and st.attempts_by(tid, BEA.author) == 0
 
 
-def test_competitive_tasks_are_handed_out_until_three_attempts():
+def test_competitive_tasks_are_handed_out_until_the_policys_attempts():
     log, fresh = project(key="c1", mode="competitive", metric="m", goal="min")
+    assert log.state().policy["competitive_tries"] == S.COMPETITIVE_TRIES == 10
+    log.add(BOSS, "project.policy", competitive_tries=3)               # the project sets how many
     done = S.task_id(log.add(BOSS, "task.created", key="c2", title="C2", zone=["c2"], accept="true",
                              mode="competitive", metric="m", goal="min"))
     p = log.add(BEA, "patch.submitted", task=done, commit="c", branch="legion/c2/b-1")
     log.add(BOSS, "patch.accepted", patch=p["id"], metric=5.0)
     assert [t.id for t in log.state().competitive_for(ANA.author)] == [fresh, done]  # no result yet first
-    for _ in range(S.COMPETITIVE_TRIES):
+    for _ in range(2):
         log.add(ANA, "attempt.reported", task=fresh, outcome="failure", notes="no gain")
+    assert [t.id for t in log.state().competitive_for(ANA.author)] == [fresh, done]
+    log.add(ANA, "attempt.reported", task=fresh, outcome="failure", notes="no gain")
     assert [t.id for t in log.state().competitive_for(ANA.author)] == [done]
     q = log.add(ANA, "patch.submitted", task=done, commit="c", branch="legion/c2/a-1")
     assert log.state().competitive_for(ANA.author) == []  # its patch waits for the verdict
@@ -981,3 +987,69 @@ def test_the_playbook_is_rewritten_by_those_who_worked_here_when_failures_pile_u
     log.add(ANA, "playbook.updated", text="## Dead ends\n- counting pairs: loses a factor 2")
     st = log.state()
     assert not st.playbook_due() and "counting pairs" in st.playbook[-1]["text"]
+
+
+def test_a_task_proved_false_is_refuted_not_done():
+    log, tid = project(accept="python check.py A", refute="python check.py --refute A")
+    other = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="python check.py B"))
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    p = log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/t/a-1", refutes=True)
+    log.add(BEA, "patch.submitted", task=other, commit="c", branch="legion/t/b-1", refutes=True)
+    st = log.state()
+    assert st.patches[p["id"]].check == "python check.py --refute A"
+    assert st.ignored[-1][1] == "this task can't be refuted: it has no refute command, and the policy gives none"
+    assert st.in_review(tid) is None                                   # it proves no statement to build on
+    log.add(BOSS, "patch.accepted", patch=p["id"])
+    st = log.state()
+    assert st.refuted(tid) and not st.done(tid) and st.status(tid, 1001) == "refuted"
+    assert not st.exclusive_done()                                     # b is still to do
+    q = log.add(BEA, "patch.submitted", task=other, commit="c", branch="legion/t/b-2")
+    log.add(BOSS, "patch.accepted", patch=q["id"])
+    assert log.state().exclusive_done()                                # settled, one way or the other
+
+
+def test_the_policy_gives_tasks_a_refute_command_fixed_when_a_refutation_is_sent():
+    log, tid = project(accept="lake build Erdos.A")
+    st = log.state()
+    assert st.refute_command(st.tasks[tid]) == ""
+    log.add(BOSS, "project.policy", refute_check="rm -rf /")            # it must name the task somehow
+    log.add(BOSS, "project.policy", refute_check="python check.py --refute {arg}")
+    st = log.state()
+    assert "refute_check must be" in st.ignored[0][1]
+    assert st.refute_command(st.tasks[tid]) == "python check.py --refute Erdos.A"
+    p = log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/t/a-1", refutes=True)
+    log.add(BOSS, "project.policy", refute_check="python other.py {key}")
+    assert log.state().patches[p["id"]].check == "python check.py --refute Erdos.A"  # checked as it was sent
+
+
+def test_a_refuted_subtask_fails_its_sketch_and_strands_what_rests_on_it():
+    log, tid = sketch_project()
+    log.add(BOSS, "project.policy", refute_check="python check.py --refute {key}")
+    k = log.add(ANA, "sketch.proposed", task=tid, commit="c", branch="legion/big/s-1",
+                children=[CHILD, dict(CHILD, key="b", zone=["src/parts/b.py"])])
+    log.add(BOSS, "sketch.accepted", sketch=k["id"], merge_commit="m1")
+    a = S.task_id(log.add(BOSS, "task.created", key="big/a", title="A", zone=["src/parts/a.py"],
+                          accept="x", parent=tid, sketch=k["id"]))
+    b = S.task_id(log.add(BOSS, "task.created", key="big/b", title="B", zone=["src/parts/b.py"],
+                          accept="x", parent=tid, sketch=k["id"]))
+    later = S.task_id(log.add(BOSS, "task.created", key="later", title="L", zone=["l"], accept="x", deps=[a]))
+    p = log.add(BEA, "patch.submitted", task=a, commit="c", branch="legion/a/b-1", refutes=True)
+    log.add(BOSS, "patch.accepted", patch=p["id"])
+    st = log.state()
+    assert st.status(a, 1001) == "refuted" and st.tasks[b].cancelled  # the split rested on a: it fails
+    assert st.sketches[k["id"]].outcome == "failed" and st.active_sketch(tid) is None
+    assert st.stranded(st.tasks[later]) and st.preparable(1001) == []  # nobody prepares work on a false premise
+
+
+def test_a_refuted_route_of_a_path_no_longer_holds_its_place():
+    log, tid = stuck_project()
+    log.add(BOSS, "project.policy", refute_check="python check.py --refute {key}")
+    k = log.add(BEA, "path.proposed", task=tid, children=[CHILD], notes="smaller case first")
+    log.add(BOSS, "path.accepted", path=k["id"])
+    child = S.task_id(log.add(BOSS, "task.created", key="big/a", title="A", zone=["src/parts/a.py"],
+                              accept="x", parent=tid, path=k["id"]))
+    assert len(log.state().open_paths(tid)) == 1
+    p = log.add(BEA, "patch.submitted", task=child, commit="c", branch="legion/x/y-1", refutes=True)
+    log.add(BOSS, "patch.accepted", patch=p["id"])
+    st = log.state()
+    assert st.open_paths(tid) == [] and st.status(tid, 1001) == "claimed"  # the task itself goes on

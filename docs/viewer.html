@@ -182,10 +182,12 @@ const h = (tag, attrs = {}, ...kids) => {
 };
 const SERIF = '"Latin Modern", "Latin Modern Roman", Georgia, serif';
 const STATUS = { open: "open", claimed: "in progress", review: "in review", sketched: "split",
-                 accepted: "done", blocked: "blocked", cancelled: "cancelled" };
+                 accepted: "done", blocked: "blocked", cancelled: "cancelled", refuted: "refuted" };
 const ACTIVE = new Set(["claimed", "review"]);
+const CLOSED = new Set(["accepted", "refuted"]);  // settled one way or the other
 const P = {};
 for (const k of ["paper", "card", "ink", "ink2", "ink3", "hair", "open", "claimed", "review", "sketched", "accepted", "blocked", "cancelled"]) P[k] = css(`--${k}`);
+P.refuted = P.cancelled;
 function rgba(hex, a) {
   const n = parseInt(hex.replace("#", ""), 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
@@ -369,7 +371,7 @@ function applySnapshot(d) {
   // Results are proved along the way: they don't count as tasks to do.
   const exclusive = d.tasks.filter((t) => t.mode === "exclusive" && t.status !== "cancelled" && t.kind !== "result");
   Object.assign(goal, { label: d.project || "project", children: d.tasks.filter((t) => !t.parent).length,
-                        done: exclusive.filter((t) => t.status === "accepted").length, total: exclusive.length });
+                        done: exclusive.filter((t) => CLOSED.has(t.status)).length, total: exclusive.length });
   const want = new Set([GOAL]);
   for (const t of d.tasks) {
     want.add(t.id);
@@ -502,7 +504,7 @@ function drawNode(n, ctx, scale) {
     const d = r * 1.3;
     ctx.moveTo(n.x, n.y - d); ctx.lineTo(n.x + d, n.y); ctx.lineTo(n.x, n.y + d); ctx.lineTo(n.x - d, n.y); ctx.closePath();
   } else ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-  if (n.status === "accepted") {
+  if (CLOSED.has(n.status)) {
     ctx.fillStyle = col; ctx.fill();
   } else {
     ctx.fillStyle = active ? rgba(col, 0.14) : n.status === "sketched" ? rgba(col, 0.08) : P.card;
@@ -519,9 +521,9 @@ function drawNode(n, ctx, scale) {
     ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.4, -Math.PI / 2, -Math.PI / 2 + (n.children_done / n.children) * Math.PI * 2);
     ctx.strokeStyle = P.accepted; ctx.lineWidth = 1.2; ctx.lineCap = "round"; ctx.stroke();
   }
-  if (n.status === "cancelled") {
+  if (n.status === "cancelled" || n.status === "refuted") {  // refuted: filled, its statement crossed out
     ctx.beginPath(); ctx.moveTo(n.x - r * 0.7, n.y + r * 0.7); ctx.lineTo(n.x + r * 0.7, n.y - r * 0.7);
-    ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.strokeStyle = n.status === "refuted" ? P.card : col; ctx.lineWidth = 0.8; ctx.stroke();
   }
   if (n.mode === "competitive") {
     ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.2, 0, Math.PI * 2); ctx.strokeStyle = rgba(P.ink, 0.35); ctx.lineWidth = 0.5; ctx.stroke();
@@ -535,7 +537,7 @@ function drawNode(n, ctx, scale) {
   if (r * scale >= LABEL_PX || n.id === hover || n.id === selected) {
     ctx.font = `italic ${Math.max(3.2, 11.5 / scale)}px ${SERIF}`;
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    ctx.fillStyle = n.status === "accepted" ? P.ink2 : P.ink;
+    ctx.fillStyle = CLOSED.has(n.status) ? P.ink2 : P.ink;
     ctx.fillText(n.label, n.x, n.y + r + 2.5);
   }
   ctx.restore();
@@ -700,7 +702,7 @@ function viewLog() {
     eventList(data.recent, true),
     h("h2", { class: "caps" }, "Legend"),
     h("div", { class: "legend" }, ...Object.entries(STATUS).map(([k, v]) =>
-      h("span", { style: `--c:${P[k]};--f:${k === "accepted" ? P[k] : ACTIVE.has(k) ? rgba(P[k], 0.18) : "transparent"}` }, v))),
+      h("span", { style: `--c:${P[k]};--f:${CLOSED.has(k) ? P[k] : ACTIVE.has(k) ? rgba(P[k], 0.18) : "transparent"}` }, v))),
   ];
 }
 
@@ -764,7 +766,7 @@ async function viewTask(n) {
   const thread = asked.flatMap((q) => [q, ...items.filter((e) => e.type === "question.answered" && e.question === q.id)]);
   return [
     h("div", { class: "head" },
-      h("div", { class: "orb", style: `border:1px solid ${col};background:${n.status === "accepted" ? col : rgba(col, 0.12)}` }),
+      h("div", { class: "orb", style: `border:1px solid ${col};background:${CLOSED.has(n.status) ? col : rgba(col, 0.12)}` }),
       h("div", {}, h("div", { class: "name", style: "font-style:italic" }, n.key), h("div", { class: "sub" }, n.title))),
     h("dl", { class: "kv" },
       n.kind === "result" ? [h("dt", {}, "result"), h("dd", { style: "font-style:italic" },
@@ -776,6 +778,7 @@ async function viewTask(n) {
       n.parent ? [h("dt", {}, "part of"), h("dd", { style: "font-style:italic" }, taskKey(n.parent))] : null,
       h("dt", {}, "zone"), h("dd", {}, h("code", {}, n.zone.join(", "))),
       h("dt", {}, "acceptance"), h("dd", {}, h("code", {}, n.accept)),
+      n.refute ? [h("dt", {}, "refutation"), h("dd", {}, h("code", {}, n.refute))] : null,
       n.best != null ? [h("dt", {}, "best"), h("dd", {}, String(n.best))] : null,
       n.body ? [h("dt", {}, "what"), h("dd", {}, n.body)] : null),
     tabs(n.id, brief ? "brief" : notes.length ? "conversation" : "history", [

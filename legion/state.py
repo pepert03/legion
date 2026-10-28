@@ -34,7 +34,7 @@ STALL_AFTER, MAX_OPEN_PATHS = 3, 3
 # When nothing is open, idle agents don't wait: they join a task someone already holds (at most MAX_SHARED
 # agents on one task; the first patch accepted wins), or prepare a blocked one (they split it into subtasks
 # that don't need its dependencies, or write the patch, which is reviewed once the dependencies are in).
-MAX_SHARED = 3
+MAX_SHARED = 8  # the policy's max_shared, unless it says otherwise: with routes to rate and try, more hands help
 # An agent that let a task go (released it, or reported it failing) isn't handed it again by claim for COOLDOWN
 # seconds: it gets something else, or goes to the hub to rethink, instead of hitting the same wall again.
 COOLDOWN = 3600
@@ -83,7 +83,7 @@ MAX_RESULTS_PER_DAY, MAX_OPEN_RESULTS, MAX_RESULT_FILES, MAX_RESULT_EXTRA = 3, 2
 RESULT_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
-COMPETITIVE_TRIES = 3
+COMPETITIVE_TRIES = 10  # the policy's competitive_tries, unless it says otherwise
 # Verification by other nodes. A node checks a patch the way the integrator would and signs the result
 # (patch.verified): on which tree it merged it (main plus the patches ahead of it in the queue, which every node
 # works out the same way) and which tree came out. Merges are deterministic, so when the integrator gets there
@@ -97,7 +97,14 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
           # seconds since their last event that trusted owners count as active for votes (see PROPOSABLE).
           "mode": "integrator", "window": 86400, "audit": 0.25, "reads": "", "vote_window": 7 * 86400,
           # Where results go, and the command that checks one (see MAX_RESULTS_PER_DAY): none, until set.
-          "results_dir": "", "results_check": ""}
+          "results_dir": "", "results_check": "",
+          # How a task's statement is shown false, for tasks that don't say: a command with {key}, {accept} or {arg}
+          # (the acceptance command's last word) in it, e.g. "python check.py --refute {arg}". "": they can't be.
+          "refute_check": "",
+          # How many agents may work on one exclusive task at once: its holder and those who joined it.
+          "max_shared": MAX_SHARED,
+          # How many attempts claim hands an agent on one competitive task since its best last improved.
+          "competitive_tries": COMPETITIVE_TRIES}
 # What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
@@ -147,6 +154,7 @@ class Task:
     cancelled: bool = False
     contract: dict = field(default_factory=dict)  # file name -> text, written to contract_dir(key) for each check
     kind: str = "task"  # or "result": born with its patch, from a result.submitted event
+    refute: str = ""  # the command that checks a refutation (a proof of its negation); "": the policy's, if any
 
 
 @dataclass
@@ -206,6 +214,8 @@ class Patch:
     base_tree: str | None = None  # the trees the verdict was reached on: they tell a true verification from a
     tree: str | None = None       # false one
     on: list = field(default_factory=list)  # patches in review it was built on: it waits for them to be accepted
+    refutes: bool = False  # it proves the task's statement false, checked with `check` instead of the task's accept
+    check: str = ""
 
 
 def task_id(ev: dict) -> str:
@@ -348,13 +358,13 @@ class State:
         return min(active, key=lambda c: (c.lamport, c.author)) if active else None
 
     def claimants(self, tid: str, now: float) -> list[Claim]:
-        """Who works on the task: its holder, and up to MAX_SHARED - 1 agents who joined it."""
+        """Who works on the task: its holder, and up to the policy's max_shared - 1 agents who joined it."""
         h = self.holder(tid, now)
         if not h:
             return []
         out, seen = [h], {h.author}
         for c in sorted((c for c in self.claims[tid] if c.join and c.active(now)), key=lambda c: (c.lamport, c.author)):
-            if len(out) == MAX_SHARED:
+            if len(out) == self.policy["max_shared"]:
                 break
             if c.author not in seen:
                 out.append(c)
@@ -814,7 +824,7 @@ class State:
     def open_paths(self, tid: str) -> list[Sketch]:
         """Paths being reviewed, or accepted with subtasks still to do."""
         return [k for k in self.paths_for(tid) if k.verdict is None or k.verdict == "accepted" and not
-                all(self.done(c) or self.tasks[c].cancelled for c in k.child_ids)]
+                all(self.done(c) or self.tasks[c].cancelled or self.refuted(c) for c in k.child_ids)]
 
     def last_progress(self, tid: str) -> int:
         task = self.tasks[tid]
@@ -831,7 +841,8 @@ class State:
     def competitive_for(self, author: str) -> list[Task]:
         """Competitive tasks this agent hasn't exhausted, the ones with no result yet first."""
         ts = [t for t in self.tasks.values() if t.mode == "competitive" and not t.cancelled
-              and (self.deps_ok(t) or self.deps_in_review(t)) and self.attempts_by(t.id, author) < COMPETITIVE_TRIES
+              and (self.deps_ok(t) or self.deps_in_review(t))
+              and self.attempts_by(t.id, author) < self.policy["competitive_tries"]
               and not any(p.author == author and p.verdict is None for p in self.patches_for(t.id))]
         return sorted(ts, key=lambda t: (self.best(t.id) is not None, self.attempts_by(t.id, author), t.lamport))
 
@@ -886,7 +897,21 @@ class State:
         return min(values) if task.goal == "min" else max(values)
 
     def done(self, tid: str) -> bool:
-        return tid in self.resolved or bool(self.patches_for(tid, "accepted"))
+        return tid in self.resolved or any(not p.refutes for p in self.patches_for(tid, "accepted"))
+
+    def refuted(self, tid: str) -> bool:
+        """Its statement was proved false: a refutation of it was accepted. Closed, but not done."""
+        return any(p.refutes for p in self.patches_for(tid, "accepted"))
+
+    def refute_command(self, task: Task) -> str:
+        """The command that checks a refutation of the task: its own, or the policy's template for it ("": none)."""
+        if task.refute:
+            return task.refute
+        template = self.policy["refute_check"]
+        if not template:
+            return ""
+        arg = task.accept.split()[-1] if task.accept.split() else ""
+        return template.replace("{key}", task.key).replace("{accept}", task.accept).replace("{arg}", arg)
 
     def unblocks(self, tid: str) -> int:
         """How many unfinished tasks wait, directly or not, for this one: those that depend on it, and the parent
@@ -921,7 +946,7 @@ class State:
         None if some of it isn't written yet. Nothing ever waits for a verification to go on working."""
         if self.done(tid):
             return []
-        waiting = [p for p in self.patches_for(tid, None) if not self.doomed(p)]
+        waiting = [p for p in self.patches_for(tid, None) if not self.doomed(p) and not p.refutes]
         if waiting:
             return [waiting[-1]]
         k = self.active_sketch(tid)
@@ -949,6 +974,8 @@ class State:
             return "accepted"
         if task.cancelled:
             return "cancelled"
+        if self.refuted(tid):
+            return "refuted"
         if task.kind == "result":  # born with its patch: in review until it's accepted, gone if it's rejected
             return "review" if self.patches_for(tid, None) else "cancelled"
         if any(k.verdict is None for k in self.sketches_for(tid)):
@@ -981,19 +1008,25 @@ class State:
         # A blocked task someone is preparing can be joined too: they may be splitting it, or writing it ahead.
         ts = [t for t in self.tasks.values() if t.mode == "exclusive"
               and self.status(t.id, now) in ("claimed", "blocked") and self.holder(t.id, now)
-              and len(cl := self.claimants(t.id, now)) < MAX_SHARED and all(c.author != author for c in cl)]
+              and len(cl := self.claimants(t.id, now)) < self.policy["max_shared"]
+              and all(c.author != author for c in cl)]
         return sorted(ts, key=lambda t: (not self.stalled(t.id), -self.failures_since_progress(t.id),
                                          SIZES.get(t.size, 1), self.holder(t.id, now).ts, t.id))
 
     def preparable(self, now: float) -> list[Task]:
         """Blocked tasks nobody is preparing, the closest to unblocking first."""
         ts = [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "blocked"
-              and not self.holder(t.id, now) and not self.patches_for(t.id, None)]
+              and not self.holder(t.id, now) and not self.patches_for(t.id, None) and not self.stranded(t)]
         return sorted(ts, key=lambda t: (sum(not self.done(d) for d in t.deps), t.lamport, t.id))
+
+    def stranded(self, task: Task) -> bool:
+        """It rests on a statement proved false: a dependency of it (or of one it depends on) was refuted. It can't
+        be done as stated, so nobody prepares it; a route around it is a new task, proposed without that one."""
+        return any(self.refuted(d) or self.stranded(self.tasks[d]) for d in task.deps if not self.done(d))
 
     def exclusive_done(self) -> bool:
         ex = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled and t.kind != "result"]
-        return bool(ex) and all(self.done(t.id) for t in ex)
+        return bool(ex) and all(self.done(t.id) or self.refuted(t.id) for t in ex)
 
     def check_children(self, parent: Task, children, path: bool = False) -> str | None:
         """The rules that make it safe to let an agent split a task without auditing the subtasks."""
@@ -1113,10 +1146,16 @@ class State:
             if "results_check" in ev and (not isinstance(ev["results_check"], str) or len(ev["results_check"]) > 300
                                           or not any(f"{{{k}}}" in ev["results_check"] for k in ("file", "stem", "module"))):
                 return "results_check must be a command with {file}, {stem} or {module} in it"
-            policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check") if k in ev})
+            if "refute_check" in ev and (not isinstance(ev["refute_check"], str) or len(ev["refute_check"]) > 300
+                                         or ev["refute_check"] and not any(f"{{{k}}}" in ev["refute_check"]
+                                                                           for k in ("key", "accept", "arg"))):
+                return "refute_check must be a command with {key}, {accept} or {arg} in it"
+            policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check", "refute_check")
+                           if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
                                       ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
-                                      ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400)):
+                                      ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400),
+                                      ("max_shared", int, 1, 50), ("competitive_tries", int, 1, 1000)):
                 if key in ev:
                     v = ev[key]
                     if not isinstance(v, kind) or isinstance(v, bool) or not lo <= v <= hi:
@@ -1250,8 +1289,14 @@ class State:
             if not isinstance(on, list) or len(on) > MAX_ON or not all(isinstance(x, str) and x in self.patches
                                                                        for x in on):
                 return f"`on` lists at most {MAX_ON} patches sent before this one"
+            refutes, check = ev.get("refutes") is True, ""
+            if refutes:  # it proves the statement false: checked with the task's refute command
+                check = self.refute_command(task)
+                if task.mode != "exclusive" or task.kind != "task" or not check:
+                    return "this task can't be refuted: it has no refute command, and the policy gives none"
             self.patches[ev["id"]] = Patch(ev["id"], task.id, ev["author"], ev["name"], ev["commit"],
-                                           ev["branch"], ev["lamport"], ts=ev["ts"], on=on)
+                                           ev["branch"], ev["lamport"], ts=ev["ts"], on=on, refutes=refutes,
+                                           check=check)
         elif t in ("patch.accepted", "patch.rejected"):
             p = self.patches.get(ev.get("patch"))
             if p is None:
@@ -1271,6 +1316,10 @@ class State:
                 p.verified_by = list(ev.get("verified_by") or [])
                 if self.tasks[p.task].kind != "result":  # results don't earn trust: see MAX_RESULTS_PER_DAY
                     self.accepted_count[p.author] += 1
+                k = self.sketches.get(self.tasks[p.task].sketch) if p.refutes else None
+                if k and k.kind == "sketch" and k.verdict == "accepted" and not k.outcome:
+                    # A split that rested on a false statement fails with it: its parent is open again.
+                    self._fail_sketch(k, f"its subtask {self.tasks[p.task].key} was refuted: it's false")
         elif t == "patch.reverted":
             p = self.patches.get(ev.get("patch"))
             if p is None or p.verdict != "accepted" or not ev.get("merge_commit"):
@@ -1346,6 +1395,9 @@ class State:
         err = contract_error(ev)
         if err:
             return err
+        if ev.get("refute") is not None and (not isinstance(ev["refute"], str) or not ev["refute"].strip()
+                                             or len(ev["refute"]) > 300 or ev.get("sketch") or ev.get("path")):
+            return "a refute command is a command, set by whoever creates the task (not a sketch's subtasks)"
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
@@ -1365,7 +1417,7 @@ class State:
         self.tasks[tid] = Task(tid, key, ev["title"], zone, ev["accept"], ev.get("mode", "exclusive"),
                                ev.get("metric"), ev.get("goal", "min"), deps, ev.get("size", "M"),
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
-                               depth, contract=dict(ev.get("contract") or {}))
+                               depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "")
         if sketch:
             sketch.child_ids.append(tid)
         return None
@@ -1457,6 +1509,12 @@ class State:
             work[self.root_of(k.task)] += 1
         return dict(work)
 
+    def _fail_sketch(self, k: Sketch, reason: str) -> None:
+        k.outcome, k.reason = "failed", reason
+        for c in k.child_ids:  # whatever wasn't finished no longer makes sense
+            if not self.done(c) and not self.refuted(c):
+                self.tasks[c].cancelled = True
+
     def _judge_sketch(self, ev: dict) -> str | None:
         k = self.sketches.get(ev.get("sketch") or ev.get("path"))
         if k is None:
@@ -1466,10 +1524,7 @@ class State:
         if ev["type"] == "sketch.failed":
             if k.verdict != "accepted" or k.outcome:
                 return "only an accepted, unresolved sketch can fail"
-            k.outcome, k.reason = "failed", ev.get("reason", "")
-            for c in k.child_ids:  # whatever wasn't finished no longer makes sense
-                if not self.done(c):
-                    self.tasks[c].cancelled = True
+            self._fail_sketch(k, ev.get("reason", ""))
             return None
         if k.verdict:
             return "the sketch already had a verdict"
