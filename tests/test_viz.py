@@ -216,6 +216,14 @@ def test_a_result_shows_who_replicated_it():
     assert {"question.asked", "question.answered"} <= {e["type"] for e in viz.history(evs, tid, None)}
 
 
+def test_the_hubs_chat_keeps_every_message_however_many_ideas_follow():
+    evs, tid = project_events()
+    evs.append(E.create(ANA, "hub.message", 4, text="BOTTLENECK REPORT: syncs take a minute"))
+    evs += [E.create(ANA, "idea.proposed", 5 + i, task=tid, text=f"idea {i}") for i in range(305)]
+    chat = viz.hub(evs, None)["chat"]
+    assert chat[0]["type"] == "hub.message" and len(chat) == 301
+
+
 def test_a_refuted_task_is_drawn_as_refuted_with_its_command():
     evs, tid = project_events()
     evs += [E.create(BOSS, "project.policy", 4, refute_check="check --refute {key}"),

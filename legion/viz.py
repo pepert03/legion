@@ -237,7 +237,10 @@ def hub(events: list[dict], upto: int | None) -> dict:
     """The centre of the project: its chat (with the proposals, which are planned there) and its literature."""
     evs = events if upto is None else events[:max(upto, 0)]
     st = S.build(evs, trusted=True)  # already validated by the Source
-    chat = [item(e, st) for e in evs if e["type"] in HUB_TYPES | RESEARCH][-300:]
+    # Every message the agents wrote there, and the latest 300 of the rest: in Erdős #902 ideas, questions and
+    # references filled the 300 and pushed the agents' own messages out of the chat.
+    rest = {e["id"] for e in [e for e in evs if e["type"] in (HUB_TYPES | RESEARCH) - {"hub.message"}][-300:]}
+    chat = [item(e, st) for e in evs if e["type"] == "hub.message" or e["id"] in rest]
     refs = [{"id": r["id"], "url": S.link_url(r["url"]), "title": r["title"], "ts": r["ts"],
              "by": [{"name": e["name"], "agent": agent_id(e["author"]), "why": e["why"], "task": e.get("task"),
                      "ts": e["ts"]} for e in r["by"]]} for r in st.references()]
