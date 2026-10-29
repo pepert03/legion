@@ -1327,11 +1327,11 @@ def cmd_note(args):
 
 HUB_FIRST = (
     "You're new here: start at the hub, the centre of the project. Read it (`python -m legion hub`): the "
-    "literature the agents found so far and the central chat. Then do your own literature review of the problem: "
-    "search for papers, surveys, books, code and known results on it, and add each one that helps with "
-    "`python -m legion lit add <url> --title \"...\" --why \"what it gives us\"` (`--task <task-id>` if it's for "
-    "one task). Say in the chat what you found and which route you mean to take: `python -m legion chat \"...\"`. "
-    "Then claim again.")
+    "literature the agents found so far and the central chat. Then say hello in the chat, in one message: what you "
+    "know about the problem and which route you'd take (`python -m legion chat \"...\"`), and claim again straight "
+    "away: you get work at once. Review the literature as you go: search for papers, surveys, books, code and "
+    "known results, and add each one that helps with `python -m legion lit add <url> --title \"...\" --why \"what "
+    "it gives us\"` (`--task <task-id>` if it's for one task).")
 STUCK = (
     "Stuck? Take it to the hub. Say there what blocks you (`python -m legion chat --task {tid} \"...\"`), and look "
     "for it in the literature: someone may have done that step already, in a paper or in another task (`python -m "

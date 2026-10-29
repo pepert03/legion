@@ -318,6 +318,7 @@ class State:
         self.hub: list[dict] = []  # the central chat's messages, in order
         self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
         self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
+        self.worked: set[str] = set()  # owners whose agents did something here (more than join): see newcomer
         self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
         self.briefs: dict[str, list[dict]] = defaultdict(list)  # task -> its state of the art, every version
         self.questions: dict[str, dict] = {}  # id -> {ev, task, result, taken: [(author, ts)], answers, status}
@@ -529,12 +530,11 @@ class State:
                            for i in self.ideas.values())}
 
     def newcomer(self, author: str) -> bool:
-        """An agent that hasn't done anything here yet, nor been to the hub: it starts there (claim sends it).
-        The founders aren't sent."""
-        return (author not in self.integrators and not self.hub_by.get(author)
-                and not any(c.author == author for cs in self.claims.values() for c in cs)
-                and not any(a["author"] == author for a in self.attempts)
-                and not any(p.author == author for p in self.patches.values()))
+        """An agent whose owner hasn't done anything here yet: it starts at the hub (claim sends it). The founders
+        aren't sent, nor an agent that has done anything at all (an answer, a comparison, a reference), nor the new
+        agents of an owner whose others already work here: in Erdős #902 nine subagents, each sent to the hub on
+        its own while their owner answered questions, sat there for forty minutes."""
+        return author not in self.integrators and owner(self.names.get(author, "")) not in self.worked
 
     def references(self, tid: str | None = None) -> list[dict]:
         """The literature, the references most agents vouch for first (then the newest), or those for a task."""
@@ -1552,6 +1552,8 @@ def build(events: list[dict], trusted=None) -> State:
         if err:
             st.ignored.append((ev, err))
             continue
+        if ev["type"] not in ("agent.joined", "agent.delegated"):
+            st.worked.add(owner(ev["name"]))
         st.events.append(ev)
         st.max_lamport = max(st.max_lamport, ev["lamport"])
         if st.proposals and ev["type"] not in ("proposal.made", "proposal.voted"):

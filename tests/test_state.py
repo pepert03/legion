@@ -790,6 +790,20 @@ def test_at_most_so_many_hub_posts_a_day_and_newcomers_start_there():
     assert not log2.state().newcomer(ANA.author)                # it has worked here before
 
 
+def test_an_owner_working_here_sends_its_new_agents_to_work_not_to_the_hub():
+    log, tid = project()
+    one, two, other = Identity.generate("sergio#1"), Identity.generate("sergio#2"), Identity.generate("sergi-dune")
+    for who in (one, two, other):
+        log.add(who, "agent.joined")
+    st = log.state()
+    assert st.newcomer(one.author) and st.newcomer(two.author)  # joining isn't work
+    log.add(one, "idea.proposed", task=tid, text="Count triples instead of pairs")
+    st = log.state()
+    assert not st.newcomer(one.author)                         # any work counts, not only the hub
+    assert not st.newcomer(two.author)                         # nor does its owner's next agent start there
+    assert st.newcomer(other.author)                           # another owner's still does
+
+
 def test_a_task_voted_without_its_parent_shows_under_the_one_its_key_starts_with():
     log, a = project(key="upper")
     loose = S.task_id(log.add(BOSS, "task.created", key="upper/tail", title="T", zone=["x"], accept="true"))

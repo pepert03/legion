@@ -399,6 +399,25 @@ def test_verify_skips_checks_that_wouldnt_count(project):
     assert why["by another agent of your owner: your verification wouldn't count"] >= 1
 
 
+def test_a_check_announced_again_no_longer_holds_the_others_off(project):
+    """Announcing a patch again means the first check didn't finish (out of time, or it broke on that machine):
+    in Erdős #902 one agent kept doing that on lower-constant, and nobody else checked it for forty minutes."""
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    luis = as_(repo, "luis")
+    pa = luis.st.patches_for(tids["a"])[0]
+    luis.emit("patch.checking", task=tids["a"], patch=pa.id)
+    luis.sync()
+    assert integrator.checks_under_way(Ctx(sync=False).st, time.time(), "marta") == {pa.id: {"luis"}}
+    luis = as_(repo, "luis")
+    luis.emit("patch.checking", task=tids["a"], patch=pa.id)       # its check didn't finish: it tries again
+    luis.sync()
+    assert integrator.checks_under_way(Ctx(sync=False).st, time.time(), "marta") == {}
+    job, outcome = integrator.verify_one(as_(repo, "marta"), 60)
+    assert (job.task.key, outcome) == ("a", "pass")                 # marta checks it meanwhile
+
+
 def test_an_old_patch_is_audited_once_by_each_node(project):
     """Patches accepted before verdicts recorded their tree: `verify` audited the same one again and again,
     minutes of checking each time, for an event the state then refused."""

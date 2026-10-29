@@ -894,11 +894,20 @@ def waiting_for(st: S.State, me: str, name: str, now: float) -> list[S.Patch]:
 
 def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
     """Patch -> the owners checking it right now: announced (patch.checking) recently, with no result yet. Not
-    this agent's own checks: one it left unfinished (a crash) mustn't keep it from checking again."""
-    started = {}
+    this agent's own checks: one it left unfinished (a crash) mustn't keep it from checking again. Only an agent's
+    first announcement of a patch holds the others off: announcing it again means its check didn't finish (out of
+    time, or it broke). In Erdős #902 one agent announced lower-constant's patch three times in forty minutes,
+    never finishing, and nobody else checked it meanwhile."""
+    started, seen = {}, set()
     for ev in st.events:
-        if ev["type"] == "patch.checking" and ev["author"] != me and now - ev["ts"] < CHECKING_SECONDS:
-            started[(ev.get("patch"), ev["author"])] = trust.owner_of(ev["name"])
+        if ev["type"] != "patch.checking" or ev["author"] == me:
+            continue
+        k = (ev.get("patch"), ev["author"])
+        if k in seen:
+            started.pop(k, None)
+        elif now - ev["ts"] < CHECKING_SECONDS:
+            started[k] = trust.owner_of(ev["name"])
+        seen.add(k)
     for pid, vs in st.verifications.items():
         for v in vs:
             started.pop((pid, v["author"]), None)
