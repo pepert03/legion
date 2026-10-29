@@ -22,7 +22,8 @@ from pathlib import Path, PureWindowsPath
 
 IS_WINDOWS = os.name == "nt"
 DEFAULT_DISTRO = "Ubuntu-24.04"
-NETWORK_SYNC_EVERY = 15  # seconds between `rad sync --fetch` calls; pushes announce on their own
+NETWORK_SYNC_EVERY = 60  # seconds between `rad sync --fetch` runs; pushes announce on their own
+REPUBLISH_EVERY = 600  # seconds after which an unchanged publish goes out again anyway
 # Runs a command with Radicle on the PATH and, if given, a specific RAD_HOME (several nodes per machine).
 SHIM = ('rh="$1"; shift; export PATH="$HOME/.radicle/bin:$PATH" RAD_PASSPHRASE=""; '
         '[ -n "$rh" ] && export RAD_HOME="$rh"; exec "$@"')
@@ -429,6 +430,77 @@ def network_sync(repo, force: bool = False) -> bool:
     return ok
 
 
+# Commands don't wait for the network. In Erdős #902 every command paid for `rad sync --fetch` (45 s, and it timed
+# out each time) and, when it failed, for a second try: a minute and a half before reading anything, which agents
+# whose tools cut a call at two minutes saw as failures. The node hears of new refs by gossip on its own; the
+# explicit fetch, which catches up after the node was off, now runs in a process of its own, at most every
+# NETWORK_SYNC_EVERY seconds, and leaves its outcome in .git/legion-netsync.json for the next command to read.
+
+def _netsync_file(repo) -> Path:
+    git_dir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo, capture_output=True,
+                             text=True).stdout.strip()
+    return Path(git_dir or Path(repo) / ".git") / "legion-netsync.json"
+
+
+def netsync_status(repo) -> dict:
+    try:
+        return json.loads(_netsync_file(repo).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_netsync(repo, status: dict) -> None:
+    try:
+        _netsync_file(repo).write_text(json.dumps(status), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def kick_network_sync(repo) -> bool:
+    """Start a network fetch in the background, unless one ran lately or is running, and don't wait for it.
+    False when the last one, recently, couldn't reach the network: the caller says so."""
+    now, status = time.time(), netsync_status(repo)
+    every = float(os.environ.get("LEGION_RAD_SYNC_EVERY", NETWORK_SYNC_EVERY))
+    running = status.get("running") and now - status.get("started", 0) < 300
+    if not running and now - status.get("started", 0) >= every:
+        _write_netsync(repo, dict(status, started=now, running=True))
+        try:
+            spawn_detached([sys.executable, "-m", "legion", "netsync"], repo)
+        except OSError:
+            _write_netsync(repo, dict(status, started=now, running=False, ok=False))
+    return status.get("ok", True) or now - status.get("ended", 0) > 900
+
+
+def spawn_detached(cmd: list[str], cwd, log=None) -> None:
+    """Start a process that outlives this one: its own hidden console and process group on Windows, out of the
+    agent's job when the job lets it go; its own session elsewhere."""
+    out = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL  # noqa: SIM115 (the child keeps it)
+    kw = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT if log else subprocess.DEVNULL)
+    if not IS_WINDOWS:
+        subprocess.Popen(cmd, start_new_session=True, **kw)
+        return
+    flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    try:
+        subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)  # CREATE_BREAKAWAY_FROM_JOB
+    except OSError:
+        subprocess.Popen(cmd, creationflags=flags, **kw)
+
+
+def run_network_sync(repo) -> bool:
+    """What the background process does: make sure the node runs, and fetch from the network."""
+    started, ok = time.time(), False
+    try:
+        if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
+            ensure_node(repo)
+            time.sleep(5)  # it needs a moment to connect to the seeds
+        ok = network_sync(repo, force=True)
+    except RadError:
+        ok = False
+    finally:
+        _write_netsync(repo, {"started": started, "ended": time.time(), "running": False, "ok": ok})
+    return ok
+
+
 MAX_ARGS = 20000  # characters of refspecs per fetch: Windows caps a command line at 32767
 
 
@@ -573,6 +645,10 @@ def tidy(repo) -> None:
 def publish(repo, who: str) -> None:
     """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
     the node announces them to the network."""
+    mark = published_mark(repo)
+    last = (_cfg(repo, "legion.published") or "").split()
+    if len(last) == 2 and last[0] == mark and time.time() - float(last[1]) < REPUBLISH_EVERY:
+        return  # nothing new since the last push: a read-only command doesn't pay 10 s for it
     tidy(repo)
     specs = publish_specs(repo, who)
     for i in range(0, len(specs), 200):  # keeps the command line short with many patches
@@ -585,3 +661,15 @@ def publish(repo, who: str) -> None:
                     raise
                 time.sleep(2)
     publish_main(repo)
+    subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
+
+
+def published_mark(repo) -> str:
+    """What makes a publish worth its time, as one hash: this node's own latest event (a patch of its own comes
+    with one) and the official main. Not the coord, which every sync merges with the others' events, nor the
+    others' patches it fetched: those reach the network from their authors' namespaces, and this node re-offers
+    them every REPUBLISH_EVERY anyway."""
+    import hashlib
+    out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", "refs/legion/own",
+                          "refs/legion/main"], cwd=repo, capture_output=True).stdout
+    return hashlib.sha1(out).hexdigest()

@@ -968,6 +968,33 @@ def test_ideas_are_rated_by_other_owners_judging_pairs():
     assert c["id"] in {pair[0]["ev"]["id"], pair[1]["ev"]["id"]}
 
 
+def test_dead_ideas_arent_judged_and_spent_agents_arent_asked_for_ideas():
+    log, tid = project()
+    ideas = [log.add(w, "idea.proposed", task=tid, text=f"route {i}") for i, w in enumerate((ANA, BEA, CEL))]
+    for who in (BEA, DAN):                                               # two owners refute ana's premise
+        log.add(who, "idea.critiqued", task=tid, idea=ideas[0]["id"], text="its premise is false")
+    st = log.state()
+    assert st.dead(st.ideas[ideas[0]["id"]]) and not st.dead(st.ideas[ideas[1]["id"]])
+    pair = st.pair_to_compare("boss")
+    assert {pair[0]["ev"]["id"], pair[1]["ev"]["id"]} == {ideas[1]["id"], ideas[2]["id"]}  # not the dead one
+    assert st.needs_ideas("dan", 1001, DAN.author).id == tid            # two live routes: it wants more
+    for i in range(S.MAX_IDEAS_PER_DAY):
+        log.add(DAN, "idea.proposed", task=tid, text=f"dan's {i}", ts=500.0 + i)
+    log.add(DAN, "idea.proposed", task=tid, text="one too many", ts=900.0)
+    st = log.state()
+    assert st.ignored[-1][1].startswith("at most 10 ideas a day per agent: your next one in 23.9 h")
+    assert st.ideas_left_today(DAN.author, 1001) == 0 and st.needs_ideas("dan", 1001, DAN.author) is None
+
+
+def test_an_owners_agents_take_different_pairs_to_judge():
+    log, tid = project()
+    for i, w in enumerate((ANA, BEA, CEL, ANA, BEA, CEL)):
+        log.add(w, "idea.proposed", task=tid, text=f"route {i}")
+    st = log.state()
+    picks = {frozenset(i["ev"]["id"] for i in st.pair_to_compare(f"dan#{n}")) for n in range(1, 9)}
+    assert len(picks) > 1                                               # not all the same pair at once
+
+
 def test_a_report_says_which_idea_it_tried():
     log, tid = project()
     a = log.add(BEA, "idea.proposed", task=tid, text="Induction on n")

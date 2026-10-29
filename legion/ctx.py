@@ -53,6 +53,7 @@ class Ctx:
         self.ident = need_identity(self.repo)
         remember_agent(self.repo)
         self.unreachable: list[str] = []
+        self.unpublished: list[str] = []  # events recorded here that haven't gone out yet
         if sync:
             self.sync()
         else:
@@ -70,6 +71,9 @@ class Ctx:
     def sync(self) -> None:
         try:
             self.unreachable = coordgit.sync(self.repo, self.ident)
+            if getattr(self, "unpublished", None):
+                print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
+                self.unpublished = []
         except coordgit.GitError as e:
             self._sync_failed(e)
         self.reload()
@@ -86,8 +90,8 @@ class Ctx:
                                    | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws})
             peers = coordgit.peers(self.repo)
             if "network" in self.unreachable:
-                print("legion: warning: couldn't reach the Radicle network; working with what the local "
-                      "storage has", file=sys.stderr)
+                print("legion: warning: the last fetch from the Radicle network (it runs in the background) "
+                      "couldn't reach it; working with what this node has, which its peers keep sending", file=sys.stderr)
             elif peers and len(self.unreachable) == len(peers):
                 print(f"legion: warning: couldn't reach any peer ({', '.join(peers)}); "
                       "working with what you have locally", file=sys.stderr)
@@ -109,6 +113,12 @@ class Ctx:
             raise Fail(f"event rejected: {err}")
         coordgit.append(self.repo, self.ident, ev)
         self.st = trial
+        # The receipt, before anything goes out: an agent whose tool cut the command off while it published used
+        # to retry, or check by hand, not knowing whether the event counted. Recorded here, it counts, and goes
+        # out with this command's sync or the next command's.
+        self.unpublished.append(f"{type} {ev['id'][:8]}")
+        print(f"legion: recorded {type} {ev['id'][:8]} (it counts even if this command is cut off: it goes out "
+              "now, or with your next command)", file=sys.stderr, flush=True)
         return ev
 
     def task(self, ref: str) -> S.Task:

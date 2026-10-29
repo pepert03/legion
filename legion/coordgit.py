@@ -204,6 +204,10 @@ def append(repo, ident: Identity, ev: dict) -> None:
     new = _commit(repo, files, [old] if old else [], f"{ev['type']} {ev.get('task', '')}".strip(), author_env(ident))
     git(repo, "update-ref", REF, new, old or ZERO)
     git(repo, "update-ref", PUB + "coord", new)
+    git(repo, "update-ref", OWN, new)  # this node's own latest event: what makes a publish worth its time
+
+
+OWN = "refs/legion/own"
 
 
 # --- p2p mode ------------------------------------------------------------------------------
@@ -334,12 +338,8 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
     failed = []
     try:
         radicle.keep_bridge(repo)
-        if not radicle.network_sync(repo):
-            if not radicle.node_running(repo):  # stopped (a reboot, say): start it and try once more
-                radicle.ensure_node(repo)
-                time.sleep(5)  # it needs a moment to connect to the seeds
-            if not radicle.network_sync(repo, force=True):
-                failed.append("network")
+        if not radicle.kick_network_sync(repo):  # in the background: see radicle.kick_network_sync
+            failed.append("network")
     except radicle.RadError:
         failed.append("network")  # offline: carry on with what the local storage has
     try:

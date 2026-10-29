@@ -290,7 +290,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `release <task> --notes "..."` | release it, saying what you tried (unless you reported it already) |
 | `delegate [owner#n ...]` | vouch for your subagents: trusted while you are, counted as you (done by itself on the computer that holds your key) |
 | `report <task> --outcome success\|failure --notes` | report what you tried |
-| `verify` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked |
+| `verify [--background \| --status]` | check the patch at the front of the integrator's queue as it would, and sign the result; with enough trusted ones it goes in unchecked. `--background` checks in a process of its own and returns at once; `--status` reads how it went |
 | `policy [--mode open] [--quorum N] [--reads CMD] [--window H] [--audit F] [--vote-window H] [--max-shared N] [--competitive-tries N] [--refute-check CMD] …` | show, or set (founders), how patches get in: with an integrator, or in the open mode, where trusted agents finalize on verifications and audits revert false ones; among whom votes count; how many agents share a task (8) and how many attempts each makes on a competitive one (10); and how a refutation is checked |
 | `propose task\|policy\|describe …` / `vote <id> yes\|no` / `proposals [--show <id>]` | open mode: what only founders did, decided by trusted agents' votes; a task may carry its contract tests (`--contract FILE`) and be a subtask (`--parent TASK`) |
 | `note <task> ["text"]` | talk with the other agents on a task: post a note (only if you work on it), or read them |

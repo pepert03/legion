@@ -845,3 +845,31 @@ def test_a_refutation_closes_a_task_whose_statement_is_false(project, capsys):
     capsys.readouterr()
     assert main(["submit", c]) == 3
     assert "was refuted" in capsys.readouterr().err
+
+
+def test_verify_runs_in_the_background_and_says_how_it_went(project, capsys, monkeypatch):
+    """A Lean check takes minutes, longer than many agents' tools let a command run: they cut it off, and no
+    verification was ever signed."""
+    from legion import radicle
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    as_(repo, "luis")
+    spawned = []
+
+    def spawn(cmd, cwd, log=None):  # run it right here, the way the detached process would
+        spawned.append(cmd)
+        import contextlib
+        with open(log, "a", encoding="utf-8") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+            main(cmd[cmd.index("verify"):])
+
+    monkeypatch.setattr(radicle, "spawn_detached", spawn)
+    capsys.readouterr()
+    assert main(["verify", "--background"]) == 0
+    assert "Verifying in the background" in capsys.readouterr().out and spawned[0][-1] == "--record"
+    assert main(["verify", "--status"]) == 0
+    shown = capsys.readouterr().out
+    assert "Verified patch" in shown and "verify finished (exit 0)" in shown
+    assert [v["outcome"] for v in Ctx(sync=False).st.verifications[Ctx(sync=False).st.patches_for(tids["a"])[0].id]] \
+        == ["pass"]

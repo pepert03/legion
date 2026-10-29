@@ -45,6 +45,7 @@ def network(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "run", run)
     monkeypatch.setattr(radicle, "storage", lambda repo: str(store))
     monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False: True)
+    monkeypatch.setattr(radicle, "kick_network_sync", lambda repo: True)
     monkeypatch.setattr(radicle, "publish", publish)
     return nodes
 
@@ -211,3 +212,40 @@ def test_a_fetch_brings_only_what_changed(network, monkeypatch):
     fetches.clear()
     radicle.fetch_all(alice)
     assert fetches.count("fetch") == 0      # nothing changed: nothing fetched
+
+
+def test_a_command_starts_the_network_fetch_in_the_background_and_doesnt_wait(tmp_path, monkeypatch):
+    """`rad sync --fetch` took 45 s, twice when it failed, on every command: now it runs in a process of its own,
+    once a minute at most, and the next command reads how it went."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    started = []
+    monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None: started.append(cmd))
+    assert radicle.kick_network_sync(repo) and len(started) == 1 and started[0][-1] == "netsync"
+    assert radicle.kick_network_sync(repo) and len(started) == 1        # one is running: no second one
+    monkeypatch.setattr(radicle, "node_running", lambda repo=None, home=None: True)
+    monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False: False)
+    assert radicle.run_network_sync(repo) is False                     # what the background process does
+    assert radicle.kick_network_sync(repo) is False and len(started) == 1  # it failed just now: say so
+
+
+def test_a_publish_with_nothing_new_pushes_nothing(tmp_path, monkeypatch):
+    """Read-only commands paid 10 s to push refs the node already had."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    boss = Identity.generate("boss")
+    coordgit.append(repo, boss, E.create(boss, "project.init", 1, project="p"))
+    pushes = []
+    monkeypatch.setattr(radicle, "rgit", lambda repo, *args, **kw: pushes.append(args[0]))
+    monkeypatch.setattr(radicle, "publish_main", lambda repo: None)
+    monkeypatch.setattr(radicle, "node_patches", lambda repo: {})
+    radicle.publish(repo, "b")
+    radicle.publish(repo, "b")
+    assert pushes == ["push"]                                          # the second had nothing new
+    git(repo, "update-ref", "refs/legion/pub/coord", git(repo, "commit-tree", "-m", "merged",
+                                                            git(repo, "rev-parse", coordgit.REF + "^{tree}")))
+    radicle.publish(repo, "b")
+    assert pushes == ["push"]                                          # others' events merged in: nor that
+    coordgit.append(repo, boss, E.create(boss, "agent.joined", 2))     # an event of its own: that goes out
+    radicle.publish(repo, "b")
+    assert pushes == ["push", "push"]

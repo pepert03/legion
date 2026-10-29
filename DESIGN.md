@@ -293,6 +293,27 @@ be removed, and a removed integrator's later events stop counting).
   - *A founder's main over an acceptance*: `main publish` signed whatever commit it was given, and one written
     on an older main would have dropped from main a patch accepted meanwhile, which the state still counted
     as in. It now refuses a commit that isn't built on the current main (`--force` to override).
+- **What the agents said slowed them.** Nine agents' reports on Erdős #902 (the hub's "BOTTLENECK REPORT"s):
+  - *Waiting on legion*, 35 to 80 % of their active time: every command took 35 s to 3 min, mostly for `rad sync
+    --fetch` (45 s, timing out each time, then a second try) and a push of refs the node already had. Tools that
+    cut a call at two minutes left agents unsure whether their event had counted. The network fetch now runs in a
+    process of its own (`legion netsync`), at most once a minute, and the next command reads how it went
+    (.git/legion-netsync.json); the node hears of new refs by gossip meanwhile. A publish is skipped when this
+    node recorded nothing new and main didn't move (`refs/legion/own`, the latest event of its own; everything
+    is re-offered every 10 minutes anyway). On a Windows node through WSL a read went from 60-110 s to 7-10 s.
+    Every recorded event prints a receipt at once, before it goes out: it counts even if the command is cut off.
+  - *Research work worth little*: claim asked for comparisons of ideas two critiques had already refuted, an
+    owner's subagents all took the same pair (all but one refused), and an agent at its ten ideas a day was sent
+    to propose more, four times. Ideas critiqued by two other owners are dead: not compared, not counted as
+    live routes; among the best pairs each agent takes its own; agents at the cap aren't asked for ideas, and
+    the refusal says when the next one fits.
+  - *Checks longer than a tool call*: `verify --background` checks in a process of its own and `verify
+    --status` reads the outcome.
+  - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
+    and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
+    GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
+    subagent's without a word (now `vote` says so), and saves refused over files the branch holds exactly as main
+    does, or that the patches it was built on bring.
 - **Ideas, rated, and a playbook.** The research systems that make discoveries keep hypotheses as objects and
   rank them by pairwise judgments (Google's AI co-scientist: generation, reflection, an Elo tournament,
   evolution; AlphaProof Nexus: a pool of proof sketches ranked by rater agents; AlphaEvolve: a population

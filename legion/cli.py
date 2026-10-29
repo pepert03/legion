@@ -780,10 +780,18 @@ CLAIM_TTL = 2700
 
 
 def keep_claim(c: Ctx, t: S.Task) -> None:
-    """Renew this agent's claim on the task, if it holds one: whatever it does there is a sign of life."""
+    """Renew this agent's claim on the task, if it holds one: whatever it does there is a sign of life. Say so
+    when it had lapsed: an agent kept working for an hour on a task whose claim had expired, and another took it."""
     now = time.time()
-    if any(cl.author == c.me and cl.active(now) for cl in c.st.claims.get(t.id, ())):
+    mine = [cl for cl in c.st.claims.get(t.id, ()) if cl.author == c.me and not cl.released]
+    if any(cl.active(now) for cl in mine):
         c.emit("task.heartbeat", task=t.id)
+    elif mine:
+        h = c.st.holder(t.id, now)
+        print(f"legion: warning: your claim on {t.key} expired at "
+              f"{time.strftime('%H:%M', time.localtime(max(cl.last_beat for cl in mine) + mine[-1].ttl))}"
+              + (f" and {h.name} holds the task now" if h else f": claim it again (`python -m legion claim {t.id}`)"),
+              file=sys.stderr)
 
 
 def cmd_heartbeat(args):
@@ -791,10 +799,14 @@ def cmd_heartbeat(args):
     t = c.task(args.task)
     if not c.holder_is_me(t.id):
         h = c.st.holder(t.id, time.time())
-        raise Fail(f"you lost your claim on {t.key}" + (f": {h.name} has it" if h else ""), 3)
+        raise Fail(f"you lost your claim on {t.key}" + (f": {h.name} has it" if h else "")
+                   + f". Claim it again if it's free: `python -m legion claim {t.id}`", 3)
     c.emit("task.heartbeat", task=t.id)
     c.sync()
-    print(f"Claim on {t.key} renewed.")
+    cl = next((cl for cl in c.st.claims.get(t.id, ()) if cl.author == c.me and cl.active(time.time())), None)
+    until = f" until {time.strftime('%H:%M', time.localtime(cl.last_beat + cl.ttl))}" if cl else ""
+    print(f"Claim on {t.key} renewed{until}: renew it again within {(cl.ttl if cl else CLAIM_TTL) // 60} "
+          "minutes, or do something on the task (start, note, save, report, submit).")
 
 
 def cmd_start(args):
@@ -1077,9 +1089,51 @@ def need_git_merge_tree() -> None:
                    f"{out_.strip() or 'no git'}: install a newer git (git-scm.com) and run it again")
 
 
+def verify_log(repo, ident) -> Path:
+    git_dir = Path(git(repo, "rev-parse", "--absolute-git-dir"))
+    return git_dir / f"legion-verify-{ident.short}.log"
+
+
+VERIFY_DONE = "legion: verify finished"
+
+
 def cmd_verify(args):
     """Check one patch the integrator will review, the way it will, and sign the result: with enough of these
-    from trusted people it accepts the patch without checking it itself."""
+    from trusted people it accepts the patch without checking it itself. A Lean check takes minutes, longer than
+    many agents' tools let a command run: --background runs it in a process of its own, --status reads how it
+    went."""
+    if args.background or args.status:
+        repo = repo_root()
+        log = verify_log(repo, need_identity(repo))
+        text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+        running = bool(text) and VERIFY_DONE not in text
+        if args.status:
+            print(text.strip() or "No verification run in the background yet: `python -m legion verify --background`.")
+            if running:
+                print(f"\n(still running, started {time.ctime(log.stat().st_ctime)}: check again in a few minutes)")
+            return 0
+        if running and time.time() - log.stat().st_mtime < args.timeout + 600:
+            print("A verification is already running in the background: `python -m legion verify --status`.")
+            return 0
+        log.write_text("", encoding="utf-8")
+        from .radicle import spawn_detached
+        spawn_detached([sys.executable, "-m", "legion", "verify", "--timeout", str(args.timeout), "--record"], repo,
+                       log=log)
+        print("Verifying in the background: carry on with your work, and read the result in a few minutes with "
+              "`python -m legion verify --status`.")
+        return 0
+    if args.record:
+        try:
+            code = _verify(args)
+        except Fail as e:
+            print(f"legion: {e}", file=sys.stderr)
+            code = e.code
+        print(f"{VERIFY_DONE} (exit {code or 0})", flush=True)
+        return code
+    return _verify(args)
+
+
+def _verify(args):
     need_git_merge_tree()
     c = Ctx()
     now = time.time()
@@ -1234,7 +1288,14 @@ def find_proposal(st: S.State, ref: str) -> str:
 def cmd_vote(args):
     c = Ctx()
     pid = find_proposal(c.st, args.proposal)
-    c.emit("proposal.voted", proposal=pid, yes=args.answer == "yes")
+    prop, me, yes = c.st.proposals[pid], S.owner(c.ident.name), args.answer == "yes"
+    before, by = prop["votes"].get(me), prop.get("voters", {}).get(me)
+    if before is not None and before != yes and by != c.ident.name:
+        # One owner, one vote: the latest of its agents counts. An owner found its subagents' votes had replaced
+        # its own on three proposals, without a word.
+        print(f"legion: note: this replaces {by}'s vote ({'yes' if before else 'no'}): each owner has one vote, and "
+              "the latest of its agents' counts", file=sys.stderr)
+    c.emit("proposal.voted", proposal=pid, yes=yes)
     c.sync()
     print(f"Voted {args.answer}: {proposal_line(c.st, pid, time.time())}")
 
@@ -1510,9 +1571,10 @@ def research_work(c: Ctx, args, now: float) -> int | None:
                          f"  {idea_line(st, a, None)}\n  {idea_line(st, b, None)}\n\nJudge them with `python -m legion "
                          "compare <better> <worse> --why \"...\"`, and critique either one if it has a flaw that can "
                          "be fixed: `critique <id> \"...\"`.")
-    t = st.needs_ideas(name, now)
+    t = st.needs_ideas(name, now, c.me)
     if t:
-        return hand_work(c, args, "ideas", t, f"{t.key} has fewer than {S.IDEAS_WANTED} routes nobody has tried. "
+        return hand_work(c, args, "ideas", t, f"{t.key} has fewer than {S.IDEAS_WANTED} live routes nobody has tried "
+                         f"(you may propose {st.ideas_left_today(c.me, now)} more today). "
                          "Propose new ones, different from those below and from what failed (its state of the art and "
                          "reports say what did), each with why it could work and what it would take: `python -m legion "
                          f"idea {t.id} \"...\"`. Combine or refine existing ones with --from <ids>. Look further than the "
@@ -1646,6 +1708,9 @@ def cmd_brief(args):
     t = c.task(args.task)
     if args.edit:
         text = Path(args.edit).read_text(encoding="utf-8")
+        if len(text) > S.MAX_BRIEF:
+            raise Fail(f"a state of the art is at most {S.MAX_BRIEF} characters, and yours has {len(text)}: keep "
+                       "what's proved, ruled out, open and under way, and drop what's stale", 5)
         keep_claim(c, t)
         old = c.st.brief(t.id)
         c.emit("task.brief", task=t.id, text=text, **({"base": old["id"]} if old else {}))
@@ -1658,7 +1723,8 @@ def cmd_brief(args):
                "brief": {k: b[k] for k in ("id", "name", "ts", "text")} if b else None},
         f"State of the art of {t.key}, {brief_text(c.st, t.id)}" if b else
         f"Nobody has written the state of the art of {t.key} yet. When you know where it stands, write it in a "
-        f"file, like this, and publish it with `python -m legion brief {t.id} --edit FILE`:\n\n{BRIEF_TEMPLATE}")
+        f"file, like this (at most {S.MAX_BRIEF} characters), and publish it with `python -m legion brief {t.id} "
+        f"--edit FILE`:\n\n{BRIEF_TEMPLATE}")
 
 
 def cmd_ask(args):
@@ -1743,9 +1809,15 @@ def cmd_save(args):
     files = [f for f in git(repo, "diff", "--name-only", git(repo, "merge-base", "HEAD", main), "HEAD").splitlines() if f]
     if not files:
         raise Fail(f"your branch has nothing that {main} doesn't: nothing to save", 5)
-    outside = [f for f in files if not S.in_zone(f, t.zone)]
+    # Not this branch's change: what the patches it was built on bring, and files it holds exactly as main does
+    # (commits of patches accepted since, which the merge base doesn't see past). An agent's saves were refused
+    # over those, again and again, until it rebuilt its branch by hand.
+    theirs = brought(repo, main, built_on(c, t))
+    outside = [f for f in files if not S.in_zone(f, t.zone) and blob(repo, "HEAD", f) != blob(repo, main, f)
+               and blob(repo, "HEAD", f) not in theirs.get(f, ())]
     if outside:  # whoever builds on it couldn't submit them
-        raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}", 5)
+        raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}. Move that work "
+                   "into the zone, or publish it where it belongs (a result, or a save on its own task)", 5)
     head = git(repo, "rev-parse", "HEAD")
     mine = [w for w in c.st.saved[t.id] if w["author"] == c.me]
     if mine and mine[-1]["commit"] == head:
@@ -2320,10 +2392,18 @@ def cmd_update(args):
     if not src:
         print("This legion isn't installed from a git URL (it's a working copy?): update it with git pull.")
         return 0
-    if not update.check(quiet=True):
-        print(f"legion is up to date ({src[1][:8]}, {src[0]}).")
-    else:
-        print("legion updated.")
+    result = update.check(quiet=True)
+    if result is None:
+        print(f"Couldn't tell whether a newer legion is published (installed: {src[1][:8] or '?'}, from {src[0]}): "
+              "see the message above, and try again later.")
+        return 1
+    print("legion updated." if result else f"legion is up to date ({src[1][:8]}, {src[0]}).")
+
+
+def cmd_netsync(args):
+    """The background network fetch every command starts (see radicle.kick_network_sync); not for agents."""
+    from . import radicle
+    return 0 if radicle.run_network_sync(repo_root()) else 1
 
 
 REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without its own, with {key}, {accept} or {arg} "
@@ -2414,6 +2494,8 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("update", help="update legion itself if a newer version is published")
     s.set_defaults(func=cmd_update)
+    s = sub.add_parser("netsync", help=argparse.SUPPRESS)  # the background network fetch: not for agents
+    s.set_defaults(func=cmd_netsync)
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")
@@ -2523,6 +2605,10 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("verify", help="check a patch the integrator will review, and sign the result")
     s.add_argument("--timeout", type=int, default=1800, help="seconds the check may take")
+    s.add_argument("--background", action="store_true",
+                   help="run the check in a process of its own and return at once (a Lean check takes minutes)")
+    s.add_argument("--status", action="store_true", help="how the verification run in the background went")
+    s.add_argument("--record", action="store_true", help=argparse.SUPPRESS)  # what --background runs
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_verify)
 

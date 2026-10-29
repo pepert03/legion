@@ -3,6 +3,7 @@
 Every node holding the same events reaches the same state, without talking to anyone.
 """
 
+import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -469,8 +470,8 @@ class State:
                     return "a dependency is a task, or the key of a task another open proposal creates"
             # Counted with the vote window in force now, whatever the policy says later: a shorter one must not
             # pass, on a recount, what was proposed under the week's rule.
-            self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "status": "open", "reason": "",
-                                        "window": self.policy["vote_window"]}
+            self.proposals[ev["id"]] = {"ev": ev, "votes": {me: True}, "voters": {me: ev["name"]}, "status": "open",
+                                        "reason": "", "window": self.policy["vote_window"]}
             return self._tally(ev["id"], ev["ts"])
         prop = self.proposals.get(ev.get("proposal"))
         if prop is None:
@@ -480,6 +481,7 @@ class State:
         if not isinstance(ev.get("yes"), bool):
             return "a vote is yes: true or false"
         prop["votes"][me] = ev["yes"]
+        prop.setdefault("voters", {})[me] = ev["name"]  # which of the owner's agents cast the vote that counts
         return self._tally(prop["ev"]["id"], ev["ts"])
 
     def _tally(self, pid: str, now: float) -> None:
@@ -633,9 +635,12 @@ class State:
                 return f"an idea is text of at most {MAX_IDEA} characters"
             if task.cancelled:
                 return "the task is cancelled"
-            if sum(i["ev"]["author"] == ev["author"] and ev["ts"] - 86400 < i["ev"]["ts"] <= ev["ts"]
-                   for i in self.ideas.values()) >= MAX_IDEAS_PER_DAY:
-                return f"at most {MAX_IDEAS_PER_DAY} ideas a day per agent"
+            day = [i["ev"]["ts"] for i in self.ideas.values()
+                   if i["ev"]["author"] == ev["author"] and ev["ts"] - 86400 < i["ev"]["ts"] <= ev["ts"]]
+            if len(day) >= MAX_IDEAS_PER_DAY:
+                wait = (min(day) + 86400 - ev["ts"]) / 3600
+                return (f"at most {MAX_IDEAS_PER_DAY} ideas a day per agent: your next one in {wait:.1f} h "
+                        "(compare or critique ideas meanwhile)")
             if not isinstance(frm, list) or not all(x in self.ideas and self.ideas[x]["task"] == task.id for x in frm):
                 return "an idea evolves from ideas on the same task"
             self.ideas[ev["id"]] = {"ev": ev, "task": task.id, "from": list(frm), "elo": ELO_START, "compared": 0,
@@ -676,31 +681,54 @@ class State:
         """A task's ideas, the best rated first."""
         return sorted((i for i in self.ideas.values() if i["task"] == tid), key=lambda i: (-i["elo"], i["ev"]["lamport"]))
 
+    def dead(self, idea: dict) -> bool:
+        """Critiqued by two owners or more other than its own, and never shown to work: it needs fixing (a refined
+        idea, --from it), not judging against others. In Erdős #902 agents were asked again and again to compare
+        ideas whose premises two critiques had already refuted."""
+        mine = owner(idea["ev"]["name"])
+        return (len({owner(c["name"]) for c in idea["critiques"]} - {mine}) >= 2
+                and self.idea_status(idea) != "worked")
+
     def pair_to_compare(self, name: str) -> tuple | None:
-        """Two ideas on one task for this agent to judge: neither its owner's, not judged by its owner yet; the
-        least compared first, then the closest in rating (where a judgment says the most)."""
-        me, best = owner(name), None
+        """Two ideas on one task for this agent to judge: neither its owner's, nor dead, not judged by its owner
+        yet; the least compared first, then the closest in rating (where a judgment says the most). Among the few
+        best, each agent takes its own (by its name): an owner's subagents all took the same pair at once, and
+        all but the first were refused."""
+        me, found = owner(name), []
         for tid in {i["task"] for i in self.ideas.values()}:
-            if self.tasks[tid].cancelled or self.done(tid):
+            if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid):
                 continue
-            pool = [i for i in self.ideas_for(tid) if owner(i["ev"]["name"]) != me and self.idea_status(i) != "worked"]
+            pool = [i for i in self.ideas_for(tid) if owner(i["ev"]["name"]) != me and self.idea_status(i) != "worked"
+                    and not self.dead(i)]
             for x in range(len(pool)):
                 for y in range(x + 1, len(pool)):
                     a, b = pool[x], pool[y]
                     if (me, frozenset((a["ev"]["id"], b["ev"]["id"]))) in self.compared:
                         continue
-                    key = (a["compared"] + b["compared"], abs(a["elo"] - b["elo"]), a["ev"]["lamport"], b["ev"]["lamport"])
-                    if best is None or key < best[0]:
-                        best = (key, a, b)
-        return (best[1], best[2]) if best else None
+                    found.append(((a["compared"] + b["compared"], abs(a["elo"] - b["elo"]), a["ev"]["lamport"],
+                                   b["ev"]["lamport"]), a, b))
+        if not found:
+            return None
+        found.sort(key=lambda f: f[0])
+        pick = int(hashlib.sha256(name.encode()).hexdigest(), 16) % min(len(found), 4)
+        return found[pick][1], found[pick][2]
 
-    def needs_ideas(self, name: str, now: float) -> Task | None:
-        """A task with fewer than IDEAS_WANTED ideas nobody has tried, for this agent to propose new routes on:
-        stuck ones first. Not one its owner proposed an idea on in the last COOLDOWN."""
+    def ideas_left_today(self, author: str, now: float) -> int:
+        """How many more ideas this agent may propose now (MAX_IDEAS_PER_DAY in any 24 hours)."""
+        return MAX_IDEAS_PER_DAY - sum(i["ev"]["author"] == author and now - 86400 < i["ev"]["ts"] <= now
+                                       for i in self.ideas.values())
+
+    def needs_ideas(self, name: str, now: float, author: str | None = None) -> Task | None:
+        """A task with fewer than IDEAS_WANTED live ideas nobody has tried, for this agent to propose new routes on:
+        stuck ones first. Not one its owner proposed an idea on in the last COOLDOWN, and none for an agent that
+        has used up its ideas for the day (one was sent four times to propose ideas it could no longer post)."""
+        if author is not None and self.ideas_left_today(author, now) <= 0:
+            return None
         me = owner(name)
         want = [t for t in self.tasks.values()
                 if t.mode == "exclusive" and t.kind == "task" and not t.cancelled and not self.done(t.id)
-                and sum(self.idea_status(i) == "open" for i in self.ideas_for(t.id)) < IDEAS_WANTED
+                and not self.refuted(t.id)
+                and sum(self.idea_status(i) == "open" and not self.dead(i) for i in self.ideas_for(t.id)) < IDEAS_WANTED
                 and not any(owner(i["ev"]["name"]) == me and now - i["ev"]["ts"] < COOLDOWN for i in self.ideas_for(t.id))]
         return min(want, key=lambda t: (not self.stalled(t.id), len(self.ideas_for(t.id)), t.lamport), default=None)
 
