@@ -340,6 +340,7 @@ class State:
         self.falsified: set[str] = set()  # authors of a reverted patch, and whoever verified it as passing
         self.last_seen: dict[str, float] = {}  # author -> its latest event: who is active, for votes
         self.names: dict[str, str] = {}
+        self.tunnels: dict[str, dict] = {}  # Radicle node ID -> its latest node.tunnel event (see tunnel.py)
         self.proposals: dict[str, dict] = {}  # id -> {"ev", "votes": {owner: yes?}, "status", "reason"}
         self._by_vote: str | None = None  # the proposal being applied right now
         self.policy: dict = dict(POLICY)
@@ -1186,6 +1187,15 @@ class State:
         if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
             return None
 
+        if t == "node.tunnel":  # where to reach a Radicle node through the NAT: see tunnel.py
+            nid, ticket = ev.get("nid"), ev.get("ticket")
+            if not (isinstance(nid, str) and re.fullmatch(r"z6Mk\w{40,60}", nid)):
+                return "a node.tunnel names the Radicle node it's for (nid, z6Mk…)"
+            if not (isinstance(ticket, str) and re.fullmatch(r"\w{20,1000}", ticket)):
+                return "a node.tunnel carries a dumbpipe ticket"
+            self.tunnels[nid] = ev
+            return None
+
         if t in ("hub.message", "lit.added"):
             return self._hub(ev)
 
@@ -1637,7 +1647,7 @@ def build(events: list[dict], trusted=None) -> State:
         if err:
             st.ignored.append((ev, err))
             continue
-        if ev["type"] not in ("agent.joined", "agent.delegated"):
+        if ev["type"] not in ("agent.joined", "agent.delegated", "node.tunnel"):
             st.worked.add(owner(ev["name"]))
         st.events.append(ev)
         st.max_lamport = max(st.max_lamport, ev["lamport"])

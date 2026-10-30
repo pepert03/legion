@@ -12,6 +12,7 @@ TYPES = {
     "project.described",
     "agent.joined",
     "agent.delegated",
+    "node.tunnel",
     "task.created",
     "task.claimed",
     "task.heartbeat",

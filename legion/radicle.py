@@ -288,8 +288,9 @@ def make_seed(repo, address: str, home: str | None = None) -> str:
     return f"{node_id(repo, home)}@{address}"
 
 
-def prefer_seed(repo, seed: str, home: str | None = None) -> None:
-    """Keep a connection to the project's seed (NID@HOST:PORT) and fetch from it first."""
+def prefer_seed(repo, seed: str, home: str | None = None, restart: bool = True) -> None:
+    """Keep a connection to the project's seed (NID@HOST:PORT) and fetch from it first. Without `restart`, the
+    node reads the config at its next start, and the caller connects it by hand meanwhile."""
     if not re.fullmatch(r"z6Mk\w+@[\w.-]+:\d+", seed):
         raise RadError("a seed is NID@HOST:PORT, like z6Mk…@seed.example.org:8776 (`legion radicle seed` prints it)")
 
@@ -298,8 +299,9 @@ def prefer_seed(repo, seed: str, home: str | None = None) -> None:
         c["preferredSeeds"] = [seed] + [s for s in c.get("preferredSeeds") or [] if s != seed]
     _edit_config(home, change)
     subprocess.run(["git", "config", "legion.seed", seed], cwd=repo, capture_output=True)
-    restart_node(home)
-    ensure_node(repo, home)
+    if restart:
+        restart_node(home)
+        ensure_node(repo, home)
 
 
 def node_proxy(home: str | None = None) -> str | None:
@@ -679,28 +681,30 @@ def kick_network_sync(repo) -> bool:
     return status.get("ok", True) or now - status.get("ended", 0) > 900
 
 
-def spawn_detached(cmd: list[str], cwd, log=None) -> None:
+def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
     """Start a process that outlives this one: its own hidden console and process group on Windows, out of the
     agent's job when the job lets it go; its own session elsewhere."""
     out = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL  # noqa: SIM115 (the child keeps it)
-    kw = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT if log else subprocess.DEVNULL)
+    kw = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+              stderr=subprocess.STDOUT if log else subprocess.DEVNULL)
     if not IS_WINDOWS:
-        subprocess.Popen(cmd, start_new_session=True, **kw)
-        return
+        return subprocess.Popen(cmd, start_new_session=True, **kw)
     flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     try:
-        subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)  # CREATE_BREAKAWAY_FROM_JOB
+        return subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)  # CREATE_BREAKAWAY_FROM_JOB
     except OSError:
-        subprocess.Popen(cmd, creationflags=flags, **kw)
+        return subprocess.Popen(cmd, creationflags=flags, **kw)
 
 
 def run_network_sync(repo) -> bool:
     """What the background process does: make sure the node runs, and fetch from the network."""
+    from . import tunnel
     started, ok = time.time(), False
     try:
         if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
             ensure_node(repo)
             time.sleep(5)  # it needs a moment to connect to the seeds
+        tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True)
     except RadError:
         ok = False

@@ -329,6 +329,37 @@ be removed, and a removed integrator's later events stop counting).
     NID@HOST:PORT` on every node): public seeds are volunteers' machines, and the explicit fetch timed out
     waiting for them. A node that prefers the project's seed keeps a connection to it and fetches from it
     first.
+  - *Direct tunnels through NAT* (tunnel.py, `legion radicle tunnel hub|client|mesh`): an event took 3 minutes
+    to reach one machine and 9 another, because nodes behind NAT only met through public seeds, and a seed of
+    the project's own needs a machine with an open port (this one has no public IPv6 nor UPnP, and the free VPS
+    wasn't available). dumbpipe (iroh) opens a QUIC connection by hole punching, or through n0's free public
+    relays, and forwards a TCP port over it, with no account: chosen over holesail/hyperswarm, which is AGPL,
+    needs Node.js and has no relay to fall back on when both ends are behind hard NATs. A node that exposes
+    itself listens on 127.0.0.1 behind `dumbpipe listen-tcp` and publishes its ticket in a `node.tunnel` event
+    (signed like any other; old versions ignore it as unknown); the others run `dumbpipe connect-tcp` to a
+    local port and connect their node to NID@127.0.0.1:PORT. A *hub* (only an integrator's counts) is also
+    kept as the preferred seed; in a *mesh* each node also connects to up to PEERS (8) nodes whose agents were
+    active in the last 12 h, picked by a hash of both IDs, so the links spread instead of piling on a few. The
+    tunnels are processes of their own, checked and relaunched by the background network fetch, which the
+    sync process or any command starts at most every minute, so a sandbox that kills background processes
+    every half hour loses them for at most a minute or so. Two things keep that cheap: dumbpipe's key is kept
+    in the node's folder (its ticket, the short form with only the ID and the relay, is the same after a
+    restart, so the event goes out once), and a tunnel comes back on the same local port, because Radicle
+    keeps one session per node with its address: a `rad node connect` to the same node at another address is
+    taken as already connected, and only a restart of the node forgets the old one. Measured between two
+    nodes on one machine connected only by the tunnel: 0.3-0.8 s from a node announcing a push to the other
+    one having fetched it, 6.5-9 s from a `legion chat` to the event in the other node's storage (the rest is
+    the command and its background push). The test found two faults of Radicle built for Windows, which a
+    tunnel brings out because every connection now arrives through it: (1) the node accepts one inbound
+    connection per readiness event, and mio on Windows only signals readiness again after a `WouldBlock`, so
+    after its first inbound connection the node never accepts another (a fix, accepting until `WouldBlock`,
+    is in reactor/listener.rs of a local heartwood build; on Linux and macOS epoll signals again, so nodes
+    there are fine); (2) having lost a node, its next outbound connection to it opens and never sends the
+    handshake, and stays so, while a freshly started node connects at once. legion can't fix the second from
+    outside: a Windows node that has had no session for STUCK (90) seconds with a node whose tunnel is up is
+    restarted, at most every RESTART_EVERY (300) seconds; measured, it was connected 4-5 s after. A tunnel
+    that died is thus back within the next fetch (a minute), and the connection through it within a few
+    minutes at worst on Windows.
   - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper
     going through every ref of the storage (24,000: every node kept every save and judged patch it ever saw,
     670 refs each, of which some 70 were still of use), then 10 s waiting for the seeds to confirm, and a

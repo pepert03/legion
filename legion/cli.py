@@ -100,6 +100,8 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "project.init": f"starts the project {ev.get('project', '')}",
         "project.described": "describes the project",
         "agent.joined": "joins the project",
+        "node.tunnel": f"opens a tunnel to its Radicle node {str(ev.get('nid', ''))[-6:]}"
+                       + (" (the project's hub)" if ev.get("hub") else ""),
         "agent.delegated": f"vouches for its subagent {ev.get('member') or str(ev.get('key', ''))[:16]}",
         "task.created": f"creates task {S.task_id(ev)} ({ev.get('key')}): {ev.get('title')}",
         "task.claimed": f"claims {key}",
@@ -376,6 +378,9 @@ def cmd_radicle(args):
             print(f"This node is now the project's seed, at {seed}. On every other node, in its clone, run:\n\n"
                   f"  python -m legion radicle prefer {seed}\n\nKeep this machine on: the others fetch from it first.")
             return
+        if args.action == "tunnel":
+            cmd_tunnel(repo, args.target or "status")
+            return
         if args.action == "prefer":
             if not args.target:
                 raise Fail("give the seed: `legion radicle prefer NID@HOST:PORT` (`legion radicle seed` prints it)")
@@ -411,6 +416,37 @@ def cmd_radicle(args):
             print(radicle.rad(repo, "node", "status", check=False))
     except radicle.RadError as e:
         raise Fail(str(e))
+
+
+def cmd_tunnel(repo, what: str) -> None:
+    from . import radicle, tunnel
+    if what == "status":
+        for line in tunnel.status(repo):
+            print(line)
+        return
+    if what not in tunnel.MODES:
+        raise Fail(f"`legion radicle tunnel` takes one of {', '.join(tunnel.MODES)} or status")
+    if not radicle.rid(repo):
+        raise Fail("this repository doesn't use Radicle (`legion radicle init` or `legion join rad:…`)")
+    if what == "off":
+        tunnel.off(repo)
+        print("This node's tunnels are closed.")
+        return
+    if not tunnel.binary():
+        raise Fail("the tunnels need dumbpipe: `cargo install dumbpipe`, or put a binary from "
+                   "https://github.com/n0-computer/dumbpipe/releases on the PATH")
+    coordgit.git(repo, "config", "legion.tunnel", what)
+    print("Setting up the tunnels (dumbpipe; the first time, the node may restart to listen on 127.0.0.1)…",
+          flush=True)
+    for note in tunnel.keep(repo, strict=True):
+        print(f"  {note}")
+    print({"hub": "This node is the project's hub: the others reach it through its tunnel once the event "
+                  "reaches them (only an integrator's hub counts). Keep this machine on.",
+           "client": "This node connects to the project's hubs through their tunnels, and fetches from them first.",
+           "mesh": "This node is exposed through its tunnel, and connects to the hubs and to up to "
+                   f"{tunnel.PEERS} other active nodes."}[what])
+    print("The tunnels are checked and relaunched with every network fetch. `legion radicle tunnel status` "
+          "shows them.")
 
 
 def join_radicle(args, ident: Identity, dest: Path) -> None:
@@ -2562,12 +2598,16 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_join)
 
     s = sub.add_parser("radicle", help="Radicle as the transport: across networks, no server, no open ports")
-    s.add_argument("action", choices=["setup", "init", "status", "doctor", "seed", "prefer"],
+    s.add_argument("action", choices=["setup", "init", "status", "doctor", "seed", "prefer", "tunnel"],
                    help="setup: install Radicle and start the node; init: publish this project; status; "
                         "doctor: can this machine reach the seeds, directly or through its HTTP proxy?; "
                         "seed HOST:PORT: make this always-on node the project's own seed; "
-                        "prefer NID@HOST:PORT: keep a connection to that seed and fetch from it first")
-    s.add_argument("target", nargs="?", help="for seed: HOST:PORT the others reach; for prefer: NID@HOST:PORT")
+                        "prefer NID@HOST:PORT: keep a connection to that seed and fetch from it first; "
+                        "tunnel hub|client|mesh|off|status: direct connections between the nodes through NAT, "
+                        "with dumbpipe (hub: be the project's hub; client: connect to the hub; mesh: connect "
+                        "to the hub and to the other active nodes)")
+    s.add_argument("target", nargs="?", help="for seed: HOST:PORT the others reach; for prefer: NID@HOST:PORT; "
+                                             "for tunnel: the mode, or status")
     s.add_argument("--alias", help="node alias (default: your legion name)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")
     s.set_defaults(func=cmd_radicle)
