@@ -35,6 +35,7 @@ def need_identity(repo=None) -> Identity:
 
 
 AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
+LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see Ctx.sync)
 
 
 def remember_agent(repo) -> None:
@@ -84,8 +85,16 @@ class Ctx:
             self.unreachable = [] if radicle.netsync_status(self.repo).get("ok", True) else ["network"]
         else:
             try:
-                with locks.held(daemon.repo_lock(self.repo)):  # not over the push: see daemon.sync_one
-                    self.unreachable = coordgit.sync(self.repo, self.ident, publish=False)
+                # Not long for the lock: a sync process of an older legion, or one stuck, held it over pushes of
+                # minutes, and commands waited two minutes for it, past their tools' limit. Busy, the clone is
+                # being synced already: the command reads what it has.
+                wait = 120 if self.strict or not coordgit.is_radicle(self.repo) else LOCK_WAIT
+                with locks.held(daemon.repo_lock(self.repo), wait=wait) as got:
+                    if got or wait > LOCK_WAIT:
+                        self.unreachable = coordgit.sync(self.repo, self.ident, publish=False)
+                    else:
+                        print("legion: this clone is being synced by another process right now: reading what it "
+                              "has", file=sys.stderr)
                 if coordgit.is_radicle(self.repo):
                     self._publish()
                 if getattr(self, "unpublished", None):

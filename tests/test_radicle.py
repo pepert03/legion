@@ -481,3 +481,22 @@ def test_a_command_with_no_sync_process_leaves_the_push_to_one_of_its_own(tmp_pa
     radicle.kick_publish(repo)
     radicle.kick_publish(repo)                                          # one runs: it goes again, no second one
     assert started == ["--publish"] and radicle.netsync_status(repo, "publish")["again"]
+
+
+def test_a_command_doesnt_wait_long_for_a_clone_another_process_syncs(network, monkeypatch, capsys):
+    """A sync process of an older legion held the clone's lock over pushes of minutes, and commands waited two
+    minutes for it, past their tools' limit."""
+    from legion import ctx, daemon, identity, locks
+    alice = network["z6MkAlice"]
+    boss = Identity.generate("boss")
+    identity.bind(alice, boss)
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
+    monkeypatch.chdir(alice)
+    monkeypatch.setattr(ctx, "LOCK_WAIT", 0.5)
+    synced = []
+    monkeypatch.setattr(coordgit, "sync", lambda *a, **kw: synced.append(1) or [])
+    with locks.held(daemon.repo_lock(alice)):                          # someone else syncs it right now
+        c = ctx.Ctx()
+    assert synced == [] and c.st.project["project"] == "p" and "being synced by another process" in capsys.readouterr().err
+    ctx.Ctx()
+    assert synced == [1]                                                 # free again: it syncs

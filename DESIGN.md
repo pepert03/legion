@@ -343,7 +343,9 @@ be removed, and a removed integrator's later events stop counting).
     process can live (sandboxes that kill background processes every half hour), every command pushed by
     itself, 20 s of CPU, and was cut off: a command with no sync process now only brings the coord up to date
     (4 s instead of 20-110 s) and leaves the push to a process of its own (`legion netsync --publish`, one at a
-    time), which lives long enough for it. The integrator still pushes itself.
+    time), which lives long enough for it. The integrator still pushes itself. Nor does a command wait two
+    minutes for its clone's lock: after LOCK_WAIT (15 s) another process is syncing it, a sync process of an
+    older legion pushing for minutes as on one of Sergio's machines, and it reads what the clone has.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
