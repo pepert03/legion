@@ -113,7 +113,8 @@ def sync_one(repo: str, log=print) -> bool:
         return False
 
 
-STALE_LOCK = 600  # seconds after which a lock file in the node's storage is a leftover, looked for this often
+STALE_LOCK = 120  # seconds after which a lock no process holds open is a leftover, looked for this often (git
+# holds them for milliseconds; where sandboxes kill writers mid-write, ten minutes left a node blind for twenty)
 
 
 def cleanup_enabled(repo) -> bool:

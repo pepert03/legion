@@ -383,8 +383,8 @@ be removed, and a removed integrator's later events stop counting).
     what the clone has.
   - *A node blind for two hours*: a packed-refs.lock its node left in the storage when cut off mid-write made
     every fetch that deleted a ref fail, and since nodes drop judged patches and old saves, every fetch did.
-    The sync process, and a command syncing by itself, now remove ref locks older than ten minutes from the
-    node's storage (packed-refs.lock and those under refs/, never gc.log.lock), looked for at most every ten
+    The sync process, and a command syncing by itself, now remove ref locks older than two minutes from the
+    node's storage (packed-refs.lock and those under refs/, never gc.log.lock), looked for at most every two
     minutes per clone, and never one a process holds open (/proc, lsof; on Windows the system refuses): a
     writer paused that long still holds its lock. `LEGION_LOCK_CLEANUP=0` (or `legion.lockcleanup false`)
     turns it off.
