@@ -916,3 +916,13 @@ def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, mo
     monkeypatch.setattr(S.State, "exclusive_done", lambda self: True)  # every task done: it doesn't start it
     ran.clear()
     assert cli.main(["run", "--", "my-agent"]) == 0 and ran == []
+
+
+def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
+    """The saves that couldn't be dropped were looked at again on every command: 25 s a command."""
+    repo, tids, patch = project
+    old, new = ({"branch": f"refs/legion/patches/{tids['a']}/wip-x-{n}", "commit": c * 40} for n, c in ((1, "a"), (2, "b")))
+    calls = []
+    monkeypatch.setattr(coordgit, "has_commit", lambda repo, sha: calls.append(sha) or False)
+    assert coordgit.superseded(repo, [(old, new)]) == set() == coordgit.superseded(repo, [(old, new)])
+    assert len(calls) == 1

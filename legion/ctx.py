@@ -84,8 +84,10 @@ class Ctx:
             self.unreachable = [] if radicle.netsync_status(self.repo).get("ok", True) else ["network"]
         else:
             try:
-                with locks.held(daemon.repo_lock(self.repo)):
-                    self.unreachable = coordgit.sync(self.repo, self.ident)
+                with locks.held(daemon.repo_lock(self.repo)):  # not over the push: see daemon.sync_one
+                    self.unreachable = coordgit.sync(self.repo, self.ident, publish=False)
+                if coordgit.is_radicle(self.repo):
+                    coordgit.publish_radicle(self.repo, self.ident)
                 if getattr(self, "unpublished", None):
                     print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
                     self.unpublished = []

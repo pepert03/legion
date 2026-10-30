@@ -101,8 +101,11 @@ def sync_one(repo: str, log=print) -> bool:
         ident = Identity.load(repo=repo)
         if ident is None or not coordgit.is_radicle(repo):
             return False
+        # The lock only while the coord moves here: commands append to it under the same lock, and held it off
+        # for the whole push too (20 s, and minutes for a first one), past the time agents' tools allow them.
         with held(repo_lock(repo)):
-            coordgit.sync(repo, ident)
+            coordgit.sync(repo, ident, publish=False)
+        coordgit.publish_radicle(repo, ident)
         return True
     except Exception as e:  # noqa: BLE001 (one clone's trouble mustn't stop the others')
         log(f"{time.strftime('%H:%M:%S')} {repo}: {str(e).strip()[-300:]}")

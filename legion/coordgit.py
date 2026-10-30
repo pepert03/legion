@@ -332,7 +332,7 @@ def radicle_who(ident: Identity) -> str:
     return ident.author.split(":", 1)[1][:16]
 
 
-def sync_radicle(repo, ident: Identity) -> list[str]:
+def sync_radicle(repo, ident: Identity, publish: bool = True) -> list[str]:
     """Fetch from the Radicle network, copy every node's legion refs, merge the coords, publish ours."""
     from . import radicle
     failed = []
@@ -347,7 +347,8 @@ def sync_radicle(repo, ident: Identity) -> list[str]:
         merge_coords(repo, ident, peers(repo))
     except radicle.RadError as e:
         raise GitError(str(e))
-    publish_radicle(repo, ident)
+    if publish:
+        publish_radicle(repo, ident)
     return failed
 
 
@@ -376,11 +377,26 @@ def update_main(repo, tip: str | None) -> bool:
 
 def superseded(repo, pairs) -> set[str]:
     """The refs of earlier saves whose commit the same author's later save contains: nothing is lost with them.
-    Each pair is looked at once; then its ref is among the dropped ones."""
+    Each pair is looked at once, whatever it gave (noted in .git/legion-superseded): looking again at the ones
+    that weren't on every command cost 25 s a command, two hundred git calls, and agents' tools cut them off."""
     from . import radicle
     gone = radicle.judged(repo)
-    return {old["branch"] for old, new in pairs if old["branch"] not in gone and old["branch"] != new["branch"]
-            and has_commit(repo, new["commit"]) and is_ancestor(repo, old["commit"], new["commit"])}
+    seen_file = Path(run(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()
+                     or Path(repo) / ".git") / "legion-superseded"
+    try:
+        seen = set(seen_file.read_text(encoding="utf-8").split())
+    except OSError:
+        seen = set()
+    todo = [(old, new) for old, new in pairs if old["branch"] not in gone and old["branch"] != new["branch"]
+            and f"{old['branch']}@{new['commit']}" not in seen]
+    found = set()
+    with open(seen_file, "a", encoding="utf-8") as f:
+        for old, new in todo:  # noted one by one: a command cut off halfway keeps what it looked at
+            if has_commit(repo, new["commit"]) and is_ancestor(repo, old["commit"], new["commit"]):
+                found.add(old["branch"])
+            f.write(f"{old['branch']}@{new['commit']}\n")
+            f.flush()
+    return found
 
 
 def prune_patches(repo, judged: set[str]) -> None:
@@ -487,10 +503,11 @@ def has_origin(repo) -> bool:
     return "origin" in git(repo, "remote").split()
 
 
-def sync(repo, ident: Identity, attempts: int = 12) -> list[str]:
-    """Merge the local coord with origin's (and publish it), or with every peer's in p2p mode."""
+def sync(repo, ident: Identity, attempts: int = 12, publish: bool = True) -> list[str]:
+    """Merge the local coord with origin's (and publish it), or with every peer's in p2p mode. With Radicle,
+    publish=False leaves the push to the caller (see daemon.sync_one)."""
     if is_radicle(repo):
-        return sync_radicle(repo, ident)
+        return sync_radicle(repo, ident, publish)
     if is_p2p(repo):
         return sync_peers(repo, ident)
     if not has_origin(repo):

@@ -336,7 +336,10 @@ be removed, and a removed integrator's later events stop counting).
     like a judged patch, and every node deletes from its namespace the refs it dropped; a publish is one push
     (split as before only when it fails); a push doesn't wait for the seeds, a process of its own announces
     (`legion netsync --announce`, one at a time); and a main the node refuses as older isn't offered again
-    until it moves.
+    until it moves. Then two things that update made worse: every command looked again at the two hundred
+    saves it couldn't drop (25 s a command; now each is looked at once, noted in .git/legion-superseded), and
+    the sync process held the clone's lock over its whole push, so commands that append waited past their
+    tools' time limit (now it holds it only while the coord moves, and pushes after).
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
