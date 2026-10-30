@@ -87,9 +87,11 @@ class Ctx:
                 with locks.held(daemon.repo_lock(self.repo)):  # not over the push: see daemon.sync_one
                     self.unreachable = coordgit.sync(self.repo, self.ident, publish=False)
                 if coordgit.is_radicle(self.repo):
-                    coordgit.publish_radicle(self.repo, self.ident)
+                    self._publish()
                 if getattr(self, "unpublished", None):
-                    print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
+                    print(f"legion: published {', '.join(self.unpublished)}." if self.strict or not
+                          coordgit.is_radicle(self.repo) else f"legion: {', '.join(self.unpublished)} go out within "
+                          "seconds (a process of its own publishes them).", file=sys.stderr)
                     self.unpublished = []
             except coordgit.GitError as e:
                 self._sync_failed(e)
@@ -103,7 +105,7 @@ class Ctx:
                     daemon.wake()
                 else:
                     try:
-                        coordgit.publish_radicle(self.repo, self.ident)
+                        self._publish()
                     except coordgit.GitError as e:
                         self._sync_failed(e)
             coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
@@ -116,6 +118,15 @@ class Ctx:
             elif peers and len(self.unreachable) == len(peers):
                 print(f"legion: warning: couldn't reach any peer ({', '.join(peers)}); "
                       "working with what you have locally", file=sys.stderr)
+
+    def _publish(self) -> None:
+        """With no sync process to push for it, the integrator pushes itself; any other command leaves the push
+        to a process of its own (see radicle.kick_publish)."""
+        from . import radicle
+        if self.strict:
+            coordgit.publish_radicle(self.repo, self.ident)
+        else:
+            radicle.kick_publish(self.repo)
 
     def _sync_failed(self, e: Exception) -> None:
         if self.strict:

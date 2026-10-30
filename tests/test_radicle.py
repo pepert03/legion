@@ -469,3 +469,15 @@ def test_a_node_prefers_the_projects_own_seed_and_fetches_from_it_first(tmp_path
     monkeypatch.setattr(radicle, "run", run)
     assert radicle.network_sync(repo, force=True)
     assert calls[0][:5] == ("rad", "sync", "--fetch", "rad:zTest", "--seed") and calls[0][5] == "z6MkSeed1234"
+
+
+def test_a_command_with_no_sync_process_leaves_the_push_to_one_of_its_own(tmp_path, monkeypatch):
+    """Where sandboxes kill background processes, every command pushed by itself: 20 s of CPU, and cut off."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    started = []
+    monkeypatch.undo()                                                  # the real kick, not conftest's
+    monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None: started.append(cmd[-1]))
+    radicle.kick_publish(repo)
+    radicle.kick_publish(repo)                                          # one runs: it goes again, no second one
+    assert started == ["--publish"] and radicle.netsync_status(repo, "publish")["again"]

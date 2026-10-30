@@ -615,24 +615,53 @@ def _write_netsync(repo, status: dict, name: str = "netsync") -> None:
 # one at a time, which goes again when more was published while it ran.
 
 def kick_announce(repo) -> None:
-    now, status = time.time(), netsync_status(repo, "announce")
-    if status.get("running") and now - status.get("started", 0) < 120:
-        _write_netsync(repo, dict(status, again=True), "announce")
+    _kick(repo, "announce")
+
+
+def _kick(repo, name: str, stale: float = 120) -> None:
+    """Run `legion netsync --<name>` in a process of its own, one at a time: if one runs, it goes again."""
+    now, status = time.time(), netsync_status(repo, name)
+    if status.get("running") and now - status.get("started", 0) < stale:
+        _write_netsync(repo, dict(status, again=True), name)
         return
-    _write_netsync(repo, {"started": now, "running": True}, "announce")
+    _write_netsync(repo, {"started": now, "running": True}, name)
     try:
-        spawn_detached([sys.executable, "-m", "legion", "netsync", "--announce"], repo)
+        spawn_detached([sys.executable, "-m", "legion", "netsync", f"--{name}"], repo)
     except OSError:
-        _write_netsync(repo, {"started": now, "running": False}, "announce")
+        _write_netsync(repo, {"started": now, "running": False}, name)
+
+
+def _rounds(repo, name: str, work) -> None:
+    """What a kicked process does: the work, again while more was asked for meanwhile."""
+    try:
+        while True:
+            work()
+            if not netsync_status(repo, name).get("again"):
+                break
+            _write_netsync(repo, {"started": time.time(), "running": True}, name)
+    finally:
+        _write_netsync(repo, {"started": time.time(), "running": False}, name)
 
 
 def run_announce(repo) -> None:
-    while True:
-        run("rad", "sync", "--announce", rid(repo), "--timeout", "30sec", repo=repo, check=False, timeout=60)
-        if not netsync_status(repo, "announce").get("again"):
-            break
-        _write_netsync(repo, {"started": time.time(), "running": True}, "announce")
-    _write_netsync(repo, {"started": time.time(), "running": False}, "announce")
+    _rounds(repo, "announce", lambda: run("rad", "sync", "--announce", rid(repo), "--timeout", "30sec", repo=repo,
+                                          check=False, timeout=60))
+
+
+# Where no sync process can live (agents' sandboxes kill what runs in the background every half hour or so), each
+# command synced by itself, push included: 20 s of CPU in Radicle's helper, and commands cut off at 60-110 s. The
+# command only brings the coord up to date now, and a process of its own pushes, which lives long enough for that.
+
+def kick_publish(repo) -> None:
+    _kick(repo, "publish", stale=PUSH_TIMEOUT)
+
+
+def run_publish(repo) -> None:
+    from .coordgit import publish_radicle
+    from .identity import Identity
+    ident = Identity.load(repo=repo)
+    if ident is not None:
+        _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
 
 
 def kick_network_sync(repo) -> bool:

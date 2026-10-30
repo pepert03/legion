@@ -2440,6 +2440,9 @@ def cmd_netsync(args):
     if args.announce:
         radicle.run_announce(repo_root())
         return 0
+    if args.publish:
+        radicle.run_publish(repo_root())
+        return 0
     return 0 if radicle.run_network_sync(repo_root()) else 1
 
 
@@ -2595,6 +2598,7 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_update)
     s = sub.add_parser("netsync", help=argparse.SUPPRESS)  # the background network fetch: not for agents
     s.add_argument("--announce", action="store_true")  # or the announcement of what this node published
+    s.add_argument("--publish", action="store_true")  # or the push of a command with no sync process to do it
     s.set_defaults(func=cmd_netsync)
     s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")
     s.add_argument("--status", action="store_true", help="whether it runs, which clones it syncs, its latest log")
