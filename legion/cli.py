@@ -311,20 +311,21 @@ KEEP_GOING = ("verify one patch with `python -m legion verify`, then go straight
 def radicle_ready(alias: str, home: str | None) -> str:
     """Install Radicle if missing, create its key and start the node. Everything an agent can do alone."""
     from . import radicle
-    if radicle.IS_WINDOWS:
+    wsl = radicle.IS_WINDOWS and not radicle.native()
+    if wsl:
         try:
             radicle.prepare_wsl()
         except (radicle.RadError, FileNotFoundError, subprocess.SubprocessError) as e:
             raise Fail(f"Radicle runs inside WSL on Windows, and WSL isn't ready: {e}. A human may have to run "
                        f"`wsl --install -d {radicle.distro()}` as administrator (and reboot), then run this again.")
     if not radicle.available(home):
-        where = f"WSL ({radicle.distro()})" if radicle.IS_WINDOWS else "this machine"
+        where = f"WSL ({radicle.distro()})" if wsl else "this machine"
         print(f"Installing Radicle in {where} with its official installer…", flush=True)
         try:
             radicle.install()
         except (radicle.RadError, FileNotFoundError) as e:
             hint = (" On Windows, Radicle runs inside WSL: `wsl --install -d Ubuntu-24.04` (a human may have to "
-                    "approve it), then run this again." if radicle.IS_WINDOWS else "")
+                    "approve it), then run this again." if wsl else "")
             raise Fail(f"couldn't install Radicle: {e}.{hint}")
     nid = radicle.ensure_identity(alias, home)
     try:

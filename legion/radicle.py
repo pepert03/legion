@@ -8,19 +8,23 @@ overwriting each other. To sync, legion reads every publisher from the local Rad
 the coord branches, as in plain p2p.
 
 Radicle only ships for Linux and macOS. On Windows it runs inside WSL, and legion calls it through
-`wsl.exe`; the repository and the agents stay on Windows.
+`wsl.exe`; the repository and the agents stay on Windows. Radicle built for Windows from source (`rad.exe`,
+`radicle-node.exe`, `git-remote-rad.exe`) runs natively instead, without WSL: see `native`.
 """
 
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path, PureWindowsPath
 
 IS_WINDOWS = os.name == "nt"
+NATIVE_BIN = Path.home() / ".radicle" / "bin"  # where Radicle's installer puts it, and a Windows build too
 DEFAULT_DISTRO = "Ubuntu-24.04"
 NETWORK_SYNC_EVERY = 60  # seconds between `rad sync --fetch` runs; pushes announce on their own
 REPUBLISH_EVERY = 600  # seconds after which an unchanged publish goes out again anyway
@@ -44,9 +48,31 @@ def distro(repo=None) -> str:
     return os.environ.get("LEGION_WSL_DISTRO") or (repo and _cfg(repo, "legion.wsl")) or DEFAULT_DISTRO
 
 
-def host_path(path) -> str:
-    """The path as Radicle's side sees it: /mnt/c/... under WSL, unchanged elsewhere."""
+_native: dict[str, bool] = {}
+
+
+def native(repo=None) -> bool:
+    """Windows only: is Radicle a Windows build, run directly, rather than the one in WSL? LEGION_RAD_NATIVE or
+    git config legion.radnative (1/0, true/false) decide; otherwise a repository set up with WSL stays there (its
+    node, and so its node ID and storage, are WSL's), and anything else is native when rad.exe is on the PATH or
+    in ~/.radicle/bin. Elsewhere there's no WSL, and this is False."""
     if not IS_WINDOWS:
+        return False
+    key = str(repo or "")
+    if key not in _native:
+        said = os.environ.get("LEGION_RAD_NATIVE") or _cfg(repo, "legion.radnative")
+        if said:
+            _native[key] = said.strip().lower() in ("1", "true", "yes", "on")
+        elif _cfg(repo, "legion.wsl"):
+            _native[key] = False
+        else:
+            _native[key] = bool(shutil.which("rad.exe") or (NATIVE_BIN / "rad.exe").exists())
+    return _native[key]
+
+
+def host_path(path, repo=None) -> str:
+    """The path as Radicle's side sees it: /mnt/c/... under WSL, unchanged elsewhere."""
+    if not IS_WINDOWS or native(repo):
         return str(path)
     p = PureWindowsPath(Path(path).resolve())
     return f"/mnt/{p.drive[0].lower()}" + "/" + "/".join(p.parts[1:])
@@ -54,18 +80,38 @@ def host_path(path) -> str:
 
 def run(*args: str, repo=None, home: str | None = None, timeout: float = 60, check: bool = True,
         cwd=None) -> subprocess.CompletedProcess:
-    """Run a command where Radicle lives (WSL on Windows), with Radicle on the PATH."""
+    """Run a command where Radicle lives (WSL on Windows, unless it's native), with Radicle on the PATH."""
     home = home if home is not None else (repo and _cfg(repo, "legion.radhome")) or ""
-    if home and not home.startswith(("/", "~")):
+    env = None
+    if IS_WINDOWS and native(repo):
+        if home and not Path(home).is_absolute():
+            raise RadError(f"the Radicle home must be an absolute path, like C:\\Users\\you\\.radicle; got {home!r}")
+        env = {**os.environ, "RAD_PASSPHRASE": "", "PATH": f"{NATIVE_BIN}{os.pathsep}{os.environ.get('PATH', '')}"}
+        if home:
+            env["RAD_HOME"] = home
+        # Windows looks the program up in this process's PATH, not the child's: find it here.
+        cmd = [shutil.which(args[0], path=env["PATH"]) or args[0], *args[1:]]
+    elif home and not home.startswith(("/", "~")):
         # e.g. Git Bash turns /home/x into C:/Program Files/Git/home/x before Python sees it.
         raise RadError(f"the Radicle home must be a path on Radicle's side, like /home/you/.radicle; got {home!r}"
                        " (in Git Bash, set MSYS_NO_PATHCONV=1)")
-    cmd = ["sh", "-c", SHIM, "sh", home, *args]
-    if IS_WINDOWS:
-        cmd = ["wsl.exe", "-d", distro(repo), *(["--cd", host_path(cwd)] if cwd else []), "-e", *cmd]
-        cwd = None
+    else:
+        cmd = ["sh", "-c", SHIM, "sh", home, *args]
+        if IS_WINDOWS:
+            cmd = ["wsl.exe", "-d", distro(repo), *(["--cd", host_path(cwd)] if cwd else []), "-e", *cmd]
+            cwd = None
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+        if env is None:
+            p = subprocess.run(cmd, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
+        else:
+            # Into files, not pipes: `rad node start` leaves radicle-node running with every handle rad inherited,
+            # and reading a pipe would wait for the node to exit.
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                p = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                   timeout=timeout)
+                out.seek(0)
+                err.seek(0)
+                p.stdout, p.stderr = (f.read().decode("utf-8", "replace") for f in (out, err))
     except subprocess.TimeoutExpired:
         raise RadError(f"`{' '.join(args[:3])}` timed out after {timeout:.0f}s")
     if IS_WINDOWS and p.returncode and "E_ACCESSDENIED" in (p.stdout + p.stderr).replace("\x00", ""):
@@ -88,7 +134,27 @@ def rad(repo, *args: str, **kw) -> str:
 
 def rgit(repo, *args: str, **kw) -> subprocess.CompletedProcess:
     """git with Radicle's remote helper available, on this repository."""
-    return run("git", "-C", host_path(repo), *args, repo=repo, **kw)
+    return run("git", "-C", host_path(repo, repo), *args, repo=repo, **kw)
+
+
+def read_file(path: str, home: str | None = None, repo=None) -> str:
+    """A file on Radicle's side (a node's config or log)."""
+    if IS_WINDOWS and native(repo):
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError as e:
+            raise RadError(f"couldn't read {path}: {e}")
+    return run("cat", path, repo=repo, home=home, timeout=30).stdout
+
+
+def write_file(path: str, text: str, repo=None) -> None:
+    if not IS_WINDOWS or native(repo):
+        Path(path).write_text(text, encoding="utf-8")
+        return
+    p = subprocess.run(["wsl.exe", "-d", distro(), "-e", "sh", "-c", f"cat > '{path}'"], input=text,
+                       capture_output=True, text=True, timeout=30)
+    if p.returncode:
+        raise RadError(f"couldn't write the node config: {p.stderr.strip()}")
 
 
 # --- setup -----------------------------------------------------------------------------------
@@ -126,6 +192,9 @@ def available(home: str | None = None) -> bool:
 
 def install() -> str:
     """Radicle's official installer (it checks the release signature). Needs curl, tar, xz and ssh-keygen."""
+    if IS_WINDOWS and native():
+        raise RadError(f"Radicle has no installer for Windows: build rad, radicle-node and git-remote-rad from its "
+                       f"source (heartwood) and put them in {NATIVE_BIN}, or set legion.radnative to false to use WSL")
     p = run("sh", "-c", "curl -sSf https://radicle.dev/install | sh -s -- --no-modify-path", home="", timeout=300)
     return clean(p.stdout).strip().splitlines()[-1] if p.stdout else "installed"
 
@@ -157,6 +226,12 @@ def ensure_node(repo=None, home: str | None = None) -> None:
     if node_running(repo, home):
         return
     p = run("rad", "node", "start", repo=repo, home=home, timeout=60, check=False)
+    pid = re.search(r"Process ID: \(?(\d+)", clean(p.stdout + p.stderr))
+    if IS_WINDOWS and native(repo) and pid:
+        try:
+            _pid_file(home, repo).write_text(pid.group(1), encoding="utf-8")
+        except (OSError, RadError):
+            pass
     if p.returncode and not node_running(repo, home):  # a start that "fails" because it's already up is fine
         raise RadError(f"the Radicle node didn't start: {clean(p.stderr or p.stdout).strip()[-400:]}")
 
@@ -164,8 +239,7 @@ def ensure_node(repo=None, home: str | None = None) -> None:
 def configure_node(home: str, listen: str | None = None, network: str | None = None,
                    connect: list | None = None) -> None:
     """Adjust a node's config (used by the simulation to run several isolated nodes on one machine)."""
-    raw = run("cat", f"{home}/config.json", home=home, timeout=30).stdout
-    c = json.loads(raw)
+    c = json.loads(read_file(f"{home}/config.json", home))
     if listen:
         c["node"]["listen"] = [listen]
     if network:
@@ -174,11 +248,7 @@ def configure_node(home: str, listen: str | None = None, network: str | None = N
             c["node"]["peers"] = {"type": "static"}  # no bootstrap to the public network
     if connect is not None:
         c["node"]["connect"] = connect
-    p = subprocess.run((["wsl.exe", "-d", distro(), "-e"] if IS_WINDOWS else []) +
-                       ["sh", "-c", f"cat > '{home}/config.json'"], input=json.dumps(c, indent=2),
-                       capture_output=True, text=True, timeout=30)
-    if p.returncode:
-        raise RadError(f"couldn't write the node config: {p.stderr.strip()}")
+    write_file(f"{home}/config.json", json.dumps(c, indent=2))
 
 
 # --- networks that only let HTTP(S) out ---------------------------------------------------------
@@ -197,12 +267,9 @@ def _config_path(home: str | None) -> str:
 def _edit_config(home: str | None, change) -> None:
     """Apply `change` to the node's config.json, on Radicle's side (WSL on Windows)."""
     path = _config_path(home)
-    c = json.loads(run("cat", path, home=home, timeout=30).stdout)
+    c = json.loads(read_file(path, home))
     change(c)
-    p = subprocess.run((["wsl.exe", "-d", distro(), "-e"] if IS_WINDOWS else []) + ["sh", "-c", f"cat > '{path}'"],
-                       input=json.dumps(c, indent=2), capture_output=True, text=True, timeout=30)
-    if p.returncode:
-        raise RadError(f"couldn't write the node config: {p.stderr.strip()}")
+    write_file(path, json.dumps(c, indent=2))
 
 
 # The project's own seed: an always-on node that replicates the whole project, which every node keeps a
@@ -237,19 +304,19 @@ def prefer_seed(repo, seed: str, home: str | None = None) -> None:
 
 def node_proxy(home: str | None = None) -> str | None:
     try:
-        return json.loads(run("cat", _config_path(home), home=home, timeout=30).stdout)["node"].get("proxy")
+        return json.loads(read_file(_config_path(home), home))["node"].get("proxy")
     except (RadError, ValueError, KeyError):
         return None
 
 
 def set_node_proxy(home: str | None, address: str | None) -> None:
     path = _config_path(home)
-    c = json.loads(run("cat", path, home=home, timeout=30).stdout)
+    c = json.loads(read_file(path, home))
     c["node"]["proxy"] = address
     if address and c["node"].get("network", "main") == "main":
         connect = c["node"].get("connect") or []
         c["node"]["connect"] = connect + [s for s in PUBLIC_SEEDS if s not in connect]
-    Path(path).write_text(json.dumps(c, indent=2), encoding="utf-8")
+    write_file(path, json.dumps(c, indent=2))
 
 
 def bridge_running() -> bool:
@@ -281,19 +348,50 @@ def keep_bridge(repo) -> None:
         start_bridge(url)
 
 
+def _pid_file(home: str | None, repo=None) -> Path:
+    return Path(home or rad(repo, "path", timeout=30).splitlines()[-1].strip()) / "node" / "legion-node.pid"
+
+
+def _kill_native_node(home: str | None) -> bool:
+    """The native node we started, killed. On Windows a node that had been fetching for a while logged its shutdown
+    and then never exited, and `rad node stop` waited for it."""
+    try:
+        pid = _pid_file(home).read_text(encoding="utf-8").strip()
+    except (OSError, RadError):
+        return False
+    listed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True,
+                            text=True).stdout
+    if "radicle-node" not in listed:  # gone, or the number now belongs to another program
+        return False
+    return subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True).returncode == 0
+
+
 def restart_node(home: str | None = None) -> None:
     """Stop the node and make sure it's gone, so the next start reads the config again."""
-    run("rad", "node", "stop", home=home, check=False, timeout=60)
-    for _ in range(30):
-        if not node_running(home=home):
-            return
-        time.sleep(0.5)
+    native_ = IS_WINDOWS and native()
+    try:
+        run("rad", "node", "stop", home=home, check=False, timeout=20 if native_ else 60)
+    except RadError:
+        if not native_:
+            raise
+    for attempt in range(2):
+        for _ in range(30):
+            if not node_running(home=home):
+                return
+            time.sleep(0.5)
+        if not (native_ and attempt == 0 and _kill_native_node(home)):
+            break
     raise RadError("the Radicle node didn't stop, so it can't pick up the proxy setting; stop it "
                    "(`rad node stop`, or kill radicle-node) and run this again")
 
 
 def node_log(home: str | None = None, lines: int = 400) -> list[str]:
     path = f"{home or rad(None, 'path', timeout=30).splitlines()[-1].strip()}/node/node.log"
+    if IS_WINDOWS and native():
+        try:
+            return clean(read_file(path, home)).splitlines()[-lines:]
+        except RadError:
+            return []
     return clean(run("tail", "-n", str(lines), path, home=home, check=False, timeout=30).stdout).splitlines()
 
 
@@ -366,14 +464,16 @@ def enable(repo, rid_: str, home: str | None = None) -> None:
         subprocess.run(["git", "config", key, value], cwd=repo, check=True, capture_output=True)
     if home:
         subprocess.run(["git", "config", "legion.radhome", home], cwd=repo, check=True, capture_output=True)
-    if IS_WINDOWS:
+    if IS_WINDOWS and native():
+        subprocess.run(["git", "config", "legion.radnative", "true"], cwd=repo, check=True, capture_output=True)
+    elif IS_WINDOWS:
         subprocess.run(["git", "config", "legion.wsl", distro(repo)], cwd=repo, check=True, capture_output=True)
 
 
 def init_repo(repo, name: str, description: str) -> str:
     """`rad init` on an existing repository (public: Radicle's public seeds will carry it). Returns the RID."""
-    run("git", "config", "--global", "--add", "safe.directory", "*", repo=repo, timeout=30)
-    rad(repo, "init", host_path(repo), "--name", name, "--description", description,
+    trust_repositories(repo=repo)
+    rad(repo, "init", host_path(repo, repo), "--name", name, "--description", description,
         "--default-branch", "main", "--public", "--no-confirm", timeout=120)
     url = rgit(repo, "remote", "get-url", "rad").stdout.strip()
     m = re.match(r"rad://(z[1-9A-HJ-NP-Za-km-z]+)", url)
@@ -382,8 +482,15 @@ def init_repo(repo, name: str, description: str) -> str:
     return "rad:" + m.group(1)
 
 
+def trust_repositories(repo=None, home: str | None = None) -> None:
+    """In WSL, every repository under /mnt/c belongs to another user, and git refuses to work in it unless told
+    to trust it. A native Radicle reads them as their owner, and the user's own git config is left alone."""
+    if not (IS_WINDOWS and native(repo)):
+        run("git", "config", "--global", "--add", "safe.directory", "*", repo=repo, home=home, timeout=30)
+
+
 def clone(rid_: str, dest: Path, home: str | None = None) -> None:
-    run("git", "config", "--global", "--add", "safe.directory", "*", home=home, timeout=30)
+    trust_repositories(home=home)
     # A node that has just started knows no seeds for a while ("no candidate seeds"), and one whose routing
     # table never filled (it was offline, or behind a proxy, when it connected) may not learn of any: keep
     # trying, and from the second try on also ask the public seeds directly.
@@ -404,7 +511,7 @@ def clone(rid_: str, dest: Path, home: str | None = None) -> None:
 def seed_args(home: str | None) -> list[str]:
     """`--seed` options for Radicle's public seeds, if this node is on the public network."""
     try:
-        network = json.loads(run("cat", _config_path(home), home=home, timeout=30).stdout)["node"].get("network")
+        network = json.loads(read_file(_config_path(home), home))["node"].get("network")
     except (RadError, ValueError, KeyError):
         network = None
     if network not in (None, "main"):

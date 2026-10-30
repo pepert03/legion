@@ -99,9 +99,112 @@ def test_host_path_is_unchanged_off_windows(monkeypatch):
     assert radicle.host_path("/home/x/repo") == "/home/x/repo"
 
 
-def test_a_converted_radicle_home_is_refused():
+def test_a_converted_radicle_home_is_refused(monkeypatch):
+    monkeypatch.setattr(radicle, "_native", {})
+    monkeypatch.setenv("LEGION_RAD_NATIVE", "0")
     with pytest.raises(radicle.RadError, match="MSYS_NO_PATHCONV"):
         radicle.run("true", home="C:/Program Files/Git/home/legion/.radicle")
+
+
+@pytest.fixture
+def windows(tmp_path, monkeypatch):
+    """A Windows machine as legion sees it, with a fake Radicle build in ~/.radicle/bin, and every command it
+    would run recorded instead."""
+    calls = []
+    monkeypatch.setattr(radicle, "IS_WINDOWS", True)
+    monkeypatch.setattr(radicle, "_native", {})
+    monkeypatch.delenv("LEGION_RAD_NATIVE", raising=False)
+    monkeypatch.setattr(radicle, "NATIVE_BIN", tmp_path / "bin")
+    monkeypatch.setattr(radicle, "_cfg", lambda repo, key: None)
+    monkeypatch.setattr(radicle.shutil, "which", lambda name, path=None: None)
+    monkeypatch.setattr(radicle.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or
+                        subprocess.CompletedProcess(cmd, 0, "", ""))
+    return calls
+
+
+def test_on_windows_a_native_build_runs_without_wsl(windows, tmp_path):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "rad.exe").write_text("")
+    assert radicle.native()
+    radicle.run("rad", "self", home=str(tmp_path / "home"), cwd=tmp_path)
+    cmd, kw = windows[-1]
+    assert cmd == ["rad", "self"] and kw["cwd"] == tmp_path
+    assert kw["env"]["RAD_HOME"] == str(tmp_path / "home") and kw["env"]["RAD_PASSPHRASE"] == ""
+    assert kw["env"]["PATH"].startswith(str(tmp_path / "bin"))
+    repo = tmp_path / "repo"
+    assert radicle.host_path(repo) == str(repo)  # no /mnt/c: Radicle sees the path as it is
+    radicle.rgit(repo, "push", "rad")
+    assert windows[-1][0] == ["git", "-C", str(repo), "push", "rad"]
+
+
+def test_on_windows_without_a_native_build_radicle_runs_in_wsl(windows, tmp_path):
+    assert not radicle.native()
+    radicle.run("rad", "self", home="/home/legion/.radicle")
+    cmd, kw = windows[-1]
+    assert cmd[:3] == ["wsl.exe", "-d", radicle.DEFAULT_DISTRO] and cmd[-2:] == ["rad", "self"]
+    assert kw.get("env") is None
+
+
+def test_the_setting_beats_what_is_on_the_path(windows, tmp_path, monkeypatch):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "rad.exe").write_text("")
+    monkeypatch.setattr(radicle, "_cfg", lambda repo, key: "false" if key == "legion.radnative" else None)
+    assert not radicle.native("repo")  # a project that keeps WSL even with a Windows build around
+    monkeypatch.setenv("LEGION_RAD_NATIVE", "1")
+    monkeypatch.setattr(radicle, "_native", {})
+    assert radicle.native("repo")
+
+
+def test_a_project_set_up_with_wsl_stays_there_when_a_windows_build_appears(windows, tmp_path, monkeypatch):
+    """Its node ID and its storage are the WSL node's: a native node would be another node altogether."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "rad.exe").write_text("")
+    monkeypatch.setattr(radicle, "_cfg", lambda repo, key: radicle.DEFAULT_DISTRO
+                        if repo == "old" and key == "legion.wsl" else None)
+    assert not radicle.native("old")
+    assert radicle.native("new")
+
+
+def test_a_native_node_config_is_read_and_written_as_a_file(windows, tmp_path):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "rad.exe").write_text("")
+    (tmp_path / "config.json").write_text('{"node": {"network": "main"}}', encoding="utf-8")
+    radicle.configure_node(str(tmp_path), listen="0.0.0.0:8776")
+    assert '"0.0.0.0:8776"' in (tmp_path / "config.json").read_text(encoding="utf-8")
+    assert not windows  # neither cat nor wsl.exe
+    with pytest.raises(radicle.RadError, match="absolute"):
+        radicle.run("rad", "self", home="relative/home")
+
+
+def test_a_native_node_that_wont_stop_is_killed(windows, tmp_path, monkeypatch):
+    """`rad node stop` on Windows waited for a node that logged its shutdown and never exited."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "rad.exe").write_text("")
+    home = tmp_path / "home"
+    (home / "node").mkdir(parents=True)
+    killed = []
+
+    def run(*args, **kw):
+        if args[:3] == ("rad", "node", "start"):
+            return subprocess.CompletedProcess(args, 0, "✓ Node started. (Process ID: (4242))\n", "")
+        if args[:3] == ("rad", "node", "stop"):
+            raise radicle.RadError("`rad node stop` timed out after 20s")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def proc(cmd, **kw):
+        if cmd[0] == "taskkill":
+            killed.append(cmd[-1])
+        return subprocess.CompletedProcess(cmd, 0, '"radicle-node.exe","4242"' if cmd[0] == "tasklist" else "", "")
+
+    running = iter([False, True])
+    monkeypatch.setattr(radicle, "run", run)
+    monkeypatch.setattr(radicle, "node_running", lambda repo=None, home=None: next(running, not killed))
+    monkeypatch.setattr(radicle.subprocess, "run", proc)
+    monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
+    radicle.ensure_node(home=str(home))
+    assert (home / "node" / "legion-node.pid").read_text() == "4242"
+    radicle.restart_node(str(home))
+    assert killed == ["4242"]
 
 
 def test_two_repositories_on_one_node_dont_overwrite_each_other(network):
