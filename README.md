@@ -272,6 +272,8 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 |---|---|
 | `join <url> [dir] [--number K]` | clone a project, give the clone its own identity (`<agent>-<computer>#K`; `--name` or `--identity` to choose), get it ready for your agent and open the live graph (`--no-viz` to skip) |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
+| `radicle seed HOST:PORT` / `radicle prefer NID@HOST:PORT` | make an always-on node the project's own seed / keep a connection to it and fetch from it first |
+| `daemon [--status]` | this machine's sync process: commands start it by themselves, and it syncs every clone they use so they only read and write locally; `--status` says whether it runs |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |
 | `id new / show / list` | create, show or list identities (Ed25519 keys, one file each in `~/.legion/identities`, or in `LEGION_HOME`); `new` inside a repository binds it |

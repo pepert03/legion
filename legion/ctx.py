@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 
 from . import coordgit
+from . import daemon
 from . import events as E
+from . import locks
 from . import state as S
 from .identity import Identity
 
@@ -69,23 +71,39 @@ class Ctx:
     strict = False  # the integrator sets it: a pass with a failed sync is retried, not run on stale state
 
     def sync(self) -> None:
-        try:
-            self.unreachable = coordgit.sync(self.repo, self.ident)
+        # With this machine's sync process running (see daemon.py), it syncs: the command only reads what it
+        # brought, and wakes it when there is something to publish. The integrator always syncs by itself.
+        served = (not self.strict and coordgit.is_radicle(self.repo) and daemon.serving(self.repo))
+        if served:
             if getattr(self, "unpublished", None):
-                print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
+                daemon.wake()
+                print(f"legion: {', '.join(self.unpublished)} go out within seconds (this machine's sync process "
+                      "publishes them).", file=sys.stderr)
                 self.unpublished = []
-        except coordgit.GitError as e:
-            self._sync_failed(e)
+            from . import radicle
+            self.unreachable = [] if radicle.netsync_status(self.repo).get("ok", True) else ["network"]
+        else:
+            try:
+                with locks.held(daemon.repo_lock(self.repo)):
+                    self.unreachable = coordgit.sync(self.repo, self.ident)
+                if getattr(self, "unpublished", None):
+                    print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
+                    self.unpublished = []
+            except coordgit.GitError as e:
+                self._sync_failed(e)
         self.reload()
         if coordgit.is_p2p(self.repo):
             # The push went out before the state said where main is now: when that moves what this node offers
             # as main (it published a main, or finalized a patch), push again, or the commit would wait for
             # this node's next command, and a founder's `main publish` may have none after it.
             if coordgit.update_main(self.repo, self.st.main_tip) and coordgit.is_radicle(self.repo):
-                try:
-                    coordgit.publish_radicle(self.repo, self.ident)
-                except coordgit.GitError as e:
-                    self._sync_failed(e)
+                if served:
+                    daemon.wake()
+                else:
+                    try:
+                        coordgit.publish_radicle(self.repo, self.ident)
+                    except coordgit.GitError as e:
+                        self._sync_failed(e)
             coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
                                    | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws})
             peers = coordgit.peers(self.repo)
@@ -111,7 +129,8 @@ class Ctx:
         err = next((e for x, e in trial.ignored if x.get("id") == ev["id"]), None)
         if err:
             raise Fail(f"event rejected: {err}")
-        coordgit.append(self.repo, self.ident, ev)
+        with locks.held(daemon.repo_lock(self.repo)):  # this machine's sync process may be merging into it
+            coordgit.append(self.repo, self.ident, ev)
         self.st = trial
         # The receipt, before anything goes out: an agent whose tool cut the command off while it published used
         # to retry, or check by hand, not knowing whether the event counted. Recorded here, it counts, and goes

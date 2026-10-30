@@ -367,6 +367,20 @@ def cmd_radicle(args):
             return
         repo = repo_root()
         ident = need_identity(repo)
+        if args.action == "seed":
+            if not args.target or ":" not in args.target:
+                raise Fail("give the address the others reach this machine at: `legion radicle seed HOST:PORT` "
+                           "(e.g. seed.example.org:8776; open that port)")
+            seed = radicle.make_seed(repo, args.target, home)
+            print(f"This node is now the project's seed, at {seed}. On every other node, in its clone, run:\n\n"
+                  f"  python -m legion radicle prefer {seed}\n\nKeep this machine on: the others fetch from it first.")
+            return
+        if args.action == "prefer":
+            if not args.target:
+                raise Fail("give the seed: `legion radicle prefer NID@HOST:PORT` (`legion radicle seed` prints it)")
+            radicle.prefer_seed(repo, args.target, home)
+            print(f"This node keeps a connection to {args.target} and fetches from it first.")
+            return
         if args.action == "init":
             st = coordgit.state(repo)
             if not st.project:
@@ -2406,6 +2420,20 @@ def cmd_netsync(args):
     return 0 if radicle.run_network_sync(repo_root()) else 1
 
 
+def cmd_daemon(args):
+    """This machine's sync process (see daemon.py): commands start it; --status says how it's doing."""
+    from . import daemon
+    if not args.status:
+        return daemon.run()
+    d = daemon.folder()
+    repos = [e.read_text(encoding="utf-8").strip() for e in sorted((d / "repos").glob("*"))] if (d / "repos").exists() else []
+    log = (d / "log.txt").read_text(encoding="utf-8", errors="replace").splitlines()[-8:] if (d / "log.txt").exists() else []
+    print(("The sync process is running" if daemon.alive() else "The sync process isn't running (the next command "
+           "starts it)") + (f"; it syncs {len(repos)} clone(s):\n  " + "\n  ".join(repos) if repos else ".")
+          + ("\nLatest lines of its log:\n  " + "\n  ".join(log) if log else ""))
+    return 0
+
+
 REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without its own, with {key}, {accept} or {arg} "
                      "(the acceptance command's last word), e.g. 'python check.py --refute {arg}'")
 MAX_SHARED_HELP = f"how many agents may work on one task at once (default {S.MAX_SHARED})"
@@ -2457,9 +2485,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_join)
 
     s = sub.add_parser("radicle", help="Radicle as the transport: across networks, no server, no open ports")
-    s.add_argument("action", choices=["setup", "init", "status", "doctor"],
+    s.add_argument("action", choices=["setup", "init", "status", "doctor", "seed", "prefer"],
                    help="setup: install Radicle and start the node; init: publish this project; status; "
-                        "doctor: can this machine reach the seeds, directly or through its HTTP proxy?")
+                        "doctor: can this machine reach the seeds, directly or through its HTTP proxy?; "
+                        "seed HOST:PORT: make this always-on node the project's own seed; "
+                        "prefer NID@HOST:PORT: keep a connection to that seed and fetch from it first")
+    s.add_argument("target", nargs="?", help="for seed: HOST:PORT the others reach; for prefer: NID@HOST:PORT")
     s.add_argument("--alias", help="node alias (default: your legion name)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")
     s.set_defaults(func=cmd_radicle)
@@ -2496,6 +2527,9 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_update)
     s = sub.add_parser("netsync", help=argparse.SUPPRESS)  # the background network fetch: not for agents
     s.set_defaults(func=cmd_netsync)
+    s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")
+    s.add_argument("--status", action="store_true", help="whether it runs, which clones it syncs, its latest log")
+    s.set_defaults(func=cmd_daemon)
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")

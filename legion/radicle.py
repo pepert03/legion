@@ -194,6 +194,47 @@ def _config_path(home: str | None) -> str:
     return f"{home or rad(None, 'path', timeout=30).splitlines()[-1].strip()}/config.json"
 
 
+def _edit_config(home: str | None, change) -> None:
+    """Apply `change` to the node's config.json, on Radicle's side (WSL on Windows)."""
+    path = _config_path(home)
+    c = json.loads(run("cat", path, home=home, timeout=30).stdout)
+    change(c)
+    p = subprocess.run((["wsl.exe", "-d", distro(), "-e"] if IS_WINDOWS else []) + ["sh", "-c", f"cat > '{path}'"],
+                       input=json.dumps(c, indent=2), capture_output=True, text=True, timeout=30)
+    if p.returncode:
+        raise RadError(f"couldn't write the node config: {p.stderr.strip()}")
+
+
+# The project's own seed: an always-on node that replicates the whole project, which every node keeps a
+# connection to and asks first. Public seeds are volunteers' machines, often slow or down: the explicit fetch
+# timed out at 45 s, and what an agent published reached the others when those seeds got to it.
+
+def make_seed(repo, address: str, home: str | None = None) -> str:
+    """Make this node the project's seed: it listens on the port of `address` (HOST:PORT, reachable from the
+    others) and replicates every namespace of the project. Returns what the others pass to `prefer_seed`."""
+    port = address.rsplit(":", 1)[1]
+    _edit_config(home, lambda c: (c["node"].__setitem__("listen", [f"0.0.0.0:{port}"]),
+                                  c["node"].__setitem__("externalAddresses", [address])))
+    run("rad", "seed", rid(repo), "--scope", "all", repo=repo, home=home, timeout=60, check=False)
+    restart_node(home)
+    ensure_node(repo, home)
+    return f"{node_id(repo, home)}@{address}"
+
+
+def prefer_seed(repo, seed: str, home: str | None = None) -> None:
+    """Keep a connection to the project's seed (NID@HOST:PORT) and fetch from it first."""
+    if not re.fullmatch(r"z6Mk\w+@[\w.-]+:\d+", seed):
+        raise RadError("a seed is NID@HOST:PORT, like z6Mk…@seed.example.org:8776 (`legion radicle seed` prints it)")
+
+    def change(c):
+        c["node"]["connect"] = [seed] + [s for s in c["node"].get("connect") or [] if s != seed]
+        c["preferredSeeds"] = [seed] + [s for s in c.get("preferredSeeds") or [] if s != seed]
+    _edit_config(home, change)
+    subprocess.run(["git", "config", "legion.seed", seed], cwd=repo, capture_output=True)
+    restart_node(home)
+    ensure_node(repo, home)
+
+
 def node_proxy(home: str | None = None) -> str | None:
     try:
         return json.loads(run("cat", _config_path(home), home=home, timeout=30).stdout)["node"].get("proxy")
@@ -421,7 +462,13 @@ def network_sync(repo, force: bool = False) -> bool:
     every = float(os.environ.get("LEGION_RAD_SYNC_EVERY", NETWORK_SYNC_EVERY))
     if not force and time.time() - last < every:
         return True
-    p = run("rad", "sync", "--fetch", rid(repo), repo=repo, check=False, timeout=45)
+    seed = _cfg(repo, "legion.seed")
+    p = None
+    if seed:  # the project's own seed first: it has everything, and answers
+        p = run("rad", "sync", "--fetch", rid(repo), "--seed", seed.split("@")[0], "--timeout", "30sec", repo=repo,
+                check=False, timeout=45)
+    if p is None or p.returncode:
+        p = run("rad", "sync", "--fetch", rid(repo), repo=repo, check=False, timeout=45)
     if p.returncode and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
         p = run("rad", "sync", "--fetch", rid(repo), *seed_args(_cfg(repo, "legion.radhome")), repo=repo,
                 check=False, timeout=45)
@@ -535,16 +582,11 @@ def fetch_all(repo) -> list[str]:
         # Only what changed since the last fetch: fetching all of it again on every command, from /mnt/c, took
         # minutes even when nothing was new.
         have = local_values(repo, "refs/legion/peers/", "refs/legion/patches/")
-        specs = [f"+{src}:{dest}" for dest, src in sorted(wanted.items()) if have.get(dest) != held[src]]
+        broken = _unfetchable(repo)
+        specs = [f"+{src}:{dest}" for dest, src in sorted(wanted.items())
+                 if have.get(dest) != held[src] and f"{src} {held[src]}" not in broken]
         for batch in batches(specs) if specs else []:
-            for attempt in range(3):
-                try:
-                    rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *batch, timeout=120)
-                    break
-                except RadError as e:  # another legion process (a viewer) fetching into the same refs right now
-                    if "cannot lock ref" not in str(e) or attempt == 2:
-                        raise
-                    time.sleep(1)
+            _fetch(repo, batch, held)
     # Peers that aren't published any more (a repository that moved to per-identity refs): forget them.
     local = subprocess.run(["git", "for-each-ref", "--format=%(refname)", "refs/legion/peers/"], cwd=repo,
                            capture_output=True, text=True).stdout.splitlines()
@@ -552,6 +594,43 @@ def fetch_all(repo) -> list[str]:
         if ref.split("/")[3] not in pubs:
             subprocess.run(["git", "update-ref", "-d", ref], cwd=repo, capture_output=True)
     return list(pubs)
+
+
+def _unfetchable_file(repo) -> Path:
+    d = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    return Path(d or Path(repo) / ".git") / "legion-unfetchable"
+
+
+def _unfetchable(repo) -> set[str]:
+    """Storage refs, with the commit they pointed to, that couldn't be fetched: skipped until they move."""
+    try:
+        return set(_unfetchable_file(repo).read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return set()
+
+
+def _fetch(repo, specs: list[str], held: dict[str, str]) -> None:
+    """Fetch these refspecs from the storage. A batch that fails is split in two until what fails is one ref,
+    which is noted and skipped until it moves: in Erdős #902 a node cut off mid-write left one ref pointing at a
+    commit the storage didn't have, and every fetch of every clone on that machine failed with it."""
+    for attempt in range(3):
+        try:
+            rgit(repo, "fetch", "-q", "--no-tags", storage(repo), *specs, timeout=120)
+            return
+        except RadError as e:
+            if "cannot lock ref" in str(e) and attempt < 2:  # another legion process fetching the same refs
+                time.sleep(1)
+                continue
+            if "timed out" in str(e):
+                raise
+            if len(specs) > 1:
+                _fetch(repo, specs[:len(specs) // 2], held)
+                _fetch(repo, specs[len(specs) // 2:], held)
+            else:
+                src = specs[0].lstrip("+").split(":", 1)[0]
+                with open(_unfetchable_file(repo), "a", encoding="utf-8") as f:
+                    f.write(f"{src} {held.get(src, '')}\n")
+            return
 
 
 def _judged_file(repo) -> Path:
@@ -651,17 +730,37 @@ def publish(repo, who: str) -> None:
         return  # nothing new since the last push: a read-only command doesn't pay 10 s for it
     tidy(repo)
     specs = publish_specs(repo, who)
-    for i in range(0, len(specs), 200):  # keeps the command line short with many patches
-        for attempt in range(3):
-            try:
-                rgit(repo, "push", "-q", "--force", "rad", *specs[i:i + 200], timeout=PUSH_TIMEOUT)
-                break
-            except RadError as e:  # another clone on this computer pushing to the same node right now
-                if "cannot lock ref" not in str(e) or attempt == 2:
-                    raise
-                time.sleep(2)
+    # Its own coord first and alone: whatever happens to the patches, its events go out. Then the patches it
+    # gossips, in batches split in two on failure: one patch whose objects this clone lacks ("missing necessary
+    # objects") made every push fail, and with them every event of this node.
+    own = [s for s in specs if s.startswith("refs/legion/pub/")]
+    _push(repo, own, strict=True)
+    rest = [s for s in specs if s not in own]
+    for i in range(0, len(rest), 200):  # keeps the command line short with many patches
+        _push(repo, rest[i:i + 200], strict=False)
     publish_main(repo)
     subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
+
+
+def _push(repo, specs: list[str], strict: bool) -> None:
+    """Push these refspecs to the node. Not strict: a batch that fails is split in two until what fails is one
+    ref, which is left out (another node re-offers it)."""
+    if not specs:
+        return
+    for attempt in range(3):
+        try:
+            rgit(repo, "push", "-q", "--force", "rad", *specs, timeout=PUSH_TIMEOUT)
+            return
+        except RadError as e:
+            if "cannot lock ref" in str(e) and attempt < 2:  # another clone pushing to the same node right now
+                time.sleep(2)
+                continue
+            if strict or "timed out" in str(e):
+                raise
+            if len(specs) > 1:
+                _push(repo, specs[:len(specs) // 2], strict)
+                _push(repo, specs[len(specs) // 2:], strict)
+            return
 
 
 def published_mark(repo) -> str:

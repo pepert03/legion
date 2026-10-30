@@ -249,3 +249,54 @@ def test_a_publish_with_nothing_new_pushes_nothing(tmp_path, monkeypatch):
     coordgit.append(repo, boss, E.create(boss, "agent.joined", 2))     # an event of its own: that goes out
     radicle.publish(repo, "b")
     assert pushes == ["push", "push"]
+
+
+def test_one_process_per_machine_syncs_every_clone_so_commands_dont(network, tmp_path, monkeypatch):
+    """Each command copied the storage's refs (6 s through WSL) and pushed (10-20 s), every agent on its own:
+    now this machine's sync process does it for all its clones, and a command only reads and writes locally."""
+    from legion import daemon, identity
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("LEGION_NO_DAEMON")
+    alice, bob = network["z6MkAlice"], network["z6MkBob"]
+    boss, ana = Identity.generate("boss"), Identity.generate("ana")
+    identity.bind(alice, boss)
+    identity.bind(bob, ana)
+    started = []
+    monkeypatch.setattr(daemon, "start", lambda: started.append(1))
+    assert not daemon.serving(alice) and started == [1]          # not running: this command syncs, and starts it
+    daemon.register(bob)
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
+    log = []
+    daemon.run(rounds=2, log=log.append)
+    assert [e["type"] for e in coordgit.read_events(bob)] == ["project.init"] and not log[1:]
+    assert daemon.serving(bob) and started == [1]                # its beat is fresh: commands leave it the sync
+    from legion.locks import lock_file, unlock_file
+    with open(daemon.folder() / "lock", "a+b") as running:      # a daemon alive on this machine holds it
+        assert lock_file(running)
+        n = len(log)
+        assert daemon.run(rounds=1, log=log.append) == 0 and len(log) == n  # a second one makes way
+        unlock_file(running)
+
+
+def test_a_node_prefers_the_projects_own_seed_and_fetches_from_it_first(tmp_path, monkeypatch):
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    config = {"node": {"connect": ["z6MkOther@x.org:8776"]}}
+    calls = []
+    monkeypatch.setattr(radicle, "_config_path", lambda home: "config.json")
+    monkeypatch.setattr(radicle, "_edit_config", lambda home, change: change(config))
+    monkeypatch.setattr(radicle, "restart_node", lambda home=None: None)
+    monkeypatch.setattr(radicle, "ensure_node", lambda repo=None, home=None: None)
+    seed = "z6MkSeed1234@seed.example.org:8776"
+    with pytest.raises(radicle.RadError):
+        radicle.prefer_seed(repo, "seed.example.org")
+    radicle.prefer_seed(repo, seed)
+    assert config["node"]["connect"][0] == seed and config["preferredSeeds"] == [seed]
+
+    def run(*args, repo=None, home=None, timeout=60, check=True, cwd=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(radicle, "run", run)
+    assert radicle.network_sync(repo, force=True)
+    assert calls[0][:5] == ("rad", "sync", "--fetch", "rad:zTest", "--seed") and calls[0][5] == "z6MkSeed1234"

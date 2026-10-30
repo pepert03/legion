@@ -71,31 +71,7 @@ def broken(output: str) -> bool:
 CHECKS = 2
 
 
-def lock_file(f) -> bool:
-    try:
-        if os.name == "nt":
-            import msvcrt
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
-
-
-def unlock_file(f) -> None:
-    try:
-        if os.name == "nt":
-            import msvcrt
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        pass
+from .locks import lock_file, unlock_file  # noqa: E402,F401 (kept here for older callers)
 
 
 @contextmanager

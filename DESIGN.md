@@ -309,6 +309,25 @@ be removed, and a removed integrator's later events stop counting).
     the refusal says when the next one fits.
   - *Checks longer than a tool call*: `verify --background` checks in a process of its own and `verify
     --status` reads the outcome.
+  - *One sync process per machine* (`legion daemon`, daemon.py): commands still copied the storage's refs (6 s
+    through WSL) and pushed (10-20 s), each agent on its own, colliding on the one node. The first command that
+    finds no daemon starts one (per LEGION_HOME); every command registers its clone, and the daemon syncs each
+    clone used in the last 6 hours every 10 s, or at once when a command wakes it with events to publish.
+    Commands then only read and write locally: `context` went from 7-10 s to under 2 s. A per-clone lock keeps
+    a command's append and the daemon's merge from moving the coord at once. Its sync starts the network fetch,
+    which restarts a stopped node. It ends when legion is updated (the next command starts the new one).
+  - *A broken storage stops everything*: the node, cut off mid-write when the computer suspended, left four
+    empty packs and refs pointing at objects it never got. One such ref in a fetch batch failed the whole fetch,
+    and git's connectivity check on every push walked into the broken refs, so no clone on that machine could
+    publish for hours. Fetches and the push of others' patches now split a failing batch until the bad ref is
+    alone, skip it (noted in .git/legion-unfetchable until it moves), and push this node's own coord first and
+    alone. (The storage itself was repaired by hand: empty packs removed, the objects copied back from a clone
+    with `git fetch --refetch`, and two unresolvable `rad/sigrefs` of other nodes removed, which Radicle fetches
+    again.)
+  - *The project's own seed* (`legion radicle seed HOST:PORT` on an always-on machine, `legion radicle prefer
+    NID@HOST:PORT` on every node): public seeds are volunteers' machines, and the explicit fetch timed out
+    waiting for them. A node that prefers the project's seed keeps a connection to it and fetches from it
+    first.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
