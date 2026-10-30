@@ -385,6 +385,9 @@ be removed, and a removed integrator's later events stop counting).
     minutes per clone, and never one a process holds open (/proc, lsof; on Windows the system refuses): a
     writer paused that long still holds its lock. `LEGION_LOCK_CLEANUP=0` (or `legion.lockcleanup false`)
     turns it off.
+  - *Background processes the sandbox killed*: they left "running" in their status file, and the next
+    commands took a publish for under way for ten minutes after it died, and the network fetch that restarts
+    a stopped node for five. Each now notes its pid, and one that no longer runs is started again at once.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its

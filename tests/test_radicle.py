@@ -524,3 +524,28 @@ def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch)
     assert not old.exists() and new.exists() and gc.exists() and held.exists()
     os.utime(new, (0, 0))
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon
+
+def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
+    """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
+    minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    started = []
+
+    class Proc:
+        pid = 4242
+    monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None, env=None: started.append(cmd[-1]) or Proc())
+    monkeypatch.undo()                                                  # the real kick, not conftest's
+    monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None, env=None: started.append(cmd[-1]) or Proc())
+    alive = {4242: True}
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid: alive.get(pid, True))
+    radicle.kick_publish(repo)
+    radicle.kick_publish(repo)                                          # alive: it goes again, no second one
+    assert started == ["--publish"]
+    alive[4242] = False                                                 # killed
+    radicle.kick_publish(repo)
+    assert started == ["--publish", "--publish"]
+    radicle.kick_network_sync(repo)
+    alive[4242] = False
+    radicle.kick_network_sync(repo)                                     # within the minute, but it died
+    assert started.count("netsync") == 2

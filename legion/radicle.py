@@ -620,15 +620,45 @@ def kick_announce(repo) -> None:
     _kick(repo, "announce")
 
 
+def pid_alive(pid) -> bool:
+    """Whether the process runs. Sandboxes kill the background processes, which leave "running" behind them:
+    a publish taken for under way for ten minutes after it died, and a node nobody restarted meanwhile."""
+    if not isinstance(pid, int) or pid <= 0:
+        return True  # an older legion's process, which noted no pid: as before, its age decides
+    if IS_WINDOWS:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # someone else's: it exists
+    return True
+
+
+def _under_way(status: dict, stale: float) -> bool:
+    return (bool(status.get("running")) and time.time() - status.get("started", 0) < stale
+            and pid_alive(status.get("pid")))
+
+
 def _kick(repo, name: str, stale: float = 120) -> None:
     """Run `legion netsync --<name>` in a process of its own, one at a time: if one runs, it goes again."""
     now, status = time.time(), netsync_status(repo, name)
-    if status.get("running") and now - status.get("started", 0) < stale:
+    if _under_way(status, stale):
         _write_netsync(repo, dict(status, again=True), name)
         return
     _write_netsync(repo, {"started": now, "running": True}, name)
     try:
-        spawn_detached([sys.executable, "-m", "legion", "netsync", f"--{name}"], repo)
+        p = spawn_detached([sys.executable, "-m", "legion", "netsync", f"--{name}"], repo)
+        _write_netsync(repo, {"started": now, "running": True, "pid": getattr(p, "pid", None)}, name)
     except OSError:
         _write_netsync(repo, {"started": now, "running": False}, name)
 
@@ -640,7 +670,7 @@ def _rounds(repo, name: str, work) -> None:
             work()
             if not netsync_status(repo, name).get("again"):
                 break
-            _write_netsync(repo, {"started": time.time(), "running": True}, name)
+            _write_netsync(repo, {"started": time.time(), "running": True, "pid": os.getpid()}, name)
     finally:
         _write_netsync(repo, {"started": time.time(), "running": False}, name)
 
@@ -671,11 +701,12 @@ def kick_network_sync(repo) -> bool:
     False when the last one, recently, couldn't reach the network: the caller says so."""
     now, status = time.time(), netsync_status(repo)
     every = float(os.environ.get("LEGION_RAD_SYNC_EVERY", NETWORK_SYNC_EVERY))
-    running = status.get("running") and now - status.get("started", 0) < 300
-    if not running and now - status.get("started", 0) >= every:
+    running = _under_way(status, 300)
+    if not running and (now - status.get("started", 0) >= every or status.get("running")):  # or it died
         _write_netsync(repo, dict(status, started=now, running=True))
         try:
-            spawn_detached([sys.executable, "-m", "legion", "netsync"], repo)
+            p = spawn_detached([sys.executable, "-m", "legion", "netsync"], repo)
+            _write_netsync(repo, dict(status, started=now, running=True, pid=getattr(p, "pid", None)))
         except OSError:
             _write_netsync(repo, dict(status, started=now, running=False, ok=False))
     return status.get("ok", True) or now - status.get("ended", 0) > 900
