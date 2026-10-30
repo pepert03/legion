@@ -508,12 +508,13 @@ def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch)
     import os
     from legion import daemon
     alice, store = network["z6MkAlice"], radicle.storage(network["z6MkAlice"])
-    old, new = Path(store) / "packed-refs.lock", Path(store) / "refs" / "x.lock"
-    for f in (old, new):
+    old, new, gc = Path(store) / "packed-refs.lock", Path(store) / "refs" / "x.lock", Path(store) / "gc.log.lock"
+    for f in (old, new, gc):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("")
     os.utime(old, (0, 0))                                               # left long ago; the other one is in use
+    os.utime(gc, (0, 0))                                                # a long background gc may hold this one
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == [str(old)]
-    assert not old.exists() and new.exists()
+    assert not old.exists() and new.exists() and gc.exists()
     os.utime(new, (0, 0))
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon
