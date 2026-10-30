@@ -46,11 +46,14 @@ TICKET_RE = re.compile(r"dumbpipe connect-tcp (\w+)")
 
 
 def binary() -> str | None:
+    """dumbpipe on the PATH, or where `cargo install` and a release unpacked by hand put it: the processes that
+    keep the tunnels may not have the PATH of the shell it was installed from."""
     found = shutil.which("dumbpipe")
     if found:
         return found
-    cargo = Path.home() / ".cargo" / "bin" / ("dumbpipe.exe" if IS_WINDOWS else "dumbpipe")
-    return str(cargo) if cargo.exists() else None
+    name = "dumbpipe.exe" if IS_WINDOWS else "dumbpipe"
+    return next((str(p) for p in (Path.home() / ".cargo" / "bin" / name, Path.home() / ".local" / "bin" / name)
+                 if p.exists()), None)
 
 
 def mode(repo) -> str:
