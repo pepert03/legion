@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -265,8 +266,9 @@ def test_without_dumbpipe_it_says_how_to_get_it(node, monkeypatch):
 
 def test_a_windows_node_that_doesnt_reconnect_through_its_tunnel_is_restarted(node, monkeypatch):
     """Radicle built for Windows, having lost a node, never completes its next connection to it: restarted, it
-    connects at once. Only after STUCK seconds without a session, and not again for RESTART_EVERY."""
-    repo, rec, boss = node["repo"], node["rec"], node["boss"]
+    connects at once. Only after STUCK seconds without a session, if its last attempt reached the other end, and
+    not again for RESTART_EVERY."""
+    repo, home, rec, boss = node["repo"], node["home"], node["rec"], node["boss"]
     coordgit.append(repo, boss, tunnel_ev(boss, 2, HUB, "hubticket" * 4, hub=True))
     git(repo, "config", "legion.tunnel", "client")
     monkeypatch.setattr(tunnel, "IS_WINDOWS", True)
@@ -275,6 +277,7 @@ def test_a_windows_node_that_doesnt_reconnect_through_its_tunnel_is_restarted(no
     monkeypatch.setattr(tunnel.time, "time", lambda: clock[0])
     tunnel.keep(repo, strict=True)
     assert rec["restarts"] == 0 and len(rec["connects"]) == 1
+    attempt(home, clock[0] + 1)  # the node tries, and dumbpipe gets through
     clock[0] += 60
     tunnel.keep(repo)
     assert rec["restarts"] == 0  # not long enough yet
@@ -289,3 +292,33 @@ def test_a_windows_node_that_doesnt_reconnect_through_its_tunnel_is_restarted(no
     clock[0] += tunnel.RESTART_EVERY
     tunnel.keep(repo)
     assert rec["restarts"] == 1  # connected: nothing to do
+
+
+def attempt(home, at, failed=False):
+    """What dumbpipe logs when the node connects through the tunnel to HUB (and when it can't reach it)."""
+    stamp = datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    with open(tunnel._log(home, HUB), "a", encoding="utf-8") as f:
+        f.write(f"\x1b[2m{stamp}\x1b[0m \x1b[32m INFO\x1b[0m dumbpipe: got tcp connection from 127.0.0.1:50000\n")
+        if failed:
+            f.write(f"{stamp}  WARN dumbpipe: error handling connection: error connecting to 3a4b\n")
+
+
+def test_a_windows_node_isnt_restarted_for_a_node_that_is_down(node, monkeypatch):
+    """Agents' sandboxes kill their nodes every half hour: while one is down, every attempt fails."""
+    repo, home, rec, boss = node["repo"], node["home"], node["rec"], node["boss"]
+    coordgit.append(repo, boss, tunnel_ev(boss, 2, HUB, "hubticket" * 4, hub=True))
+    git(repo, "config", "legion.tunnel", "client")
+    monkeypatch.setattr(tunnel, "IS_WINDOWS", True)
+    monkeypatch.setattr(radicle, "native", lambda repo=None: True)
+    clock = [time.time()]
+    monkeypatch.setattr(tunnel.time, "time", lambda: clock[0])
+    tunnel.keep(repo, strict=True)
+    for _ in range(5):
+        attempt(home, clock[0] + 1, failed=True)
+        clock[0] += 120
+        tunnel.keep(repo)
+    assert rec["restarts"] == 0
+    attempt(home, clock[0] - 100)  # back up: the attempt went through, and still no session
+    clock[0] += 60
+    tunnel.keep(repo)
+    assert rec["restarts"] == 1

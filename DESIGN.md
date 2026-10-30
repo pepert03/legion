@@ -356,8 +356,11 @@ be removed, and a removed integrator's later events stop counting).
     is in reactor/listener.rs of a local heartwood build; on Linux and macOS epoll signals again, so nodes
     there are fine); (2) having lost a node, its next outbound connection to it opens and never sends the
     handshake, and stays so, while a freshly started node connects at once. legion can't fix the second from
-    outside: a Windows node that has had no session for STUCK (90) seconds with a node whose tunnel is up is
-    restarted, at most every RESTART_EVERY (300) seconds; measured, it was connected 4-5 s after. A tunnel
+    outside: a Windows node that has had no session for STUCK (90) seconds with a node whose tunnel is up, and
+    whose last attempt got through it (dumbpipe logs each connection it forwards, and an error when the other
+    end can't be reached), is restarted, at most every RESTART_EVERY (300) seconds; measured, it was connected
+    4-5 s after. A node that is down fails every attempt instead, so sandboxes that kill theirs every half
+    hour don't make the others restart. A tunnel
     that died is thus back within the next fetch (a minute), and the connection through it within a few
     minutes at worst on Windows.
   - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper

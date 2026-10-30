@@ -254,10 +254,11 @@ def connect(home: Path, nid: str, ticket: str) -> int:
     kill(t.get("pid"))
     start = t.get("port") or _port_for(home, nid)
     port = start if not _taken(start) else _free_port(start + 1, PORTS[1])
-    log = _file(home, f"legion-tunnel-{nid[-8:]}.log")
+    log = _log(home, nid)
     log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("", encoding="utf-8")  # read by reached(): only this run's attempts
     proc = radicle.spawn_detached([binary(), "connect-tcp", "--addr", f"127.0.0.1:{port}", ticket], str(home),
-                                  log=log)
+                                  log=log, env={**os.environ, "RUST_LOG": "dumbpipe=info", "NO_COLOR": "1"})
     end = time.time() + 15
     while not _taken(port) and proc.poll() is None and time.time() < end:
         time.sleep(0.2)
@@ -268,6 +269,33 @@ def connect(home: Path, nid: str, ticket: str) -> int:
     st.setdefault("peers", {})[nid] = {"pid": proc.pid, "port": port, "ticket": ticket, "started": time.time()}
     save(home, st)
     return port
+
+
+def _log(home: Path, nid: str) -> Path:
+    return _file(home, f"legion-tunnel-{nid[-8:]}.log")
+
+
+ATTEMPT_RE = re.compile(r"^(\S+Z)\s.*got tcp connection", re.M)
+FAILED_RE = re.compile(r"error handling connection")
+
+
+def reached(home: Path, nid: str, now: float, wait: float = 60) -> bool:
+    """Whether the node's latest attempt through this tunnel got to the other end: dumbpipe logs each connection
+    it forwards, and an error when it can't reach the other node. An attempt `wait` seconds old with no error
+    after it went through."""
+    from datetime import datetime
+    try:
+        text = radicle.clean(_log(home, nid).read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+    attempts = list(ATTEMPT_RE.finditer(text))
+    if not attempts or FAILED_RE.search(text, attempts[-1].end()):
+        return False
+    try:
+        at = datetime.fromisoformat(attempts[-1].group(1).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False
+    return now - at > wait
 
 
 def disconnect(home: Path, nid: str) -> None:
@@ -298,7 +326,9 @@ def link(repo, nid: str, port: int, hub: bool, sessions: set[str]) -> str | None
 # Radicle built for Windows doesn't reconnect by itself to a node it lost: when a tunnel dies and comes back, the
 # node's next attempt opens the connection and never sends its handshake, and `rad node connect` takes the node
 # as already connected. Freshly started, it connects at once. So a Windows node that has gone STUCK seconds
-# without a session to a node whose tunnel is up is restarted, at most every RESTART_EVERY seconds.
+# without a session to a node whose tunnel is up, and whose last attempt reached the other end, is restarted, at
+# most every RESTART_EVERY seconds. A node that is down (agents' sandboxes kill theirs every half hour) fails
+# every attempt instead, and restarting this one wouldn't bring it back.
 STUCK = 90
 RESTART_EVERY = 300
 
@@ -310,8 +340,8 @@ def unstick(repo, home: Path, ports: dict[str, int], sessions: set[str]) -> bool
         if nid not in sessions:
             since.setdefault(nid, now)
     st["unlinked"] = since
-    stuck = (IS_WINDOWS and radicle.native(repo) and any(now - t > STUCK for t in since.values())
-             and now - st.get("restarted", 0) > RESTART_EVERY)
+    stuck = (IS_WINDOWS and radicle.native(repo) and now - st.get("restarted", 0) > RESTART_EVERY
+             and any(now - t > STUCK and reached(home, nid, now) for nid, t in since.items()))
     if stuck:
         st.update(restarted=now, unlinked={})
     save(home, st)
