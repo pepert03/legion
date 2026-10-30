@@ -404,7 +404,9 @@ When a path is built on an idea, or settles a question, say which: `--ideas <ids
 When no task is free, `claim` hands out this work itself (exit code 7): a stuck task's best-rated idea
 nobody has tried (judged at least twice, rated above the start), or a question that several owners
 answered without settling, to turn into a path. That's how the routes and questions the agents rated
-become tasks, instead of waiting in their lists.
+become tasks, instead of waiting in their lists. If tasks that exist already cover it, don't invent a
+duplicate: say which, with `python -m legion answer <id> "..." --covered` for a question (it isn't handed
+out again until a new answer comes) or a critique for an idea.
 
 ## Rules
 

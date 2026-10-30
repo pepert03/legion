@@ -1590,7 +1590,11 @@ def research_work(c: Ctx, args, now: float) -> int | None:
                          "prove and their tests, each small enough for one agent; see \"When a task is stuck\" in "
                          "AGENTS.md). "
                          f"Propose it with `python -m legion path {t.id} FILE --{kind}s {x['ev']['id'][:8]}`. Once "
-                         "it's accepted they are tasks anyone can claim.")
+                         "it's accepted they are tasks anyone can claim. If tasks that exist already cover it, say "
+                         "which instead, and it isn't handed out again: "
+                         + (f"`python -m legion answer {x['ev']['id'][:8]} \"...\" --covered`." if kind == "question"
+                            else f"`python -m legion critique {x['ev']['id'][:8]} \"covered by ...\"` (two critiques "
+                                 "from other owners retire an idea)."))
     pair = st.pair_to_compare(name)
     if pair:
         a, b = pair
@@ -1794,7 +1798,7 @@ def cmd_answer(args):
     q = find_question(c, args.question)
     result = c.task(args.result).id if args.result else None
     c.emit("question.answered", task=q["task"], question=q["ev"]["id"], text=args.text, settled=args.settled,
-           **({"result": result} if result else {}))
+           **({"result": result} if result else {}), **({"covered": True} if args.covered else {}))
     c.sync()
     q = c.st.questions[q["ev"]["id"]]
     print("Answer published: " + ("it settles the question." if q["status"] == "settled" else
@@ -2847,6 +2851,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("text", help="what you found, with the evidence: a result, a computation, a reference")
     s.add_argument("--settled", action="store_true", help="it settles the question")
     s.add_argument("--result", help="a result (or task) that holds the evidence")
+    s.add_argument("--covered", action="store_true", help="tasks that exist already cover it (say which): claim "
+                                                          "stops handing it out to turn into a path")
     s.set_defaults(func=cmd_answer)
 
     s = sub.add_parser("lit", help="the project's literature: list it, or `lit add <url>` a reference that helps")

@@ -1135,3 +1135,15 @@ def test_claim_hands_out_a_ripe_idea_as_a_path_to_propose(capsys):
     assert cli.research_work(c, SimpleNamespace(json=False), 1001) == 7
     out = capsys.readouterr().out
     assert "research work instead (path)" in out and f"--ideas {a['id'][:8]}" in out
+
+def test_a_question_its_tasks_already_cover_isnt_handed_out_again_until_something_new():
+    """claim handed the same question again and again to agents who had answered that the tasks already cover it."""
+    log, tid = stuck_project()
+    q = log.add(ANA, "question.asked", task=tid, text="Does the bound hold at n = 7?")
+    for who in (BEA, CEL):
+        log.add(who, "question.answered", task=tid, question=q["id"], text="partway: the cases with a triangle")
+    assert log.state().route_to_open("dan")[2]["ev"]["id"] == q["id"]
+    log.add(DAN, "question.answered", task=tid, question=q["id"], text="the triangle subtasks cover it", covered=True)
+    assert log.state().route_to_open("eve") is None
+    log.add(BEA, "question.answered", task=tid, question=q["id"], text="new: the triangle-free case is open")
+    assert log.state().route_to_open("eve")[2]["ev"]["id"] == q["id"]   # something new: handed out again

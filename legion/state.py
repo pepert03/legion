@@ -621,7 +621,11 @@ class State:
             return "settled is true or false"
         if ev.get("result") is not None and ev["result"] not in self.tasks:
             return "an answer's result is a task"
+        if not isinstance(ev.get("covered", False), bool):
+            return "covered is true or false"
         q["answers"].append(ev)
+        if ev.get("covered"):  # tasks that exist already cover it: no path for it, until something new comes
+            q["covered"] = ev["lamport"]
         # Rerunning your own result isn't a replication: it leaves the question open for someone else.
         own = q["result"] is not None and any(owner(p.name) == owner(ev["name"]) for p in self.patches_for(q["result"]))
         if ev.get("settled") and not own:
@@ -751,7 +755,8 @@ class State:
                 found.append(((0, -best["elo"], best["ev"]["lamport"]), t, "idea", best))
             found += [((1, 0, q["ev"]["lamport"]), t, "question", q) for q in self.questions.values()
                       if q["task"] == t.id and q["status"] == "open" and q["result"] is None and not q["paths"]
-                      and len({owner(a["name"]) for a in q["answers"]}) >= RIPE_ANSWERS]
+                      and len({owner(a["name"]) for a in q["answers"]}) >= RIPE_ANSWERS
+                      and q.get("covered", -1) < max(a["lamport"] for a in q["answers"] if not a.get("covered"))]
         if not found:
             return None
         found.sort(key=lambda f: f[0])
