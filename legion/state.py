@@ -761,7 +761,8 @@ class State:
             found += [((1, 0, q["ev"]["lamport"]), t, "question", q) for q in self.questions.values()
                       if q["task"] == t.id and q["status"] == "open" and q["result"] is None and not q["paths"]
                       and len({owner(a["name"]) for a in q["answers"]}) >= RIPE_ANSWERS
-                      and q.get("covered", -1) < max(a["lamport"] for a in q["answers"] if not a.get("covered"))]
+                      and q.get("covered", -1) < max((a["lamport"] for a in q["answers"] if not a.get("covered")),
+                                                     default=-1)]
         if not found:
             return None
         found.sort(key=lambda f: f[0])

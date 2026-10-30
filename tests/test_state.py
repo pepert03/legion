@@ -1160,3 +1160,11 @@ def test_the_same_idea_twice_isnt_a_pair_to_judge_and_a_tie_can_be_said():
     assert st.ideas[a["id"]]["elo"] == st.ideas[c["id"]]["elo"] == S.ELO_START  # a draw between equals moves nothing
     assert st.ideas[a["id"]]["compared"] == 1
     assert {i["ev"]["id"] for i in st.pair_to_compare("dan")} != {a["id"], c["id"]}  # judged: not handed again
+
+def test_a_question_only_ever_answered_as_covered_isnt_handed_out_and_claim_doesnt_break():
+    """claim failed with "max() arg is an empty sequence" when every answer to a ripe question said --covered."""
+    log, tid = stuck_project()
+    q = log.add(ANA, "question.asked", task=tid, text="Does the bound hold at n = 7?")
+    for who in (BEA, CEL):
+        log.add(who, "question.answered", task=tid, question=q["id"], text="tasks a and b cover it", covered=True)
+    assert log.state().route_to_open("dan") is None
