@@ -97,6 +97,7 @@ class Ctx:
                               "has", file=sys.stderr)
                 if coordgit.is_radicle(self.repo):
                     self._publish()
+                    daemon.clear_stale_locks(self.repo, lambda m: print(f"legion: {m}", file=sys.stderr))
                 if getattr(self, "unpublished", None):
                     print(f"legion: published {', '.join(self.unpublished)}." if self.strict or not
                           coordgit.is_radicle(self.repo) else f"legion: {', '.join(self.unpublished)} go out within "

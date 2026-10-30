@@ -1,6 +1,7 @@
 """Radicle transport, against a fake Radicle storage: a bare repository with one namespace per node."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -500,3 +501,19 @@ def test_a_command_doesnt_wait_long_for_a_clone_another_process_syncs(network, m
     assert synced == [] and c.st.project["project"] == "p" and "being synced by another process" in capsys.readouterr().err
     ctx.Ctx()
     assert synced == [1]                                                 # free again: it syncs
+
+def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch):
+    """A packed-refs.lock left by a node cut off mid-write made every fetch that deleted a ref fail: two hours
+    without seeing anything new."""
+    import os
+    from legion import daemon
+    alice, store = network["z6MkAlice"], radicle.storage(network["z6MkAlice"])
+    old, new = Path(store) / "packed-refs.lock", Path(store) / "refs" / "x.lock"
+    for f in (old, new):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+    os.utime(old, (0, 0))                                               # left long ago; the other one is in use
+    assert daemon.clear_stale_locks(alice, log=lambda m: None) == [str(old)]
+    assert not old.exists() and new.exists()
+    os.utime(new, (0, 0))
+    assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon

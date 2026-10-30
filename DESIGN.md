@@ -345,7 +345,12 @@ be removed, and a removed integrator's later events stop counting).
     (4 s instead of 20-110 s) and leaves the push to a process of its own (`legion netsync --publish`, one at a
     time), which lives long enough for it. The integrator still pushes itself. Nor does a command wait two
     minutes for its clone's lock: after LOCK_WAIT (15 s) another process is syncing it, a sync process of an
-    older legion pushing for minutes as on one of Sergio's machines, and it reads what the clone has.
+    older legion pushing for minutes (Sergio's #1, whose view stayed at event 4948 behind it), and it reads
+    what the clone has.
+  - *A node blind for two hours*: a packed-refs.lock its node left in the storage when cut off mid-write made
+    every fetch that deleted a ref fail, and since nodes drop judged patches and old saves, every fetch did.
+    The sync process, and a command syncing by itself, now remove lock files older than ten minutes from the
+    node's storage (looked for at most every ten minutes per clone).
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its

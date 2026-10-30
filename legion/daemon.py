@@ -106,10 +106,50 @@ def sync_one(repo: str, log=print) -> bool:
         with held(repo_lock(repo)):
             coordgit.sync(repo, ident, publish=False)
         coordgit.publish_radicle(repo, ident)
+        clear_stale_locks(repo, log)
         return True
     except Exception as e:  # noqa: BLE001 (one clone's trouble mustn't stop the others')
         log(f"{time.strftime('%H:%M:%S')} {repo}: {str(e).strip()[-300:]}")
         return False
+
+
+STALE_LOCK = 600  # seconds after which a lock file in the node's storage is a leftover, looked for this often
+
+
+def clear_stale_locks(repo, log=print) -> list[str]:
+    """Remove the lock files a Radicle node left in its storage when it was cut off mid-write. With a stale
+    packed-refs.lock, every fetch that deleted a ref failed ("failed to delete reference"), and since nodes
+    drop judged patches and old saves they all do: a node in Erdős #902 saw nothing new for two hours. At most
+    every STALE_LOCK seconds per clone (.git/legion-locks-checked)."""
+    from . import radicle
+    stamp = Path(coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
+                 or Path(repo) / ".git") / "legion-locks-checked"
+    try:
+        if time.time() - stamp.stat().st_mtime < STALE_LOCK:
+            return []
+    except OSError:
+        pass
+    try:
+        stamp.touch()
+        where = radicle.storage(repo)
+        if radicle.IS_WINDOWS and not radicle.native(repo):  # the storage lives in WSL
+            minutes = STALE_LOCK // 60
+            out = radicle.run("sh", "-c", f'find "{where}" -maxdepth 1 -name "*.lock" -mmin +{minutes} -print -delete; '
+                              f'find "{where}/refs" -name "*.lock" -mmin +{minutes} -print -delete',
+                              repo=repo, check=False, timeout=120).stdout
+            gone = out.split()
+        else:
+            gone, now = [], time.time()
+            for p in [*Path(where).glob("*.lock"), *Path(where, "refs").rglob("*.lock")]:
+                if now - p.stat().st_mtime > STALE_LOCK:
+                    p.unlink()
+                    gone.append(str(p))
+    except (radicle.RadError, OSError):
+        return []
+    if gone:
+        log(f"{time.strftime('%H:%M:%S')} {repo}: removed {len(gone)} lock file(s) the Radicle node left behind: "
+            + ", ".join(g.rsplit("/", 1)[-1] for g in gone[:5]))
+    return gone
 
 
 def _log(message: str) -> None:
