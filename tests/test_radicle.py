@@ -127,6 +127,7 @@ def test_radicle_main_follows_the_official_main_and_never_goes_back(tmp_path, mo
                         subprocess.run(list(a), cwd=cwd, capture_output=True, encoding="utf-8"))
     seed = tmp_path / "seed.git"
     git(tmp_path, "init", "-q", "--bare", str(seed))
+    git(seed, "config", "receive.advertisePushOptions", "true")  # as Radicle's remote takes -o no-sync
     r = tmp_path / "r"
     git(tmp_path, "init", "-q", "-b", "main", str(r))
     git(r, "config", "user.name", "x")
@@ -143,6 +144,7 @@ def test_radicle_main_follows_the_official_main_and_never_goes_back(tmp_path, mo
     git(r, "update-ref", "refs/legion/main", first)  # a repository with an older view of main
     radicle.publish_main(r)  # refused quietly
     assert git(seed, "rev-parse", "refs/heads/main") == second
+    assert radicle.main_spec(r) == []                # and not offered again until it moves
 
 
 def test_judged_patches_are_never_fetched_or_published_again(tmp_path):
@@ -229,6 +231,69 @@ def test_a_command_starts_the_network_fetch_in_the_background_and_doesnt_wait(tm
     assert radicle.kick_network_sync(repo) is False and len(started) == 1  # it failed just now: say so
 
 
+def test_the_node_drops_what_this_clone_dropped(tmp_path, monkeypatch):
+    """Every node kept every save and judged patch it ever published: 24,000 refs, and eleven seconds of each push
+    in Radicle's helper going through them."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    git(repo, "commit", "-q", "--allow-empty", "-m", "x")
+    git(repo, "update-ref", "refs/legion/patches/t-1/a-2", "HEAD")
+    coordgit.prune_patches(repo, {"refs/legion/patches/t-1/a-1"})
+    head = git(repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(radicle, "node_patches", lambda repo: {"refs/legion/patches/t-1/a-1": head})
+    assert radicle.publish_specs(repo, "me") == ["refs/legion/patches/t-1/a-2:refs/legion/patches/t-1/a-2",
+                                                 ":refs/legion/patches/t-1/a-1"]
+
+
+def test_a_push_doesnt_wait_for_the_seeds_and_one_process_announces(tmp_path, monkeypatch):
+    """A push that synced waited ten seconds for the seeds' answer, twice per publish."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    pushed, started, announced = [], [], []
+    monkeypatch.setattr(radicle, "rgit", lambda repo, *args, **kw: pushed.append(args))
+    radicle._push(repo, ["+a:a"], strict=True)
+    assert pushed == [("push", "-q", "-o", "no-sync", "rad", "+a:a")]
+    monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None: started.append(cmd))
+    radicle.kick_announce(repo)
+    radicle.kick_announce(repo)                       # published again while it runs: it goes again, no second one
+    assert started == [[radicle.sys.executable, "-m", "legion", "netsync", "--announce"]]
+
+    monkeypatch.setattr(radicle, "run", lambda *args, **kw: announced.append(args))
+    monkeypatch.setattr(radicle, "rid", lambda repo: "rad:z1")
+    radicle.run_announce(repo)                        # what that process does: two rounds, the second for the kick
+    assert len(announced) == 2 and announced[0][:3] == ("rad", "sync", "--announce")
+    assert not radicle.netsync_status(repo, "announce")["running"] and len(started) == 1
+
+
+def test_a_publish_is_one_push_and_splits_only_when_that_fails(tmp_path, monkeypatch):
+    """Radicle's helper spends ten seconds and more on each push before it sends anything: a publish made four."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    pushed, refuse = [], []
+
+    def rgit(repo, *args, **kw):
+        pushed.append(args[5:])
+        if len(args[5:]) > 1 and refuse:
+            raise radicle.RadError("missing necessary objects")
+    monkeypatch.setattr(radicle, "rgit", rgit)
+    monkeypatch.setattr(radicle, "publish_specs", lambda repo, who: ["refs/legion/pub/*:refs/legion/pub/b/*",
+                                                                    "p:p", ":q"])
+    monkeypatch.setattr(radicle, "main_spec", lambda repo: ["refs/legion/main:refs/heads/main"])
+    monkeypatch.setattr(radicle, "kick_announce", lambda repo: None)
+    radicle.publish(repo, "b")
+    assert pushed == [("+refs/legion/pub/*:refs/legion/pub/b/*", "+p:p", ":q", "refs/legion/main:refs/heads/main")]
+    pushed.clear()
+    refuse.append(1)
+    git(repo, "config", "--unset", "legion.published")
+    radicle.publish(repo, "b")                    # one patch it can't push: its own events still go out alone
+    assert pushed[1] == ("+refs/legion/pub/*:refs/legion/pub/b/*",) and ("+p:p",) in pushed and (":q",) in pushed
+    refused = radicle.RadError(" * [new reference]  refs/legion/pub/coord -> refs/legion/pub/b/coord\n"
+                               " ! [rejected]       refs/legion/main -> main (non-fast-forward)\n")
+    assert radicle.only_main_refused(refused)    # the node has a newer main: the rest went through, no second try
+    assert not radicle.only_main_refused(radicle.RadError(
+        str(refused) + " ! [remote rejected] p -> p (missing necessary objects)\n"))
+
+
 def test_a_publish_with_nothing_new_pushes_nothing(tmp_path, monkeypatch):
     """Read-only commands paid 10 s to push refs the node already had."""
     repo = tmp_path / "r"
@@ -239,6 +304,7 @@ def test_a_publish_with_nothing_new_pushes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "rgit", lambda repo, *args, **kw: pushes.append(args[0]))
     monkeypatch.setattr(radicle, "publish_main", lambda repo: None)
     monkeypatch.setattr(radicle, "node_patches", lambda repo: {})
+    monkeypatch.setattr(radicle, "kick_announce", lambda repo: None)
     radicle.publish(repo, "b")
     radicle.publish(repo, "b")
     assert pushes == ["push"]                                          # the second had nothing new

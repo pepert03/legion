@@ -820,6 +820,16 @@ class State:
             latest[w["author"]] = w
         return sorted(latest.values(), key=lambda w: -w["lamport"])
 
+    def superseded_saves(self) -> list[tuple[dict, dict]]:
+        """(save, the same author's latest on that open task) for every earlier save: once the latest holds the
+        earlier one's commit, nothing needs the earlier one's ref."""
+        out = []
+        for tid, ws in self.saved.items():
+            if not self.done(tid):
+                last = {w["author"]: w for w in ws}
+                out += [(w, last[w["author"]]) for w in ws if w is not last[w["author"]]]
+        return out
+
     def mentions(self, name: str) -> list[dict]:
         """Notes that name this agent (@ana#2, or @ana for all of ana's) and that it hasn't answered since:
         no later note of its own on that task."""

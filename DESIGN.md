@@ -217,7 +217,8 @@ be removed, and a removed integrator's later events stop counting).
   travels like any patch, with a `work.saved` event (commit, notes). It's not a patch: nobody judges
   it, and it changes nothing by itself. `claim` and `note` show each author's latest save, `start
   --from` merges it into the new branch, `release` and failed reports point out commits nobody saved,
-  and saves of finished tasks are pruned like judged patches. Work outgrows its task: what was saved on
+  and saves of finished tasks are pruned like judged patches, as are earlier saves that the same author's
+  later save contains (`start --from` still finds their commit). Work outgrows its task: what was saved on
   a broad one (a whole folder) may be what a narrower task, voted later, asks for. `claim` then lists
   the saves elsewhere that touch the task's zone, and `--from` brings in only those files, so the
   patch stays inside its zone.
@@ -328,6 +329,14 @@ be removed, and a removed integrator's later events stop counting).
     NID@HOST:PORT` on every node): public seeds are volunteers' machines, and the explicit fetch timed out
     waiting for them. A node that prefers the project's seed keeps a connection to it and fetches from it
     first.
+  - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper
+    going through every ref of the storage (24,000: every node kept every save and judged patch it ever saw,
+    670 refs each, of which some 70 were still of use), then 10 s waiting for the seeds to confirm, and a
+    publish made two to four pushes. Now an earlier save that the same author's later one contains is dropped
+    like a judged patch, and every node deletes from its namespace the refs it dropped; a publish is one push
+    (split as before only when it fails); a push doesn't wait for the seeds, a process of its own announces
+    (`legion netsync --announce`, one at a time); and a main the node refuses as older isn't offered again
+    until it moves.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its

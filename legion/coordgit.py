@@ -374,6 +374,15 @@ def update_main(repo, tip: str | None) -> bool:
     return moved
 
 
+def superseded(repo, pairs) -> set[str]:
+    """The refs of earlier saves whose commit the same author's later save contains: nothing is lost with them.
+    Each pair is looked at once; then its ref is among the dropped ones."""
+    from . import radicle
+    gone = radicle.judged(repo)
+    return {old["branch"] for old, new in pairs if old["branch"] not in gone and old["branch"] != new["branch"]
+            and has_commit(repo, new["commit"]) and is_ancestor(repo, old["commit"], new["commit"])}
+
+
 def prune_patches(repo, judged: set[str]) -> None:
     from . import radicle
     radicle.forget_judged(repo, {r for r in judged if r.startswith(PATCHES)})  # first, so no sync brings them back

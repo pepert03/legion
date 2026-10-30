@@ -640,6 +640,7 @@ def test_saved_work_is_kept_per_author_for_whoever_takes_the_task_next():
     st = log.state()
     assert [(w["name"], w["commit"], w["notes"]) for w in st.saves(tid)] == [("ana", "c2", "stage 2")]
     assert [w["id"] for w in st.saved[tid]][0] == first["id"]
+    assert [(old["commit"], new["commit"]) for old, new in st.superseded_saves()] == [("c1", "c2")]
     assert [err for _, err in st.ignored[-2:]] == [
         "only someone who works on the task, or has, may save work on it",
         "missing commit, or the branch is outside the patch namespace"]

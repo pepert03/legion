@@ -105,7 +105,8 @@ class Ctx:
                     except coordgit.GitError as e:
                         self._sync_failed(e)
             coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
-                                   | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws})
+                                   | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws}
+                                   | coordgit.superseded(self.repo, self.st.superseded_saves()))
             peers = coordgit.peers(self.repo)
             if "network" in self.unreachable:
                 print("legion: warning: the last fetch from the Radicle network (it runs in the background) "

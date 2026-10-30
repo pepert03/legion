@@ -479,6 +479,28 @@ def test_saved_work_lets_the_next_agent_carry_on(project, capsys):
     assert (repo / "a.txt").read_text() == "stage 1\n" and "luis" in capsys.readouterr().out
 
 
+def test_a_save_saved_again_drops_its_ref_and_can_still_be_built_on(project, capsys):
+    """Every save stayed published for good: 450 of the 670 patch refs each node held in Erdős #902."""
+    from legion.cli import main
+    repo, tids, patch = project
+    tid = tids["a"]
+    as_(repo, "luis")
+    main(["claim", tid])
+    main(["start", tid])
+    for text in ("stage 1\n", "stage 2\n"):
+        (repo / "a.txt").write_text(text)
+        git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", text.strip())
+        main(["save", tid])
+    first, second = Ctx(sync=False).st.saved[tid]
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/legion/patches/").split()
+    assert first["branch"] not in refs and second["branch"] in refs
+    git(repo, "checkout", "-q", "main")
+    as_(repo, "marta")
+    main(["claim", tid])
+    main(["start", tid, "--from", first["id"][:8]])                  # its commit is still there, in the later save
+    assert (repo / "a.txt").read_text() == "stage 1\n"
+
+
 def test_saved_work_on_another_task_brings_only_this_zone(project, capsys):
     """Work saved on a broad task (upper-constant) that a narrower task (one of its files) now asks for: whoever
     takes the narrow one is told, and `start --from` brings just its files, so the patch stays in its zone."""

@@ -2417,6 +2417,9 @@ def cmd_update(args):
 def cmd_netsync(args):
     """The background network fetch every command starts (see radicle.kick_network_sync); not for agents."""
     from . import radicle
+    if args.announce:
+        radicle.run_announce(repo_root())
+        return 0
     return 0 if radicle.run_network_sync(repo_root()) else 1
 
 
@@ -2526,6 +2529,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("update", help="update legion itself if a newer version is published")
     s.set_defaults(func=cmd_update)
     s = sub.add_parser("netsync", help=argparse.SUPPRESS)  # the background network fetch: not for agents
+    s.add_argument("--announce", action="store_true")  # or the announcement of what this node published
     s.set_defaults(func=cmd_netsync)
     s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")
     s.add_argument("--status", action="store_true", help="whether it runs, which clones it syncs, its latest log")

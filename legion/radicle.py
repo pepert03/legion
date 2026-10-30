@@ -483,24 +483,49 @@ def network_sync(repo, force: bool = False) -> bool:
 # explicit fetch, which catches up after the node was off, now runs in a process of its own, at most every
 # NETWORK_SYNC_EVERY seconds, and leaves its outcome in .git/legion-netsync.json for the next command to read.
 
-def _netsync_file(repo) -> Path:
+def _netsync_file(repo, name: str = "netsync") -> Path:
     git_dir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo, capture_output=True,
                              text=True).stdout.strip()
-    return Path(git_dir or Path(repo) / ".git") / "legion-netsync.json"
+    return Path(git_dir or Path(repo) / ".git") / f"legion-{name}.json"
 
 
-def netsync_status(repo) -> dict:
+def netsync_status(repo, name: str = "netsync") -> dict:
     try:
-        return json.loads(_netsync_file(repo).read_text(encoding="utf-8"))
+        return json.loads(_netsync_file(repo, name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def _write_netsync(repo, status: dict) -> None:
+def _write_netsync(repo, status: dict, name: str = "netsync") -> None:
     try:
-        _netsync_file(repo).write_text(json.dumps(status), encoding="utf-8")
+        _netsync_file(repo, name).write_text(json.dumps(status), encoding="utf-8")
     except OSError:
         pass
+
+
+# Nor do they wait for the seeds to take what they publish: a push that also syncs waited ten seconds for their
+# answer, twice per publish. The push only updates the node; telling the network runs in a process of its own,
+# one at a time, which goes again when more was published while it ran.
+
+def kick_announce(repo) -> None:
+    now, status = time.time(), netsync_status(repo, "announce")
+    if status.get("running") and now - status.get("started", 0) < 120:
+        _write_netsync(repo, dict(status, again=True), "announce")
+        return
+    _write_netsync(repo, {"started": now, "running": True}, "announce")
+    try:
+        spawn_detached([sys.executable, "-m", "legion", "netsync", "--announce"], repo)
+    except OSError:
+        _write_netsync(repo, {"started": now, "running": False}, "announce")
+
+
+def run_announce(repo) -> None:
+    while True:
+        run("rad", "sync", "--announce", rid(repo), "--timeout", "30sec", repo=repo, check=False, timeout=60)
+        if not netsync_status(repo, "announce").get("again"):
+            break
+        _write_netsync(repo, {"started": time.time(), "running": True}, "announce")
+    _write_netsync(repo, {"started": time.time(), "running": False}, "announce")
 
 
 def kick_network_sync(repo) -> bool:
@@ -663,7 +688,9 @@ PUSH_TIMEOUT = 600
 def publish_specs(repo, who: str) -> list[str]:
     """The refspecs that push this repository's legion refs under its identity's own prefix: its coord, and the
     patches the node doesn't hold yet as they are here. Pushing every patch again on every sync took minutes from
-    /mnt/c, longer than the push may take, so nothing went out at all."""
+    /mnt/c, longer than the push may take, so nothing went out at all. And the deletion of those the node holds
+    that were dropped here: every node kept every save and judged patch it ever saw, 24,000 refs in Erdős #902,
+    and Radicle's helper spent eleven seconds of each push going through them."""
     def listed(prefix):
         out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", prefix], cwd=repo,
                              capture_output=True, text=True).stdout
@@ -674,7 +701,8 @@ def publish_specs(repo, who: str) -> list[str]:
     # can still see a just-deleted ref file under /mnt/c, expand the pattern to it and fail the whole push.
     gone, held = judged(repo), node_patches(repo)
     return specs + [f"{ref}:{ref}" for ref, sha in listed("refs/legion/patches/").items()
-                    if ref not in gone and (held is None or held.get(ref) != sha)]
+                    if ref not in gone and (held is None or held.get(ref) != sha)] \
+        + [f":{ref}" for ref in held or () if ref in gone]
 
 
 def node_patches(repo) -> dict[str, str] | None:
@@ -695,16 +723,33 @@ def node_patches(repo) -> dict[str, str] | None:
     return {ref[cut:]: sha for sha, ref in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
 
 
-def publish_main(repo) -> None:
-    """Move the repository's ordinary `main` branch, the one Radicle's web and `rad clone` show, to the
-    official main. Without --force: it only moves forward, so a repository with an older view (another agent
-    sharing this node, say) can't drag it back, and a refused push is no error."""
+def main_spec(repo) -> list[str]:
+    """The refspec that moves the repository's ordinary `main` branch, the one Radicle's web and `rad clone`
+    show, to the official main, if it moved. Not forced: it only moves forward, so a repository with an older
+    view (another agent sharing this node, say) can't drag it back."""
     tip = subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/legion/main"], cwd=repo,
                          capture_output=True, text=True).stdout.strip()
     shown = subprocess.run(["git", "rev-parse", "-q", "--verify", "refs/remotes/rad/main"], cwd=repo,
                            capture_output=True, text=True).stdout.strip()
-    if tip and tip != shown:
-        rgit(repo, "push", "-q", "rad", "refs/legion/main:refs/heads/main", check=False, timeout=PUSH_TIMEOUT)
+    return ["refs/legion/main:refs/heads/main"] if tip and tip != shown else []
+
+
+def publish_main(repo) -> None:
+    """Push main_spec alone; a refused push is no error."""
+    for spec in main_spec(repo):
+        rgit(repo, "push", "-q", "-o", "no-sync", "rad", spec, check=False, timeout=PUSH_TIMEOUT)
+        main_offered(repo)
+
+
+def main_offered(repo) -> None:
+    """This main went to the node, or the node has a newer one: either way, not again until it moves. Refused,
+    it was offered again on every publish, in a push of its own that made the whole publish fail."""
+    subprocess.run(["git", "update-ref", "refs/remotes/rad/main", "refs/legion/main"], cwd=repo, capture_output=True)
+
+
+def only_main_refused(e: RadError) -> bool:
+    lines = [l for l in str(e).splitlines() if "rejected]" in l]
+    return len(lines) == 1 and "[rejected]" in lines[0] and "-> main " in lines[0]
 
 
 LOOSE_OBJECTS = 300
@@ -729,27 +774,44 @@ def publish(repo, who: str) -> None:
     if len(last) == 2 and last[0] == mark and time.time() - float(last[1]) < REPUBLISH_EVERY:
         return  # nothing new since the last push: a read-only command doesn't pay 10 s for it
     tidy(repo)
-    specs = publish_specs(repo, who)
-    # Its own coord first and alone: whatever happens to the patches, its events go out. Then the patches it
-    # gossips, in batches split in two on failure: one patch whose objects this clone lacks ("missing necessary
-    # objects") made every push fail, and with them every event of this node.
-    own = [s for s in specs if s.startswith("refs/legion/pub/")]
-    _push(repo, own, strict=True)
+    specs = [s if s.startswith(":") else "+" + s for s in publish_specs(repo, who)]
+    own = [s for s in specs if s.startswith("+refs/legion/pub/")]
     rest = [s for s in specs if s not in own]
-    for i in range(0, len(rest), 200):  # keeps the command line short with many patches
-        _push(repo, rest[i:i + 200], strict=False)
-    publish_main(repo)
+    main = main_spec(repo)
+    try:
+        # Everything in one push when it goes through: Radicle's helper spends ten seconds and more on each
+        # before it sends anything, and a publish made four.
+        if len(rest) > 200:
+            raise RadError("too many refspecs for one command line")
+        try:
+            _push(repo, own + rest + main, strict=True)
+        except RadError as e:
+            if not only_main_refused(e):  # the node has a newer main: the rest went through
+                raise
+        if main:
+            main_offered(repo)
+    except RadError as e:
+        if "timed out" in str(e):
+            raise
+        # Then its own coord first and alone: whatever happens to the patches, its events go out. Then the
+        # patches it gossips, in batches split in two on failure: one patch whose objects this clone lacks
+        # ("missing necessary objects") made every push fail, and with them every event of this node.
+        _push(repo, own, strict=True)
+        for i in range(0, len(rest), 200):  # keeps the command line short with many patches
+            _push(repo, rest[i:i + 200], strict=False)
+        publish_main(repo)
     subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
+    kick_announce(repo)
 
 
 def _push(repo, specs: list[str], strict: bool) -> None:
-    """Push these refspecs to the node. Not strict: a batch that fails is split in two until what fails is one
-    ref, which is left out (another node re-offers it)."""
+    """Push these refspecs (forced where they start with +) to the node. Not strict: a batch that fails is split
+    in two until what fails is one ref, which is left out (another node re-offers it)."""
     if not specs:
         return
     for attempt in range(3):
         try:
-            rgit(repo, "push", "-q", "--force", "rad", *specs, timeout=PUSH_TIMEOUT)
+            rgit(repo, "push", "-q", "-o", "no-sync", "rad", *specs, timeout=PUSH_TIMEOUT)
             return
         except RadError as e:
             if "cannot lock ref" in str(e) and attempt < 2:  # another clone pushing to the same node right now
