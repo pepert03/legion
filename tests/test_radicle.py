@@ -512,9 +512,15 @@ def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch)
     for f in (old, new, gc):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("")
-    os.utime(old, (0, 0))                                               # left long ago; the other one is in use
-    os.utime(gc, (0, 0))                                                # a long background gc may hold this one
+    held = Path(store) / "refs" / "held.lock"
+    held.write_text("")
+    for f in (old, gc, held):
+        os.utime(f, (0, 0))                                             # left long ago; `new` is in use
+    monkeypatch.setattr(daemon, "open_files", lambda: {str(held)})       # a paused writer still holds this one
+    monkeypatch.setenv("LEGION_LOCK_CLEANUP", "0")
+    assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # turned off
+    monkeypatch.delenv("LEGION_LOCK_CLEANUP")
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == [str(old)]
-    assert not old.exists() and new.exists() and gc.exists()
+    assert not old.exists() and new.exists() and gc.exists() and held.exists()
     os.utime(new, (0, 0))
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon

@@ -116,13 +116,50 @@ def sync_one(repo: str, log=print) -> bool:
 STALE_LOCK = 600  # seconds after which a lock file in the node's storage is a leftover, looked for this often
 
 
+def cleanup_enabled(repo) -> bool:
+    """LEGION_LOCK_CLEANUP=0, or git config legion.lockcleanup false, turns clear_stale_locks off."""
+    value = os.environ.get("LEGION_LOCK_CLEANUP")
+    if value is None:
+        value = coordgit.run(repo, "config", "--get", "legion.lockcleanup").stdout.decode().strip()
+    return value.lower() not in ("0", "false", "no", "off")
+
+
+def open_files() -> set[str] | None:
+    """The files some process on this machine holds open (Linux: /proc; elsewhere lsof), or None if it can't
+    tell: then nothing is removed."""
+    proc = Path("/proc")
+    if proc.is_dir():
+        held = set()
+        for fd in proc.glob("[0-9]*/fd/*"):
+            try:
+                held.add(os.readlink(fd))
+            except OSError:
+                pass
+        return held
+    import shutil
+    import subprocess
+    if shutil.which("lsof"):
+        out = subprocess.run(["lsof", "-Fn"], capture_output=True, text=True).stdout
+        return {line[1:] for line in out.splitlines() if line.startswith("n")}
+    return None
+
+
+# Removes what no process holds open and has been there STALE_LOCK seconds: a writer paused for longer still
+# holds its lock open, and on Windows a file another process holds open can't be removed at all.
+WSL_CLEAR = """held=$(ls -l /proc/[0-9]*/fd 2>/dev/null | sed -n 's/.* -> //p')
+{{ find "$1" -maxdepth 1 -name packed-refs.lock -mmin +$2; find "$1/refs" -name "*.lock" -mmin +$2; }} 2>/dev/null |
+while read -r f; do printf '%s\n' "$held" | grep -qxF "$f" || {{ rm -f "$f" && echo "$f"; }}; done"""
+
+
 def clear_stale_locks(repo, log=print) -> list[str]:
     """Remove the ref locks a Radicle node left in its storage when it was cut off mid-write (packed-refs.lock,
-    and any under refs/; not gc.log.lock, which a long background gc holds). With a stale
-    packed-refs.lock, every fetch that deleted a ref failed ("failed to delete reference"), and since nodes
-    drop judged patches and old saves they all do: a node in Erdős #902 saw nothing new for two hours. At most
-    every STALE_LOCK seconds per clone (.git/legion-locks-checked)."""
+    and any under refs/; not gc.log.lock, which a long background gc holds), when no process holds them open.
+    With a stale packed-refs.lock, every fetch that deleted a ref failed ("failed to delete reference"), and since
+    nodes drop judged patches and old saves they all do: a node in Erdős #902 saw nothing new for two hours. At
+    most every STALE_LOCK seconds per clone (.git/legion-locks-checked); off with LEGION_LOCK_CLEANUP=0."""
     from . import radicle
+    if not cleanup_enabled(repo):
+        return []
     stamp = Path(coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
                  or Path(repo) / ".git") / "legion-locks-checked"
     try:
@@ -134,16 +171,20 @@ def clear_stale_locks(repo, log=print) -> list[str]:
         stamp.touch()
         where = radicle.storage(repo)
         if radicle.IS_WINDOWS and not radicle.native(repo):  # the storage lives in WSL
-            minutes = STALE_LOCK // 60
-            out = radicle.run("sh", "-c", f'find "{where}" -maxdepth 1 -name packed-refs.lock -mmin +{minutes} -print -delete; '
-                              f'find "{where}/refs" -name "*.lock" -mmin +{minutes} -print -delete',
-                              repo=repo, check=False, timeout=120).stdout
+            out = radicle.run("sh", "-c", WSL_CLEAR.format(), "sh", where, str(STALE_LOCK // 60), repo=repo,
+                              check=False, timeout=120).stdout
             gone = out.split()
         else:
+            held = None if radicle.IS_WINDOWS else open_files()  # Windows refuses to remove an open file itself
+            if held is None and not radicle.IS_WINDOWS:
+                return []
             gone, now = [], time.time()
             for p in [*Path(where).glob("packed-refs.lock"), *Path(where, "refs").rglob("*.lock")]:
-                if now - p.stat().st_mtime > STALE_LOCK:
-                    p.unlink()
+                if now - p.stat().st_mtime > STALE_LOCK and str(p) not in (held or ()):
+                    try:
+                        p.unlink()
+                    except PermissionError:  # open in another process
+                        continue
                     gone.append(str(p))
     except (radicle.RadError, OSError):
         return []
