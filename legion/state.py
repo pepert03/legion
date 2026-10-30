@@ -55,6 +55,7 @@ MAX_BRIEF, MAX_QUESTION = 6000, 1000
 # IDEAS_WANTED are left, and for comparisons where ratings are thin. A task an agent let go of is offered to it again
 # once someone posts a new idea for it.
 MAX_IDEA, MAX_IDEAS_PER_DAY, ELO_START, ELO_K, IDEAS_WANTED = 1500, 10, 1200.0, 32.0, 3
+RIPE_COMPARED, RIPE_ANSWERS = 2, 2  # an idea judged this often, a question answered by this many owners: a path
 # The project's playbook: lessons distilled from what failed (how to work here, what wastes time, what to try
 # first), which context shows every agent. Whoever has worked here may rewrite it; claim asks for it once
 # PLAYBOOK_AFTER failures have piled up since its last version.
@@ -603,7 +604,7 @@ class State:
             if result is not None and (result not in self.tasks or self.tasks[result].kind != "result"):
                 return "a replication names a result"
             self.questions[ev["id"]] = {"ev": ev, "task": task.id, "result": result, "taken": [], "answers": [],
-                                        "status": "open"}
+                                        "status": "open", "paths": []}
             return None
         q = self.questions.get(ev.get("question"))
         if q is None or q["task"] != task.id:
@@ -644,7 +645,7 @@ class State:
             if not isinstance(frm, list) or not all(x in self.ideas and self.ideas[x]["task"] == task.id for x in frm):
                 return "an idea evolves from ideas on the same task"
             self.ideas[ev["id"]] = {"ev": ev, "task": task.id, "from": list(frm), "elo": ELO_START, "compared": 0,
-                                    "critiques": [], "tries": []}
+                                    "critiques": [], "tries": [], "paths": []}
             return None
         if ev["type"] == "idea.critiqued":
             idea, text = self.ideas.get(ev.get("idea")), ev.get("text")
@@ -672,10 +673,11 @@ class State:
         return None
 
     def idea_status(self, idea: dict) -> str:
-        """open (nobody tried it), tried (it failed, or got partway), worked (a report says it did)."""
+        """open (nobody tried it), tried (it failed, or got partway), worked (a report says it did), in a path
+        (proposed as subtasks; see route_to_open)."""
         if any(x.get("outcome") == "success" for x in idea["tries"]):
             return "worked"
-        return "tried" if idea["tries"] else "open"
+        return "tried" if idea["tries"] else "in a path" if idea["paths"] else "open"
 
     def ideas_for(self, tid: str) -> list[dict]:
         """A task's ideas, the best rated first."""
@@ -731,6 +733,30 @@ class State:
                 and sum(self.idea_status(i) == "open" and not self.dead(i) for i in self.ideas_for(t.id)) < IDEAS_WANTED
                 and not any(owner(i["ev"]["name"]) == me and now - i["ev"]["ts"] < COOLDOWN for i in self.ideas_for(t.id))]
         return min(want, key=lambda t: (not self.stalled(t.id), len(self.ideas_for(t.id)), t.lamport), default=None)
+
+    def route_to_open(self, name: str) -> tuple[Task, str, dict] | None:
+        """A stuck task with room for a path, and what to build it on: (task, "idea", its best open idea that
+        judgments put above the start and critiques haven't killed) or (task, "question", one that several owners
+        answered partway without settling: a lemma that deserves a task of its own). In Erdős #902 agents found no
+        task free while such ideas and questions waited in their lists. Each agent takes its own among the first
+        few, as with pairs to compare."""
+        me, found = owner(name), []
+        for t in self.tasks.values():
+            if (t.kind != "task" or not self.stalled(t.id) or len(self.open_paths(t.id)) >= MAX_OPEN_PATHS
+                    or any(owner(k.name) == me and k.verdict is None for k in self.paths_for(t.id))):
+                continue
+            best = next((i for i in self.ideas_for(t.id) if self.idea_status(i) == "open" and not self.dead(i)
+                         and i["compared"] >= RIPE_COMPARED and i["elo"] > ELO_START), None)
+            if best:
+                found.append(((0, -best["elo"], best["ev"]["lamport"]), t, "idea", best))
+            found += [((1, 0, q["ev"]["lamport"]), t, "question", q) for q in self.questions.values()
+                      if q["task"] == t.id and q["status"] == "open" and q["result"] is None and not q["paths"]
+                      and len({owner(a["name"]) for a in q["answers"]}) >= RIPE_ANSWERS]
+        if not found:
+            return None
+        found.sort(key=lambda f: f[0])
+        pick = int(hashlib.sha256(name.encode()).hexdigest(), 16) % min(len(found), 3)
+        return found[pick][1:]
 
     def needs_brief(self, author: str, now: float) -> Task | None:
         """A task whose state of the art is missing or behind its reports (three or more since its last
@@ -1400,9 +1426,19 @@ class State:
             err = self.check_children(task, ev.get("children"), path=True)
             if err:
                 return err
+            ideas, questions = ev.get("ideas", []), ev.get("questions", [])
+            if not isinstance(ideas, list) or not all(self.ideas.get(x, {}).get("task") == task.id for x in ideas):
+                return "a path builds on ideas on its own task"
+            if (not isinstance(questions, list)
+                    or not all(self.questions.get(x, {}).get("task") == task.id for x in questions)):
+                return "a path builds on questions on its own task"
             self.sketches[ev["id"]] = Sketch(ev["id"], task.id, ev["author"], ev["name"], ev["children"],
                                              ev.get("commit") or "", ev.get("branch") or "", ev["lamport"], notes,
                                              kind="path")
+            for x in ideas:
+                self.ideas[x]["paths"].append(ev["id"])
+            for x in questions:
+                self.questions[x]["paths"].append(ev["id"])
         elif t == "task.resolved":
             k = self.sketches.get(ev.get("sketch"))
             if not k or k.task != task.id or k not in self.ready_to_resolve():

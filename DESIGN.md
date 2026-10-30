@@ -342,6 +342,21 @@ be removed, and a removed integrator's later events stop counting).
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
     subagent's without a word (now `vote` says so), and saves refused over files the branch holds exactly as main
     does, or that the patches it was built on bring.
+  - *Too few tasks open*: rated ideas and partly answered questions waited in their lists while agents found no
+    task free. On a stuck task with room for a path, claim now hands out (exit code 7, right after a question
+    to settle) its best open idea, judged at least twice and rated above the start, or a question that two
+    owners or more answered without settling, to turn into a path; `path --ideas/--questions` records what it
+    builds on, and those ideas show as "in a path" and aren't handed out again. Each agent takes its own among
+    the first three.
+  - *Agents stopping between batches*: a session or a turn ended, and the agent waited for its person.
+    `legion run -- <agent command>` runs it again each time it stops, until claim would say it's done (exit
+    code 4); a run that ends within two minutes (out of tokens, failing to start) waits a minute, then twice as
+    long each time, up to half an hour.
+  - *Slow Lean builds*: AGENTS.md asks for small files (a change rebuilds its file and every file importing
+    it) and explicit proofs instead of searching tactics (`simp only`, `linarith` with its facts). Lake's
+    machine-wide artifact cache (`LAKE_ARTIFACT_CACHE`, `LAKE_RESTORE_ARTIFACTS`) would let the clones and
+    review folders of a machine share their builds, but tried on Erdős #902 (Lean 4.33.1, Windows) its builds
+    failed with "failed to cache artifact: no such file or directory", so legion doesn't set it.
 - **Ideas, rated, and a playbook.** The research systems that make discoveries keep hypotheses as objects and
   rank them by pairwise judgments (Google's AI co-scientist: generation, reflection, an Elo tournament,
   evolution; AlphaProof Nexus: a pool of proof sketches ranked by rater agents; AlphaEvolve: a population
@@ -349,9 +364,9 @@ be removed, and a removed integrator's later events stop counting).
   (`from`); agents of owners other than its authors compare two at a time (`idea.compared`, Elo from 1200,
   K = 32), anyone critiques one (`idea.critiqued`), and a report names the idea it tried. claim shows a task's
   untried ideas, best rated first, and a task an agent let go of comes back to it when a new idea appears.
-  When no task is free, claim hands out the research work most wanted (exit code 7): a question, a pair of
-  ideas to judge, new routes where fewer than three untried ones are left, a state of the art three reports
-  behind, or the playbook. The playbook (`playbook.updated`) holds the project's lessons distilled from its
+  When no task is free, claim hands out the research work most wanted (exit code 7): a question, a ripe idea
+  or question to turn into a path on a stuck task, a pair of ideas to judge, new routes where fewer than three
+  untried ones are left, a state of the art three reports behind, or the playbook. The playbook (`playbook.updated`) holds the project's lessons distilled from its
   failures, and context shows it: AutoformBot's trace analyzer, which turned failures into shared guides,
   was worth 77% against 57% of targets in its ablation.
 - **Research below the size of a task.** On Erdős #902 the open tasks are research problems, and the loop

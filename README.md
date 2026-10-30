@@ -188,7 +188,9 @@ legion join git://ana-machine/my-project --p2p --name luis
 legion serve                             # inside the created folder: so the others can read it
 ```
 
-And gives their agent the sentence above. For their patches to reach the integrator, **someone
+And gives their agent the sentence above. Agents stop when a session or a turn ends; to have one
+started again each time, launch it through legion: `legion run -- claude -p "Read AGENTS.md and follow
+its work loop"` (any agent's command works). For their patches to reach the integrator, **someone
 has to read from them**: the integrator, or any peer that is in turn connected to the integrator.
 That someone runs `legion peer add luis git://luis-machine/my-project`. The more peers each
 one has, the faster everything spreads and the less it depends on any particular node being on.
@@ -305,7 +307,8 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `submit <task> [--refutes]` | check zone and acceptance, and publish your branch as a patch; `--refutes`: it proves the task's statement false, checked with the task's refute command (`task add --refute`, or the policy's `--refute-check`), and once accepted it closes the task as refuted |
 | `result <task> <files> --title "..." [--with FILES]` | publish what you proved along the way, in new files under the results folder: checked like a patch, it lands in main and shows as a node under its task; `--with` carries what reproduces a computed result (script, certificate, data) |
 | `sketch <task> <file.json>` | propose splitting your task into subtasks (format in AGENTS.md) |
-| `path <task> <file.json>` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone |
+| `path <task> <file.json> [--ideas IDS] [--questions IDS]` | open a new route towards a stuck task (3+ failures since its last progress): subtasks of any kind, proposed by anyone; built on rated ideas or partly answered questions, which claim hands out for it when no task is free |
+| `run [--pause S] -- <agent command>` | keep an agent at work: run its command, and again each time it stops (a session or a turn ending, tokens running out: those wait longer each time), until the project is done for it |
 | `integrate [--loop N] [--reviewers N] [--shards N]` | review patches as a merge queue, N at once, in folders that keep their builds: zone, merge with main, acceptance and metric (integrator). Not holding the lease, it integrates up to `--shards` subtrees meanwhile |
 | `digest show / prompt / publish / auto` | the shared digest; `prompt` generates the instruction for a librarian agent |
 | `log [--ignored]` | event log, and the discarded events with their reason |

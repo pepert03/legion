@@ -281,6 +281,30 @@ def test_paths_work_on_competitive_tasks_and_are_limited():
     assert "paths under way" in st.ignored[-1][1]
 
 
+def test_ripe_ideas_and_questions_on_a_stuck_task_are_handed_out_to_become_paths():
+    """Ideas the agents rated and questions several owners answered waited in their lists while nobody found a
+    task free: on a stuck task, they're turned into subtasks."""
+    log, tid = stuck_project()
+    a = log.add(ANA, "idea.proposed", task=tid, text="Induction on the number of points")
+    b = log.add(CEL, "idea.proposed", task=tid, text="A weaker statement first")
+    assert log.state().route_to_open("dan") is None                         # nobody has judged them yet
+    log.add(DAN, "idea.compared", task=tid, better=a["id"], worse=b["id"], why="induction has a base case")
+    log.add(BEA, "idea.compared", task=tid, better=a["id"], worse=b["id"], why="the weaker one is vacuous")
+    q = log.add(ANA, "question.asked", task=tid, text="Does the bound hold at n = 7?")
+    for who in (BEA, CEL):
+        log.add(who, "question.answered", task=tid, question=q["id"], text="partway: the cases with a triangle")
+    st = log.state()
+    found = {(kind, x["ev"]["id"]) for kind, x in (st.route_to_open(f"dan#{n}")[1:] for n in range(1, 12))}
+    assert found == {("idea", a["id"]), ("question", q["id"])}             # each agent takes one of them
+    log.add(DAN, "path.proposed", task=tid, children=[CHILD], notes="induction, base case first",
+            ideas=[a["id"]], questions=[q["id"]])
+    log.add(DAN, "path.proposed", task=tid, children=[CHILD], notes="x", ideas=["nope"])
+    st = log.state()
+    assert st.ignored[-1][1] == "a path builds on ideas on its own task"
+    assert st.idea_status(st.ideas[a["id"]]) == "in a path" and st.questions[q["id"]]["paths"]
+    assert st.route_to_open("eve") is None                                  # both are in a path now
+
+
 def test_a_path_needs_notes_and_the_usual_subtask_rules():
     log, tid = stuck_project()
     log.add(BEA, "path.proposed", task=tid, children=[CHILD], notes="")
@@ -1095,3 +1119,19 @@ def test_a_refuted_route_of_a_path_no_longer_holds_its_place():
     log.add(BOSS, "patch.accepted", patch=p["id"])
     st = log.state()
     assert st.open_paths(tid) == [] and st.status(tid, 1001) == "claimed"  # the task itself goes on
+
+
+def test_claim_hands_out_a_ripe_idea_as_a_path_to_propose(capsys):
+    from types import SimpleNamespace
+    from legion import cli
+    log, tid = stuck_project()
+    a = log.add(ANA, "idea.proposed", task=tid, text="Induction on the number of points")
+    b = log.add(CEL, "idea.proposed", task=tid, text="A weaker statement first")
+    for who in (DAN, BEA):
+        log.add(who, "idea.compared", task=tid, better=a["id"], worse=b["id"], why="induction has a base case")
+    st = log.state()
+    eve = Identity.generate("eve")
+    c = SimpleNamespace(st=st, me=eve.author, ident=eve)
+    assert cli.research_work(c, SimpleNamespace(json=False), 1001) == 7
+    out = capsys.readouterr().out
+    assert "research work instead (path)" in out and f"--ideas {a['id'][:8]}" in out

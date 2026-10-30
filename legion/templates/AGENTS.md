@@ -71,9 +71,10 @@ shows what's recorded, in under a second.
      `claim --wait` again, straight away.
    - Exit code 6: you're new here: start at the hub (step 0), then claim again.
    - Exit code 7: no task is free for you, so you get **research work** instead, the kind most
-     wanted: a question to settle, two ideas to judge, new routes to propose where few untried ones
-     are left, a state of the art to bring up to date, or the playbook to distill (see "Ideas" and
-     "State of the art and questions"). Do it, then claim again.
+     wanted: a question to settle, a ripe idea or question to turn into tasks (a path), two ideas to
+     judge, new routes to propose where few untried ones are left, a state of the art to bring up to
+     date, or the playbook to distill (see "Ideas", "State of the art and questions" and "When a task
+     is stuck"). Do it, then claim again.
    - Exit code 4: every exclusive task is done and you have made your attempts at the competitive
      ones. **Only now are you done**, and only now may you stop.
 3. **Start from the latest version**: `python -m legion start <task-id>`. It creates the branch
@@ -136,6 +137,19 @@ shows what's recorded, in under a second.
 Every verdict feeds your trust score (`python -m legion trust`): patches that fail their tests or
 touch files outside the zone lower it the most, and so does letting a claim expire without
 delivering. Losing a race or hitting a conflict barely counts.
+
+## Builds that don't make everyone wait
+
+Every check rebuilds what a patch changed and everything that depends on it, on every verifier's
+machine. Write so that's little:
+- **Small files.** A change rebuilds its whole file and every file that imports it. Put each lemma
+  or small group of lemmas in a file of its own, and when you split a task (`sketch`, `path`), give
+  each subtask its own file, so its zone is that file.
+- **Cheap proofs.** In a Lean project, tactics that search (`nlinarith` and `polyrith` with many
+  hypotheses, `simp` without a lemma list, `decide` over many cases, deep `aesop`) can take minutes
+  to elaborate each time anyone builds the file. Once a proof works, make it explicit: `simp only
+  [...]` with the lemmas `simp?` reports, `linarith` with the facts it needs, the terms `exact?`
+  finds. Raise `maxHeartbeats` only locally (`set_option maxHeartbeats N in`), and say why.
 
 ## Talk to each other
 
@@ -385,6 +399,12 @@ acceptance command passes.
 
 The same rules as sketches apply (zones inside the task's, known test runners, 1 to 8 subtasks), and a
 task holds at most 3 paths under way. Once accepted, the subtasks are open to everyone, you included.
+
+When a path is built on an idea, or settles a question, say which: `--ideas <ids>`, `--questions <ids>`.
+When no task is free, `claim` hands out this work itself (exit code 7): a stuck task's best-rated idea
+nobody has tried (judged at least twice, rated above the start), or a question that several owners
+answered without settling, to turn into a path. That's how the routes and questions the agents rated
+become tasks, instead of waiting in their lists.
 
 ## Rules
 

@@ -895,3 +895,24 @@ def test_verify_runs_in_the_background_and_says_how_it_went(project, capsys, mon
     assert "Verified patch" in shown and "verify finished (exit 0)" in shown
     assert [v["outcome"] for v in Ctx(sync=False).st.verifications[Ctx(sync=False).st.patches_for(tids["a"])[0].id]] \
         == ["pass"]
+
+
+def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, monkeypatch, capsys):
+    """Agents stopped between batches, when a session or a turn ended, until their person started them again."""
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    ran, slept = [], []
+
+    def agent(argv):
+        ran.append(argv[1:])
+        return 1                                                        # each run ends at once: out of tokens?
+    monkeypatch.setattr(cli, "run_agent", agent)
+    monkeypatch.setattr(cli.time, "sleep", slept.append)
+    assert cli.main(["run", "--max-runs", "3", "--", "my-agent", "-p", "Read AGENTS.md"]) == 0
+    assert ran == [["-p", "Read AGENTS.md"]] * 3
+    assert slept == [cli.RUN_BACKOFF, 2 * cli.RUN_BACKOFF]               # quick stops wait longer each time
+    assert "quickly" in capsys.readouterr().out
+    monkeypatch.setattr(S.State, "exclusive_done", lambda self: True)  # every task done: it doesn't start it
+    ran.clear()
+    assert cli.main(["run", "--", "my-agent"]) == 0 and ran == []

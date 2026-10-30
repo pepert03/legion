@@ -1570,12 +1570,26 @@ def find_question(c: Ctx, ref: str) -> dict:
 
 def research_work(c: Ctx, args, now: float) -> int | None:
     """No task free for this agent: the research work most wanted instead (claim's exit code 7), in this order:
-    a question to settle; two ideas to judge; new routes where few untried ones are left; a state of the art behind
-    its reports; the playbook, once failures have piled up. None if there's none."""
+    a question to settle; a ripe idea or question to turn into tasks; two ideas to judge; new routes where few
+    untried ones are left; a state of the art behind its reports; the playbook, once failures have piled up.
+    None if there's none."""
     st, name = c.st, c.ident.name
     q = st.question_for(c.me, name, now)
     if q:
         return hand_question(c, args, q)
+    route = st.route_to_open(name)
+    if route:
+        t, kind, x = route
+        why = (f"its best-rated route nobody has tried yet:\n\n  {idea_line(st, x, None)}\n\nTurn it into tasks"
+               if kind == "idea" else
+               f"this question on it has answers from several owners, but none settles it: a lemma that deserves "
+               f"a task of its own.\n\n{question_line(st, x, None)}\n\nTurn it into a task")
+        return hand_work(c, args, "path", t, f"{t.key} is stuck ({st.failures_since_progress(t.id)} failures since "
+                         f"it last advanced), and here is {why}: a path, with the subtasks it takes (statements to "
+                         "prove and their tests, each small enough for one agent; see \"When a task is stuck\" in "
+                         "AGENTS.md). "
+                         f"Propose it with `python -m legion path {t.id} FILE --{kind}s {x['ev']['id'][:8]}`. Once "
+                         "it's accepted they are tasks anyone can claim.")
     pair = st.pair_to_compare(name)
     if pair:
         a, b = pair
@@ -2079,6 +2093,10 @@ def cmd_path(args):
     err = c.st.check_children(t, children, path=True)
     if err:
         raise Fail(f"invalid path: {err}", 5)
+    ideas = [find_idea(c, x)["ev"]["id"] for x in args.ideas]
+    questions = [find_question(c, x)["ev"]["id"] for x in args.questions]
+    if any(c.st.ideas[x]["task"] != t.id for x in ideas) or any(c.st.questions[x]["task"] != t.id for x in questions):
+        raise Fail(f"a path builds on ideas and questions on {t.key} itself", 5)
     repo = c.repo
     coordgit.refresh_base(repo)
     main = coordgit.base_ref(repo)
@@ -2097,7 +2115,8 @@ def cmd_path(args):
         branch = coordgit.patch_branch(repo, t.id, c.ident.short, f"p{n}")
         coordgit.publish_patch(repo, branch)
         commit = git(repo, "rev-parse", "HEAD")
-    ev = c.emit("path.proposed", task=t.id, children=children, notes=notes, commit=commit, branch=branch)
+    ev = c.emit("path.proposed", task=t.id, children=children, notes=notes, commit=commit, branch=branch,
+                **({"ideas": ideas} if ideas else {}), **({"questions": questions} if questions else {}))
     c.sync()
     keys = ", ".join(f"{t.key}/{ch['key']}" for ch in children)
     out(args, {"path": ev["id"], "branch": branch},
@@ -2437,6 +2456,51 @@ def cmd_daemon(args):
     return 0
 
 
+RUN_QUICK, RUN_BACKOFF, RUN_MAX_WAIT = 120, 60, 1800  # seconds: a run this short failed; its waits double to this
+
+
+def run_agent(argv: list[str]) -> int:
+    return subprocess.run(argv).returncode
+
+
+def cmd_run(args):
+    """Keep an agent at work: run its command, and run it again each time it stops, until the project is done
+    for it (what claim's exit code 4 says). In Erdős #902 agents stopped between batches, when a session or a
+    turn ended, until their person noticed and started them again. A run that ends within RUN_QUICK seconds
+    (out of tokens, failing to start) waits longer each time, up to RUN_MAX_WAIT."""
+    import shutil
+    cmd = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not cmd:
+        raise Fail("say how your agent runs: `python -m legion run -- <command>`, e.g. `python -m legion run -- "
+                   "claude -p \"Read AGENTS.md and follow its work loop\"`", 2)
+    exe, runs, quick = shutil.which(cmd[0]) or cmd[0], 0, 0
+    while True:
+        c = Ctx()
+        if c.st.exclusive_done() and not c.st.competitive_for(c.me):
+            print("legion run: every exclusive task is done and the competitive ones have had your attempts: done.")
+            return 0
+        print(f"legion run: {time.strftime('%H:%M:%S')} starting the agent (run {runs + 1})", flush=True)
+        started = time.time()
+        try:
+            code = run_agent([exe, *cmd[1:]])
+        except FileNotFoundError:
+            raise Fail(f"couldn't run {cmd[0]}: is it installed, and on the PATH?", 2)
+        except KeyboardInterrupt:
+            return 130
+        runs, took = runs + 1, time.time() - started
+        if args.max_runs and runs >= args.max_runs:
+            return 0
+        quick = quick + 1 if took < RUN_QUICK else 0
+        wait = min(RUN_MAX_WAIT, RUN_BACKOFF * 2 ** (quick - 1)) if quick else args.pause
+        print(f"legion run: the agent stopped after {took / 60:.1f} min (exit code {code})"
+              + (" quickly: out of tokens, or failing to start?" if quick else "")
+              + f" It runs again in {wait:.0f} s (Ctrl-C ends this).", flush=True)
+        try:
+            time.sleep(wait)
+        except KeyboardInterrupt:
+            return 130
+
+
 REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without its own, with {key}, {accept} or {arg} "
                      "(the acceptance command's last word), e.g. 'python check.py --refute {arg}'")
 MAX_SHARED_HELP = f"how many agents may work on one task at once (default {S.MAX_SHARED})"
@@ -2534,6 +2598,13 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")
     s.add_argument("--status", action="store_true", help="whether it runs, which clones it syncs, its latest log")
     s.set_defaults(func=cmd_daemon)
+
+    s = sub.add_parser("run", help="keep an agent at work: run its command again each time it stops, until the "
+                                   "project is done for it")
+    s.add_argument("--pause", type=float, default=30, help="seconds between one run and the next (default 30)")
+    s.add_argument("--max-runs", type=int, default=0, help="stop after this many runs (default: no limit)")
+    s.add_argument("command", nargs=argparse.REMAINDER, help="-- and the command that runs your agent")
+    s.set_defaults(func=cmd_run)
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")
@@ -2815,6 +2886,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("path", help="open a new route towards a stuck task: subtasks of any kind (anyone may)")
     s.add_argument("task")
     s.add_argument("file", help="JSON with notes (why this route) and the subtasks (see AGENTS.md)")
+    s.add_argument("--ideas", nargs="+", default=[], metavar="IDEA", help="the ideas on the task it turns into subtasks")
+    s.add_argument("--questions", nargs="+", default=[], metavar="QUESTION",
+                   help="the questions on the task its subtasks settle")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_path)
 
