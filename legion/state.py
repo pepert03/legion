@@ -670,8 +670,11 @@ class State:
             return "this owner compared those two already"
         if not isinstance(why, str) or not why.strip() or len(why) > E.MAX_NOTES:
             return f"a comparison says why, in at most {E.MAX_NOTES} characters"
+        if not isinstance(ev.get("tie", False), bool):
+            return "tie is true or false"
         self.compared.add((me, pair))
-        gain = ELO_K * (1 - 1 / (1 + 10 ** ((b["elo"] - a["elo"]) / 400)))
+        # A tie (the same route twice, or no way to tell): Elo's draw, which pulls the two ratings together.
+        gain = ELO_K * ((0.5 if ev.get("tie") else 1) - 1 / (1 + 10 ** ((b["elo"] - a["elo"]) / 400)))
         a["elo"], b["elo"] = a["elo"] + gain, b["elo"] - gain
         a["compared"], b["compared"] = a["compared"] + 1, b["compared"] + 1
         return None
@@ -711,6 +714,8 @@ class State:
                     a, b = pool[x], pool[y]
                     if (me, frozenset((a["ev"]["id"], b["ev"]["id"]))) in self.compared:
                         continue
+                    if " ".join(a["ev"]["text"].split()).lower() == " ".join(b["ev"]["text"].split()).lower():
+                        continue  # the same text twice: nothing to judge (an agent was handed such a pair again and again)
                     found.append(((a["compared"] + b["compared"], abs(a["elo"] - b["elo"]), a["ev"]["lamport"],
                                    b["ev"]["lamport"]), a, b))
         if not found:

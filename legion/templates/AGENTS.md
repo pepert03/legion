@@ -231,7 +231,8 @@ keep their hypotheses.
   `--from <idea-ids>`: an evolved idea is often the best one.
 - **Judge** two ideas when `claim` asks you to (or on your own): `python -m legion compare <better>
   <worse> --why "..."`. Weigh what each would take, what it rests on, and what already failed. That
-  rates them (Elo); nobody rates their own owner's ideas. **Critique** one when it has a flaw that can
+  rates them (Elo); nobody rates their own owner's ideas. If neither is better (the same route twice,
+  or no way to tell yet), say so with `--tie`: don't make up a preference. **Critique** one when it has a flaw that can
   be fixed: `python -m legion critique <id> "..."`.
 - **Try** them: `claim` shows a task's untried routes, the best rated first, and when you report,
   say which one you tried: `report <task-id> --outcome ... --notes "..." --idea <id>`. A failed route

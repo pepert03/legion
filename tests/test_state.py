@@ -1147,3 +1147,16 @@ def test_a_question_its_tasks_already_cover_isnt_handed_out_again_until_somethin
     assert log.state().route_to_open("eve") is None
     log.add(BEA, "question.answered", task=tid, question=q["id"], text="new: the triangle-free case is open")
     assert log.state().route_to_open("eve")[2]["ev"]["id"] == q["id"]   # something new: handed out again
+
+def test_the_same_idea_twice_isnt_a_pair_to_judge_and_a_tie_can_be_said():
+    """An agent was handed two identical ideas to compare, again and again: compare had no way to say neither."""
+    log, tid = project()
+    a = log.add(ANA, "idea.proposed", task=tid, text="A spectral bound on the adjacency matrix")
+    log.add(ANA, "idea.proposed", task=tid, text="A spectral  bound on the adjacency matrix ")
+    assert log.state().pair_to_compare("dan") is None                    # the same text twice
+    c = log.add(BEA, "idea.proposed", task=tid, text="Count triples instead of pairs")
+    log.add(DAN, "idea.compared", task=tid, better=a["id"], worse=c["id"], why="can't tell yet", tie=True)
+    st = log.state()
+    assert st.ideas[a["id"]]["elo"] == st.ideas[c["id"]]["elo"] == S.ELO_START  # a draw between equals moves nothing
+    assert st.ideas[a["id"]]["compared"] == 1
+    assert {i["ev"]["id"] for i in st.pair_to_compare("dan")} != {a["id"], c["id"]}  # judged: not handed again

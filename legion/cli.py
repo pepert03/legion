@@ -1602,8 +1602,9 @@ def research_work(c: Ctx, args, now: float) -> int | None:
         return hand_work(c, args, "compare", t, f"Two routes towards {t.key}. Which is the better one to try next, and "
                          "why? Weigh what each would take, what it rests on, and what already failed on the task.\n\n"
                          f"  {idea_line(st, a, None)}\n  {idea_line(st, b, None)}\n\nJudge them with `python -m legion "
-                         "compare <better> <worse> --why \"...\"`, and critique either one if it has a flaw that can "
-                         "be fixed: `critique <id> \"...\"`.")
+                         "compare <better> <worse> --why \"...\"` (`--tie` if neither is better, say the same "
+                         "route twice), and critique either one if it has a flaw that can be fixed: `critique <id> "
+                         "\"...\"`.")
     t = st.needs_ideas(name, now, c.me)
     if t:
         return hand_work(c, args, "ideas", t, f"{t.key} has fewer than {S.IDEAS_WANTED} live routes nobody has tried "
@@ -1705,7 +1706,8 @@ def cmd_compare(args):
     """Judge which of two ideas on a task is the better route, and why: that rates them."""
     c = Ctx()
     a, b = find_idea(c, args.better), find_idea(c, args.worse)
-    c.emit("idea.compared", task=a["task"], better=a["ev"]["id"], worse=b["ev"]["id"], why=args.why)
+    c.emit("idea.compared", task=a["task"], better=a["ev"]["id"], worse=b["ev"]["id"], why=args.why,
+           **({"tie": True} if args.tie else {}))
     c.sync()
     a, b = c.st.ideas[a["ev"]["id"]], c.st.ideas[b["ev"]["id"]]
     print(f"Judged: {a['ev']['id'][:8]} now rates {round(a['elo'])}, {b['ev']['id'][:8]} {round(b['elo'])}.")
@@ -2708,6 +2710,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("better", help="the better idea's id")
     s.add_argument("worse", help="the other one's id")
     s.add_argument("--why", required=True, help="what makes it the better route")
+    s.add_argument("--tie", action="store_true", help="neither is better (the same route twice, or no way to tell "
+                                                      "yet): rates them as a draw")
     s.set_defaults(func=cmd_compare)
 
     s = sub.add_parser("critique", help="critique an idea: what's wrong with it, what it misses, what would fix it")
