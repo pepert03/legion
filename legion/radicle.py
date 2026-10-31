@@ -722,6 +722,8 @@ def wait_published(repo, seconds: float) -> bool:
 def run_publish(repo) -> None:
     from .coordgit import publish_radicle
     from .identity import Identity
+    global ANNOUNCE_INLINE
+    ANNOUNCE_INLINE = True
     ident = Identity.load(repo=repo)
     if ident is not None:
         _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
@@ -969,6 +971,9 @@ def tidy(repo) -> None:
 
 
 BIG_PUBLISH = 20  # more refspecs than this besides its own coord: the coord goes out first, alone
+# Set by the process a command waits for (run_publish): its push announces too, as pushes did before the
+# announcement went to a process of its own, which sandboxes that kill background processes killed as well.
+ANNOUNCE_INLINE = False
 
 
 def publish(repo, who: str) -> None:
@@ -991,7 +996,7 @@ def publish(repo, who: str) -> None:
         if len(rest) > BIG_PUBLISH:
             raise RadError("too much for one push")
         try:
-            _push(repo, own + rest + main, strict=True)
+            _push(repo, own + rest + main, strict=True, sync=ANNOUNCE_INLINE)
         except RadError as e:
             if not only_main_refused(e):  # the node has a newer main: the rest went through
                 raise
@@ -1003,22 +1008,24 @@ def publish(repo, who: str) -> None:
         # Then its own coord first and alone: whatever happens to the patches, its events go out. Then the
         # patches it gossips, in batches split in two on failure: one patch whose objects this clone lacks
         # ("missing necessary objects") made every push fail, and with them every event of this node.
-        _push(repo, own, strict=True)
+        _push(repo, own, strict=True, sync=ANNOUNCE_INLINE)
         for i in range(0, len(rest), 200):  # keeps the command line short with many patches
             _push(repo, rest[i:i + 200], strict=False)
         publish_main(repo)
     subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
-    kick_announce(repo)
+    if not ANNOUNCE_INLINE:
+        kick_announce(repo)
 
 
-def _push(repo, specs: list[str], strict: bool) -> None:
-    """Push these refspecs (forced where they start with +) to the node. Not strict: a batch that fails is split
-    in two until what fails is one ref, which is left out (another node re-offers it)."""
+def _push(repo, specs: list[str], strict: bool, sync: bool = False) -> None:
+    """Push these refspecs (forced where they start with +) to the node; with `sync`, Radicle's helper also
+    announces them and waits for the seeds (see ANNOUNCE_INLINE). Not strict: a batch that fails is split in two
+    until what fails is one ref, which is left out (another node re-offers it)."""
     if not specs:
         return
     for attempt in range(3):
         try:
-            rgit(repo, "push", "-q", "-o", "no-sync", "rad", *specs, timeout=PUSH_TIMEOUT)
+            rgit(repo, "push", "-q", *([] if sync else ["-o", "no-sync"]), "rad", *specs, timeout=PUSH_TIMEOUT)
             return
         except RadError as e:
             if "cannot lock ref" in str(e) and attempt < 2:  # another clone pushing to the same node right now

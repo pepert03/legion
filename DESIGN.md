@@ -409,6 +409,9 @@ be removed, and a removed integrator's later events stop counting).
     A sandbox started anew numbers its processes from low again, so a dead push's pid was soon another
     process's, and taken for the push still running: on Linux a pid counts only if its command line names
     legion (the sync process: `daemon`).
+    And the announcement, also left to a process of its own, died there too: pushed, the events stayed in the
+    node, and no seed heard of them. The push a command waits for (run_publish) announces itself, as every
+    push did before (ANNOUNCE_INLINE); a sync process that stays still announces apart.
   - *Renamed agents*: instinct's six agents, named -a to -f, became instinct-pepe#1 to #6 to count as one
     owner, but their earlier ideas kept the old names, and one was handed its own idea to judge. Whose an
     idea or critique is goes by its author's key, named as it is now (`owner_now`).

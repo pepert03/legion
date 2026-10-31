@@ -588,3 +588,19 @@ def test_a_sync_process_the_sandbox_killed_isnt_taken_for_alive_by_its_fresh_bea
     assert daemon.alive()
     monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": False)       # killed a moment ago
     assert not daemon.alive()
+
+def test_the_push_a_command_waits_for_announces_too(tmp_path, monkeypatch):
+    """The announcement went to a process of its own, which sandboxes killed as well: pushed, never announced."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    pushed, kicked = [], []
+    monkeypatch.setattr(radicle, "rgit", lambda repo, *args, **kw: pushed.append(args))
+    monkeypatch.setattr(radicle, "publish_specs", lambda repo, who: ["refs/legion/pub/*:refs/legion/pub/b/*"])
+    monkeypatch.setattr(radicle, "main_spec", lambda repo: [])
+    monkeypatch.setattr(radicle, "kick_announce", lambda repo: kicked.append(1))
+    radicle.publish(repo, "b")
+    assert "no-sync" in pushed[-1] and kicked == [1]                    # a sync process stays: it announces apart
+    monkeypatch.setattr(radicle, "ANNOUNCE_INLINE", True)
+    git(repo, "config", "--unset", "legion.published")
+    radicle.publish(repo, "b")
+    assert "no-sync" not in pushed[-1] and kicked == [1]                # the push announces, nothing apart
