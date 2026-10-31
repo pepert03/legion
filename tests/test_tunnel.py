@@ -517,3 +517,69 @@ def test_nat_pmp_maps_only_behind_a_router_whose_own_address_is_public(monkeypat
     assert reach.natpmp_map("192.168.86.1", 8776) == "81.0.0.1:8776"
     Router.external = "192.168.0.29"  # this PC's: a router behind another NAT
     assert reach.natpmp_map("192.168.86.1", 8776) is None
+
+
+SEED = "z6Mk" + "s" * 44
+
+
+def on_windows(monkeypatch):
+    monkeypatch.setattr(tunnel, "IS_WINDOWS", True)
+    monkeypatch.setattr(radicle, "native", lambda repo=None: True)
+
+
+def test_on_windows_auto_listens_on_this_machine_only_unless_told(node, monkeypatch):
+    """A program listening on the network makes Windows ask the person; one who said no was asked again by a test."""
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    on_windows(monkeypatch)
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
+    rec["answer"].add(LAN_PEER["addr"])
+    git(repo, "config", "legion.tunnel", "auto")
+    tunnel.keep(repo, strict=True)
+    assert config(home)["node"]["listen"] == ["127.0.0.1:8776"]  # for its tunnel only
+    ev = coordgit.state(repo).tunnels[ME]
+    assert ev["ticket"] and "lan" not in ev and "addrs" not in ev  # nothing the network could reach
+    assert rec["mappings"] == 0  # nor a port on the router leading nowhere
+    assert rec["connects"] == [f"{PEER}@192.168.1.20:8776"]  # going out is no listening: it still does
+    assert any("listens on this machine only" in line for line in tunnel.status(repo))
+
+    git(repo, "config", "legion.lan", "true")
+    tunnel.keep(repo)
+    assert config(home)["node"]["listen"] == ["0.0.0.0:8776"]
+    assert coordgit.state(repo).tunnels[ME]["lan"] == [{"addr": "192.168.1.10:8776", "net": "192.168.1.0/24"}]
+
+
+def test_with_a_seed_of_the_projects_own_auto_needs_no_tunnels(node, monkeypatch):
+    """instinct's seed: every node reaches it, so every node reaches the others through it."""
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    c = config(home)
+    c["preferredSeeds"] = [f"{SEED}@100.112.231.58:8776"]
+    (home / "config.json").write_text(json.dumps(c))
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2))  # reachable by tunnel only
+    rec["sessions"].add(SEED)
+    git(repo, "config", "legion.tunnel", "auto")
+    clock = [time.time()]
+    monkeypatch.setattr(tunnel.time, "time", lambda: clock[0])
+    tunnel.keep(repo, strict=True)
+    assert [cmd[1] for _, cmd, _ in rec["spawned"]] == ["-c"]  # the canary, and no dumbpipe
+    assert "ticket" not in coordgit.state(repo).tunnels[ME]
+    assert any("no tunnels needed" in line for line in tunnel.status(repo))
+
+    rec["sessions"].clear()  # the seed is away
+    clock[0] += 60
+    tunnel.keep(repo)
+    assert [cmd[1] for _, cmd, _ in rec["spawned"]] == ["-c"]  # not for a minute
+    clock[0] += tunnel.SEED_GRACE
+    tunnel.keep(repo)
+    assert [cmd[1] for _, cmd, _ in rec["spawned"]][1:] == ["listen-tcp", "connect-tcp"]
+    assert coordgit.state(repo).tunnels[ME]["ticket"]
+
+
+def test_a_hub_reached_by_tunnel_is_no_seed_of_the_projects_own(node):
+    repo, home = node["repo"], node["home"]
+    c = config(home)
+    c["preferredSeeds"] = [f"{HUB}@127.0.0.1:41000", f"{SEED}@100.112.231.58:8776"]
+    (home / "config.json").write_text(json.dumps(c))
+    git(repo, "config", "legion.seed", f"{PEER}@37.222.165.89:8776")
+    assert tunnel.preferred_seeds(repo, home) == {SEED, PEER}

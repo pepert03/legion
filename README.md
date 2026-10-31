@@ -250,8 +250,12 @@ it connects there whenever it starts, with nothing of legion's running. Nodes on
 talk over it directly. A node whose background processes don't outlive the command that started them
 (a canary process tells, after two checks) withdraws its addresses and only connects out; `outbound`
 says so from the start. `git config legion.upnp false` keeps auto from asking the router for a port.
-On Windows, the firewall decides whether the local network may reach the node: Windows asks the
-first time it listens (or allow `radicle-node.exe` yourself); if not, the others take the tunnel.
+On Windows and macOS, listening on the network makes the system ask you to allow it, so there auto
+keeps the node on 127.0.0.1 (for its tunnel) and only connects out, unless you say otherwise with
+`git config legion.lan true` (and allow `radicle-node.exe` in the firewall). And a node connected to
+a seed of the project's own (`legion radicle prefer NID@HOST:PORT`) needs no tunnels: everyone
+reaches everyone through it, so auto runs none while it's connected (or was, in the last five
+minutes).
 
 A node that exposes itself listens on 127.0.0.1 (on every interface, in auto; the first time, its
 Radicle node restarts to do so) and publishes its ticket in a `node.tunnel` event; the others find it

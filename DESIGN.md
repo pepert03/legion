@@ -387,10 +387,15 @@ be removed, and a removed integrator's later events stop counting).
     it expose itself again (in a test: withdrawn at the second check, back a minute later). `outbound` says it
     from the start. Measured with two nodes on this PC, one outbound reaching the other by its LAN address:
     the event is in the other node's storage when the command that made it returns (6-7 s, the command's
-    own time). Two things are left to the people: Windows' firewall (on a network Windows takes for public,
-    as this PC's Wi-Fi, nothing from the LAN reaches the node until they allow it; then the others take the
-    tunnel, or the connection goes the other way, which is enough, since a session carries both directions),
-    and `legion.upnp=false` where nobody wants the router touched.
+    own time). `legion.upnp=false` where nobody wants the router touched. That test had its node listen on
+    0.0.0.0, and Windows asked the person whether radicle-node.exe could accept connections on public
+    networks; they said no and didn't want to be asked again. So on Windows and macOS, where listening on
+    the network brings that question, auto never has the node listen beyond 127.0.0.1 unless the person
+    says so (legion.lan=true): there it publishes no address and asks no router, connects out (which asks
+    nothing, and is enough: a session carries both directions) and by tunnel. And instinct set up a seed of
+    the project's own, always on, which every node reaches: a node connected to a preferred seed (`legion
+    radicle prefer`, not counting hubs reached by tunnel) runs no tunnel and publishes no ticket while it is,
+    and for SEED_GRACE (300) seconds after, so a seed restarting doesn't bring every tunnel up.
   - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper
     going through every ref of the storage (24,000: every node kept every save and judged patch it ever saw,
     670 refs each, of which some 70 were still of use), then 10 s waiting for the seeds to confirm, and a

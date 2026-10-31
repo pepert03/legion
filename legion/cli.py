@@ -436,8 +436,8 @@ def cmd_tunnel(repo, what: str) -> None:
         raise Fail("the tunnels need dumbpipe: `cargo install dumbpipe`, or put a binary from "
                    "https://github.com/n0-computer/dumbpipe/releases on the PATH")
     coordgit.git(repo, "config", "legion.tunnel", what)
-    print({"auto": "Finding out how this node can be reached (the first time, the node restarts to listen on "
-                   "every interface)…",
+    print({"auto": "Finding out how this node can be reached (the first time, the node may restart: on Linux to "
+                   "listen on every interface; on Windows and macOS on 127.0.0.1, unless legion.lan is true)…",
            "outbound": "Connecting out to the nodes that can be reached…"}.get(
         what, "Setting up the tunnels (dumbpipe; the first time, the node may restart to listen on 127.0.0.1)…"),
           flush=True)

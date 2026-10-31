@@ -448,13 +448,13 @@ def upnp_allowed(repo) -> bool:
     return (radicle._cfg(repo, "legion.upnp") or "true").lower() not in ("false", "0", "no", "off")
 
 
-def planned_port(home: Path) -> int:
+def planned_port(home: Path, everywhere: bool = True) -> int:
     """The port the node listens on, or will once auto has it listen."""
     c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
     listen = c["node"].get("listen") or []
     if listen:
         return int(str(listen[0]).rsplit(":", 1)[1])
-    return 8776 if not _taken(8776, "0.0.0.0") else _free_port(8777, 8876)
+    return 8776 if not _taken(8776, "0.0.0.0" if everywhere else "127.0.0.1") else _free_port(8777, 8876)
 
 
 def reachability(repo, home: Path, port: int, now: float, map_: bool = True) -> dict:
@@ -546,8 +546,48 @@ def stop_exposing(home: Path) -> None:
         save(home, st)
 
 
+def lan_allowed(repo) -> bool:
+    """Whether auto may have the node listen beyond this machine. On Windows (and macOS) a program that listens
+    on the network makes the system ask the person, and one who said no was asked again by every test: there it's
+    only when they say so (git config legion.lan true). Elsewhere unless they say not to."""
+    said = (radicle._cfg(repo, "legion.lan") or "").lower()
+    if said:
+        return said in ("1", "true", "yes", "on")
+    return not (IS_WINDOWS or sys.platform == "darwin")
+
+
+def listens_beyond(home: Path) -> bool:
+    c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
+    return any(not str(a).startswith(("127.", "[::1]", "localhost")) for a in c["node"].get("listen") or [])
+
+
+SEED_GRACE = 300  # seconds a preferred seed may be away before the tunnels are needed again
+
+
+def preferred_seeds(repo, home: Path) -> set[str]:
+    """The node IDs of the seeds this node prefers (`legion radicle prefer`), not counting hubs reached by tunnel."""
+    try:
+        c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        c = {}
+    seeds = list(c.get("preferredSeeds") or []) + [radicle._cfg(repo, "legion.seed") or ""]
+    return {s.split("@")[0] for s in seeds if "@" in s and "@127.0.0.1:" not in s}
+
+
+def seed_reached(repo, home: Path, sessions: set[str], now: float) -> bool:
+    """Whether this node is connected to a seed of the project's own (instinct's, say), or was lately: then every
+    node reaches the others through it, and nobody needs a tunnel."""
+    st = load(home)
+    if preferred_seeds(repo, home) & sessions:
+        st["seed_seen"] = now
+        save(home, st)
+    return now - st.get("seed_seen", 0) < SEED_GRACE
+
+
 def keep_auto(repo, home: Path, st, me: str, m: str, notes: list[str]) -> None:
     now = time.time()
+    sessions = connected(repo)
+    via_seed = seed_reached(repo, home, sessions, now)
     outbound = m == "outbound" or not lasting(home, now)
     if outbound:
         stop_exposing(home)
@@ -555,23 +595,28 @@ def keep_auto(repo, home: Path, st, me: str, m: str, notes: list[str]) -> None:
         if announce(repo, home, st, me, None, False):
             notes.append("withdrew this node's addresses and ticket: it only connects out")
     else:
-        port = planned_port(home)
-        r = reachability(repo, home, port, now)
-        v6 = any(":" in reach.split(a)[0] for a in r["public"])
-        ensure_listening(repo, home, everywhere=True, v6=v6, external=r["public"])
-        ticket = expose(repo, home) if binary() else None
+        allowed = lan_allowed(repo)
+        r = reachability(repo, home, planned_port(home, allowed), now, map_=allowed)
+        if allowed:
+            v6 = any(":" in reach.split(a)[0] for a in r["public"])
+            ensure_listening(repo, home, everywhere=True, v6=v6, external=r["public"])
         mine = r["lan"]
-        if announce(repo, home, st, me, ticket, False, r["public"], r["lan"]):
+        public, lan = (r["public"], r["lan"]) if listens_beyond(home) else ([], [])
+        if via_seed or not binary():
+            stop_exposing(home)
+            ticket = None
+        else:
+            ticket = expose(repo, home)
+        if announce(repo, home, st, me, ticket, False, public, lan):
             notes.append("published how to reach this node")
     wanted = choose(st, me, m, now)
-    sessions = connected(repo) if wanted else set()
     ports = {}
     for nid in wanted:
         ev = st.tunnels[nid]
         try:
             if direct(repo, home, nid, ev, mine, sessions, now):
                 continue
-            if not outbound and ev.get("ticket") and binary():
+            if not outbound and not via_seed and ev.get("ticket") and binary():
                 ports[nid] = connect(home, nid, ev["ticket"])
                 why = link(repo, nid, ports[nid], is_hub(st, ev), sessions)
                 if why:
@@ -707,10 +752,15 @@ def status(repo) -> list[str]:
         elif deaths >= 2:
             lines.append("This node only connects out: its background processes don't outlive the commands that "
                          "start them.")
+        elif not listens_beyond(home):
+            lines.append("Not reachable from the network: the node listens on this machine only (on Windows and "
+                         "macOS, unless `git config legion.lan true`); it connects out, and by tunnel.")
         else:
             lan = ", ".join(f"{x['addr']} ({x['net']})" for x in r.get("lan") or [])
             lines.append(f"Reachable from the internet at: {', '.join(r.get('public') or []) or 'nowhere found'}; "
                          f"from its local network at: {lan or 'nowhere found'}.")
+        if time.time() - node.get("seed_seen", 0) < SEED_GRACE:
+            lines.append("Connected to a seed of the project's own: no tunnels needed.")
     st = coordgit.state(repo)
     sessions = connected(repo) if st.tunnels else set()
     names = st.names
