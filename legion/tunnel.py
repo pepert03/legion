@@ -28,6 +28,7 @@ in the node's folder, so a node's ticket is the same after a restart, and its ev
 """
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -62,8 +63,9 @@ def binary() -> str | None:
 
 
 def mode(repo) -> str:
-    m = (radicle._cfg(repo, "legion.tunnel") or "off").lower()
-    return m if m in MODES else "off"
+    """The clone's mode: auto unless set otherwise, so updating legion is all a node needs."""
+    m = (radicle._cfg(repo, "legion.tunnel") or "auto").lower()
+    return m if m in MODES else "auto"
 
 
 def rad_home(repo) -> Path:
@@ -234,24 +236,28 @@ def record(ev: dict | None) -> dict:
     """What a node.tunnel event says about how to reach its node, in one comparable form."""
     ev = ev or {}
     return {"ticket": ev.get("ticket"), "hub": bool(ev.get("hub")), "addrs": list(ev.get("addrs") or []),
-            "lan": [dict(x) for x in ev.get("lan") or []]}
+            "lan": [dict(x) for x in ev.get("lan") or []], "tailnet": list(ev.get("tailnet") or [])}
 
 
 def announce(repo, home: Path, st, me: str, ticket: str | None, hub: bool, addrs: list[str] | None = None,
-             lan: list[dict] | None = None) -> bool:
+             lan: list[dict] | None = None, tailnet: list[str] | None = None) -> bool:
     """Publish how this node is reached, unless the project already has it. True if an event went out. An event
-    with nothing in it withdraws what an earlier one said."""
+    with nothing in it withdraws what an earlier one said. New addresses go out at most every ANNOUNCE_EVERY
+    seconds (a node whose address keeps changing would spend its agent's announcements of the day)."""
     from . import coordgit, daemon, locks
     from . import events as E
     from .identity import Identity
-    new = record({"ticket": ticket, "hub": hub, "addrs": addrs, "lan": lan})
+    new = record({"ticket": ticket, "hub": hub, "addrs": addrs, "lan": lan, "tailnet": tailnet})
     last = st.tunnels.get(me)
     if record(last) == new or (last is None and new == record(None)):
         return False
     node = load(home)
     sent = node.get("announced") or {}
-    if record(sent) == new and time.time() - sent.get("at", 0) < 3600:
+    since = time.time() - sent.get("at", 0)
+    if record(sent) == new and since < 3600:
         return False  # another clone on this node announced it a moment ago: it's on its way
+    if last is not None and new != record(None) and since < ANNOUNCE_EVERY:
+        return False
     ident = Identity.load(repo=repo)
     if ident is None:
         return False
@@ -276,14 +282,19 @@ def is_hub(st, ev: dict) -> bool:
     return bool(ev.get("hub")) and ev["author"] in st.integrators
 
 
+def addressed(ev: dict) -> bool:
+    return bool(ev.get("addrs") or ev.get("lan") or ev.get("tailnet"))
+
+
 def choose(st, me: str, mode_: str, now: float) -> list[str]:
-    """The nodes to connect to: the hubs, and in a mesh (and auto, and outbound) up to PEERS active others. Each
-    node picks its own order (a hash of both IDs), so the connections spread over every node instead of piling on
-    the same few. Only nodes there is a way to: a ticket, or in auto and outbound an address too."""
+    """The nodes to connect to: the hubs, and in a mesh (and auto, and outbound) up to PEERS active others. In a mesh
+    each node picks its own order (a hash of both IDs), so the tunnels spread over every node instead of piling on
+    the same few; in auto, the nodes reached at an address first, the most active first: they're the ones that
+    carry everything. Only nodes there is a way to: a ticket, or in auto and outbound an address too."""
+    auto = mode_ in ("auto", "outbound")
     hubs, others = [], []
     for nid, ev in st.tunnels.items():
-        routes = ev.get("ticket") or (mode_ in ("auto", "outbound") and (ev.get("addrs") or ev.get("lan")))
-        if nid == me or not routes:
+        if nid == me or not (ev.get("ticket") or (auto and addressed(ev))):
             continue
         if is_hub(st, ev):
             hubs.append(nid)
@@ -291,7 +302,12 @@ def choose(st, me: str, mode_: str, now: float) -> list[str]:
             others.append(nid)
     if mode_ not in ("mesh", "auto", "outbound"):
         return sorted(hubs)
-    others.sort(key=lambda nid: hashlib.sha1(f"{me} {nid}".encode()).hexdigest())
+    if auto:
+        ev = st.tunnels
+        others.sort(key=lambda nid: (not addressed(ev[nid]), -max(st.last_seen.get(ev[nid]["author"], 0),
+                                                                      ev[nid]["ts"]), nid))
+    else:
+        others.sort(key=lambda nid: hashlib.sha1(f"{me} {nid}".encode()).hexdigest())
     return sorted(hubs) + others[:PEERS]
 
 
@@ -404,48 +420,73 @@ def unstick(repo, home: Path, ports: dict[str, int], sessions: set[str]) -> bool
 
 # --- auto: how this node is reached, and how it reaches the others ----------------------------------------
 #
-# In order, as far as each goes: an address the internet reaches (a global address of this machine, or a port the
-# router mapped for it through UPnP or NAT-PMP, with no account), which Radicle announces too; its address on its
-# local network, with the network, for the nodes on the same one; and a tunnel, as in a mesh. A node whose processes
-# don't outlive the command that started them (agents' sandboxes) exposes nothing and only connects out, to the
-# addresses the others publish. To reach another node, its public addresses are tried, then its local ones (a
-# connection with a short timeout: networks that isolate their clients let nothing through), then its tunnel.
+# Nothing central: no hub, no seed of the project's. Any node that can be reached announces itself, in a node.tunnel
+# event any agent may sign, with its own addresses: one the internet reaches (a global address of this machine, a
+# port its router maps for it through UPnP or NAT-PMP, or one its people declare: `git config --add legion.address
+# HOST:PORT`, for a port they opened by hand), its Tailscale address, its address on its local network with the
+# network, and its dumbpipe ticket. Every node connects to a few of the announced ones, the most active, up to PEERS,
+# besides Radicle's public seeds, at the address it can reach: Tailscale's if it's on a tailnet too, the local one on a
+# network of its own, the public one, then others' local ones (a connection with a short timeout decides; networks
+# that isolate their clients let nothing through), and else by tunnel. None is needed: if one goes, the others are
+# there. What works goes into the node's config (connect and preferredSeeds), so it reconnects at every start with
+# nothing of legion's running, which is all a sandbox's node gets. A node connected to one of them runs no tunnel: the
+# announced nodes carry everything. A node whose processes don't outlive the command that started them (agents'
+# sandboxes; a canary tells) announces nothing and only connects out, as `outbound` does from the start.
 
 REACH_EVERY = 600  # seconds between looks at this machine's addresses, and renewals of the router's mapping
 RETRY_DIRECT = 600  # seconds before an address that didn't answer, or didn't lead to the node, is tried again
 # Seconds an address may answer without giving a session before it's taken for the wrong one. A node that restarted
 # (a sandbox's, every command) is refused until the other side drops its old session, which took 75 s here.
 DIRECT_STUCK = 180
+ANNOUNCE_EVERY = 1800  # seconds between this node's announcements of new addresses (DHCP, a mapping that moved)
+ANCHOR_GRACE = 300  # seconds an announced node may be away before the tunnels are needed again
+DEFER = 600  # seconds a clone's explicit hub, client or mesh keeps the other clones of its node out of auto
 CANARY = "import time  # legion canary: does a process outlive the command that started it?\nwhile True: time.sleep(3600)"
 
 
 def lasting(home: Path, now: float) -> bool:
     """Whether processes outlive the command that started them here. A canary, a process that only sleeps, is
-    started and looked at the next time: after two in a row found dead, no (a reboot only kills one); once one
-    lives a minute, yes again."""
+    started and looked at the next time: alive a minute after it started, yes; until one is seen so, no (a sandbox
+    never gets there, and announces nothing); and no again after two found dead in a row (a reboot kills one)."""
     st = load(home)
     c = st.get("canary") or {}
-    deaths = c.get("deaths", 0)
+    deaths, proven = c.get("deaths", 0), bool(c.get("proven"))
     if c.get("pid"):
         if radicle.pid_alive(c["pid"], "legion canary"):
-            if now - c.get("started", now) >= 60 and deaths:
-                st["canary"] = {**c, "deaths": 0}
+            if now - c.get("started", now) >= 60 and not (proven and deaths == 0):
+                st["canary"] = {**c, "deaths": 0, "proven": True}
                 save(home, st)
                 return True
-            return deaths < 2
+            return proven and deaths < 2
         deaths += 1
     try:
         proc = radicle.spawn_detached([sys.executable, "-c", CANARY], str(home))
     except OSError:
         return False
     st = load(home)
-    st["canary"] = {"pid": proc.pid, "started": now, "deaths": deaths}
+    st["canary"] = {"pid": proc.pid, "started": now, "deaths": deaths, "proven": proven and deaths < 2}
     save(home, st)
-    return deaths < 2
+    return proven and deaths < 2
 
 
 def upnp_allowed(repo) -> bool:
     return (radicle._cfg(repo, "legion.upnp") or "true").lower() not in ("false", "0", "no", "off")
+
+
+def lan_allowed(repo) -> bool:
+    """Whether auto may have the node listen beyond this machine (its local network, Tailscale, the internet). On
+    Windows (and macOS) a program that listens on the network makes the system ask the person, and one who said no
+    was asked again by every test: there it's only when they say so (git config legion.lan true). Elsewhere unless
+    they say not to."""
+    said = (radicle._cfg(repo, "legion.lan") or "").lower()
+    if said:
+        return said in ("1", "true", "yes", "on")
+    return not (IS_WINDOWS or sys.platform == "darwin")
+
+
+def listens_beyond(home: Path) -> bool:
+    c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
+    return any(not str(a).startswith(("127.", "[::1]", "localhost")) for a in c["node"].get("listen") or [])
 
 
 def planned_port(home: Path, everywhere: bool = True) -> int:
@@ -457,39 +498,72 @@ def planned_port(home: Path, everywhere: bool = True) -> int:
     return 8776 if not _taken(8776, "0.0.0.0" if everywhere else "127.0.0.1") else _free_port(8777, 8876)
 
 
+def declared(repo) -> list[str]:
+    """Addresses its people say the node has, which it can't see (a port opened by hand on the router):
+    git config --add legion.address HOST:PORT."""
+    out = subprocess.run(["git", "config", "--get-all", "legion.address"], cwd=repo, capture_output=True,
+                         text=True).stdout.split()
+    return [a for a in out if classify(a) in ("public", "tailnet")]
+
+
+def classify(addr: str) -> str | None:
+    """public, tailnet, lan, or None for what isn't an ip:port."""
+    try:
+        host, port = reach.split(addr)
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if not 0 < port < 65536:
+        return None
+    if reach.is_tailnet(ip):
+        return "tailnet"
+    if ip.is_global:
+        return "public"
+    if ip.version == 4 and ip.is_private and not ip.is_loopback and not ip.is_link_local:
+        return "lan"
+    return None
+
+
 def reachability(repo, home: Path, port: int, now: float, map_: bool = True) -> dict:
-    """{public: ["ip:port"], lan: [{addr, net}]}: where this node can be reached, looked at every REACH_EVERY
-    seconds (which also renews the router's mapping)."""
+    """{public: ["ip:port"], tailnet: ["ip:port"], lan: [{addr, net}]}: where this node can be reached, looked at
+    every REACH_EVERY seconds (which also renews the router's mapping)."""
     st = load(home)
     r = st.get("reach") or {}
-    if r.get("port") == port and r.get("mapped_asked", False) == map_ and now - r.get("at", 0) < REACH_EVERY:
+    extra = declared(repo)
+    if (r.get("port") == port and r.get("mapped_asked", False) == map_ and r.get("declared", []) == extra
+            and now - r.get("at", 0) < REACH_EVERY):
         return r
     found = reach.local_addresses()
     public = [reach.joined(ip, port) for ip in found["public"]]
+    tailnet = [reach.joined(ip, port) for ip in found.get("tailnet", [])]
     lan = [{"addr": reach.joined(ip, port), "net": net} for ip, net in found["lan"]]
     if map_ and lan and not public and upnp_allowed(repo):
         mapped = reach.mapped(lan[0]["addr"].rsplit(":", 1)[0], port)
         if mapped:
             public.append(mapped)
-    r = {"at": now, "port": port, "mapped_asked": map_, "public": public, "lan": lan}
+    for a in extra:
+        (public if classify(a) == "public" else tailnet).append(a)
+    r = {"at": now, "port": port, "mapped_asked": map_, "declared": extra,
+         "public": list(dict.fromkeys(public)), "tailnet": list(dict.fromkeys(tailnet)), "lan": lan}
     st = load(home)
     st["reach"] = r
     save(home, st)
     return r
 
 
-def candidates(ev: dict, mine: list[dict]) -> list[str]:
-    """The addresses to try for another node, best first: public, then local on a network this node is on, then
-    its other local ones (a node in a container goes out through its host's network). An address of this machine
-    is no exception: several nodes may run on one."""
-    nets = {x["net"] for x in mine}
+def candidates(ev: dict, mine: dict) -> list[str]:
+    """The addresses to try for another node, best first: its Tailscale ones if this node is on a tailnet too, its
+    local ones on a network this node is on, its public ones, then its other local ones (a node in a container goes
+    out through its host's network). An address of this machine is no exception: several nodes may run on one."""
+    nets = {x["net"] for x in mine.get("lan") or []}
     lan = ev.get("lan") or []
-    out = list(ev.get("addrs") or []) + [x["addr"] for x in lan if x["net"] in nets] + \
+    out = (list(ev.get("tailnet") or []) if mine.get("tailnet") else []) + \
+        [x["addr"] for x in lan if x["net"] in nets] + list(ev.get("addrs") or []) + \
         [x["addr"] for x in lan if x["net"] not in nets]
     return list(dict.fromkeys(out))
 
 
-def direct(repo, home: Path, nid: str, ev: dict, mine: list[dict], sessions: set[str], now: float) -> str | None:
+def direct(repo, home: Path, nid: str, ev: dict, mine: dict, sessions: set[str], now: float) -> str | None:
     """Reach that node at an address it published, if one answers; returns it. An address the node was told to
     connect to that hasn't given a session in DIRECT_STUCK seconds (another device at that address on another
     network, or a firewall that lets the connection open but no further) isn't tried again for RETRY_DIRECT
@@ -503,8 +577,8 @@ def direct(repo, home: Path, nid: str, ev: dict, mine: list[dict], sessions: set
     elif addr and now - r.get("since", now) > DIRECT_STUCK and now - r.get("ok", 0) > DIRECT_STUCK:
         failed[addr] = now
         addr = None
-    if addr and addr in failed:
-        addr = None
+    if addr and (addr in failed or addr not in candidates(ev, mine)):
+        addr = None  # it failed, or the node has other addresses now
     if not addr and nid not in sessions:
         tries = [a for a in candidates(ev, mine) if a not in failed]
         answered = reach.probe(tries)
@@ -522,8 +596,8 @@ def direct(repo, home: Path, nid: str, ev: dict, mine: list[dict], sessions: set
 
 
 def remember_direct(home: Path) -> None:
-    """The node connects at every start to the addresses that work, with nothing of legion's running: in a
-    sandbox, the node starts with each command and dies with it."""
+    """The node connects at every start to the announced nodes that answered, and fetches from them first, with
+    nothing of legion's running: in a sandbox, the node starts with each command and dies with it."""
     st = load(home)
     entries = sorted(f"{nid}@{r['addr']}" for nid, r in (st.get("routes") or {}).items() if r.get("addr"))
     before = st.get("direct") or []
@@ -531,8 +605,9 @@ def remember_direct(home: Path) -> None:
         return
     path = Path(home) / "config.json"
     c = json.loads(path.read_text(encoding="utf-8"))
-    c["node"]["connect"] = [s for s in c["node"].get("connect") or [] if s not in before] + \
-        [e for e in entries if e not in (c["node"].get("connect") or [])]
+    for keyed, key in ((c["node"], "connect"), (c, "preferredSeeds")):
+        kept = [s for s in keyed.get(key) or [] if s not in before]
+        keyed[key] = kept + [e for e in entries if e not in kept]
     path.write_text(json.dumps(c, indent=2), encoding="utf-8")
     st["direct"] = entries
     save(home, st)
@@ -546,26 +621,9 @@ def stop_exposing(home: Path) -> None:
         save(home, st)
 
 
-def lan_allowed(repo) -> bool:
-    """Whether auto may have the node listen beyond this machine. On Windows (and macOS) a program that listens
-    on the network makes the system ask the person, and one who said no was asked again by every test: there it's
-    only when they say so (git config legion.lan true). Elsewhere unless they say not to."""
-    said = (radicle._cfg(repo, "legion.lan") or "").lower()
-    if said:
-        return said in ("1", "true", "yes", "on")
-    return not (IS_WINDOWS or sys.platform == "darwin")
-
-
-def listens_beyond(home: Path) -> bool:
-    c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
-    return any(not str(a).startswith(("127.", "[::1]", "localhost")) for a in c["node"].get("listen") or [])
-
-
-SEED_GRACE = 300  # seconds a preferred seed may be away before the tunnels are needed again
-
-
 def preferred_seeds(repo, home: Path) -> set[str]:
-    """The node IDs of the seeds this node prefers (`legion radicle prefer`), not counting hubs reached by tunnel."""
+    """The node IDs of the seeds this node prefers (`legion radicle prefer`, and the announced nodes auto keeps
+    there), not counting hubs reached by tunnel."""
     try:
         c = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -574,41 +632,60 @@ def preferred_seeds(repo, home: Path) -> set[str]:
     return {s.split("@")[0] for s in seeds if "@" in s and "@127.0.0.1:" not in s}
 
 
-def seed_reached(repo, home: Path, sessions: set[str], now: float) -> bool:
-    """Whether this node is connected to a seed of the project's own (instinct's, say), or was lately: then every
-    node reaches the others through it, and nobody needs a tunnel."""
+def anchored(repo, home: Path, sessions: set[str], now: float) -> bool:
+    """Whether this node is connected to a node others reach directly (an announced one, or a seed it prefers), or
+    was lately: then everything reaches it through that one, and it needs no tunnel."""
     st = load(home)
-    if preferred_seeds(repo, home) & sessions:
-        st["seed_seen"] = now
+    direct_ = {nid for nid, r in (st.get("routes") or {}).items() if r.get("addr")}
+    if (preferred_seeds(repo, home) | direct_) & sessions:
+        st["anchor_seen"] = now
         save(home, st)
-    return now - st.get("seed_seen", 0) < SEED_GRACE
+    return now - st.get("anchor_seen", 0) < ANCHOR_GRACE
+
+
+def deferring(repo, home: Path, now: float) -> dict | None:
+    """Another clone of this node asked for hub, client or mesh lately: auto leaves the node's tunnels to it. So it
+    does, unless told auto itself, while a tunnel auto didn't start runs (an older legion's mesh, which noted no
+    mode: the first auto to run after an update would otherwise have closed it, and withdrawn its ticket)."""
+    node = load(home)
+    ex = node.get("explicit") or {}
+    if ex and ex.get("repo") != str(Path(repo).resolve()) and now - ex.get("at", 0) < DEFER:
+        return ex
+    lis = node.get("listen") or {}
+    if (lis and lis.get("by") != "auto" and radicle._cfg(repo, "legion.tunnel") is None
+            and alive(lis.get("pid"))):
+        return {"repo": "another clone", "mode": "an explicit"}
+    return None
 
 
 def keep_auto(repo, home: Path, st, me: str, m: str, notes: list[str]) -> None:
     now = time.time()
     sessions = connected(repo)
-    via_seed = seed_reached(repo, home, sessions, now)
+    via_anchor = anchored(repo, home, sessions, now)
     outbound = m == "outbound" or not lasting(home, now)
     if outbound:
         stop_exposing(home)
-        mine = reachability(repo, home, 0, now, map_=False)["lan"]
+        mine = reachability(repo, home, 0, now, map_=False)
         if announce(repo, home, st, me, None, False):
             notes.append("withdrew this node's addresses and ticket: it only connects out")
     else:
         allowed = lan_allowed(repo)
-        r = reachability(repo, home, planned_port(home, allowed), now, map_=allowed)
+        mine = reachability(repo, home, planned_port(home, allowed), now, map_=allowed)
         if allowed:
-            v6 = any(":" in reach.split(a)[0] for a in r["public"])
-            ensure_listening(repo, home, everywhere=True, v6=v6, external=r["public"])
-        mine = r["lan"]
-        public, lan = (r["public"], r["lan"]) if listens_beyond(home) else ([], [])
-        if via_seed or not binary():
+            v6 = any(":" in reach.split(a)[0] for a in mine["public"])
+            ensure_listening(repo, home, everywhere=True, v6=v6, external=mine["public"])
+        beyond = listens_beyond(home)
+        if via_anchor or not binary():
             stop_exposing(home)
             ticket = None
         else:
             ticket = expose(repo, home)
-        if announce(repo, home, st, me, ticket, False, public, lan):
-            notes.append("published how to reach this node")
+            node = load(home)
+            node["listen"]["by"] = "auto"
+            save(home, node)
+        if announce(repo, home, st, me, ticket, False, mine["public"] if beyond else [],
+                    mine["lan"] if beyond else [], mine.get("tailnet", []) if beyond else []):
+            notes.append("announced how to reach this node")
     wanted = choose(st, me, m, now)
     ports = {}
     for nid in wanted:
@@ -616,7 +693,7 @@ def keep_auto(repo, home: Path, st, me: str, m: str, notes: list[str]) -> None:
         try:
             if direct(repo, home, nid, ev, mine, sessions, now):
                 continue
-            if not outbound and not via_seed and ev.get("ticket") and binary():
+            if not outbound and not via_anchor and ev.get("ticket") and binary():
                 ports[nid] = connect(home, nid, ev["ticket"])
                 why = link(repo, nid, ports[nid], is_hub(st, ev), sessions)
                 if why:
@@ -633,6 +710,52 @@ def keep_auto(repo, home: Path, st, me: str, m: str, notes: list[str]) -> None:
             disconnect(home, nid)
 
 
+def own_addresses(repo) -> list[str]:
+    """This node's addresses, as `announce_node` takes them: what it can see of itself, and what it was told."""
+    home = rad_home(repo)
+    if not listens_beyond(home):
+        raise RadError("this node listens on this machine only (127.0.0.1): nobody else could reach it. To have it "
+                       "listen on the network: `git config legion.lan true` and `legion radicle tunnel auto` (on "
+                       "Windows, allow radicle-node in the firewall)")
+    r = reachability(repo, home, planned_port(home), time.time(), map_=lan_allowed(repo) and upnp_allowed(repo))
+    return r["public"] + r.get("tailnet", []) + [f"{x['addr']}/{x['net'].split('/')[1]}" for x in r["lan"]]
+
+
+def announce_node(repo, nid: str, addrs: list[str]) -> dict:
+    """Announce a node by hand, at these addresses ("ip:port", or "ip:port/prefix" on a local network; /24 when not
+    said): a node that can't see its own public address (a port opened on the router), or one without legion. What
+    the project knew of it otherwise (its ticket) stays. Returns the event."""
+    from . import coordgit, daemon, locks
+    from . import events as E
+    from .identity import Identity
+    out = {"addrs": [], "tailnet": [], "lan": []}
+    for a in addrs:
+        addr, _, plen = a.partition("/")
+        kind = classify(addr)
+        if kind is None:
+            raise RadError(f"{a} isn't an address to reach a node at: ip:port (a public, Tailscale or local one)")
+        if kind == "lan":
+            net = str(ipaddress.ip_network(f"{reach.split(addr)[0]}/{plen or 24}", strict=False))
+            out["lan"].append({"addr": addr, "net": net})
+        else:
+            out["addrs" if kind == "public" else "tailnet"].append(addr)
+    st = coordgit.state(repo)
+    last = record(st.tunnels.get(nid))
+    ident = Identity.load(repo=repo)
+    if ident is None:
+        raise RadError("this clone has no identity to sign with (`legion id new`)")
+    payload = {"ticket": last["ticket"], "hub": last["hub"], **out}
+    ev = E.create(ident, "node.tunnel", st.max_lamport + 1, nid=nid,
+                  **{k: v for k, v in payload.items() if v or k == "hub"})
+    from .state import tunnel_error
+    err = tunnel_error(ev)
+    if err:
+        raise RadError(err)
+    with locks.held(daemon.repo_lock(repo)):
+        coordgit.append(repo, ident, ev)
+    return ev
+
+
 # --- keeping it all up ------------------------------------------------------------------------------------
 
 
@@ -642,8 +765,11 @@ def keep(repo, strict: bool = False) -> list[str]:
     .git/legion-tunnel.json, which `legion radicle tunnel status` shows."""
     from . import coordgit, locks
     m = mode(repo)
-    if m == "off":
+    if m == "off" or not radicle.rid(repo):
         return []
+    told = radicle._cfg(repo, "legion.tunnel") is not None
+    if not told and IS_WINDOWS and not radicle.native(repo):
+        return []  # Radicle in WSL: nothing auto could do from here, and nobody asked
     notes = []
     try:
         if not binary() and m not in ("auto", "outbound"):
@@ -654,6 +780,15 @@ def keep(repo, strict: bool = False) -> list[str]:
                            "(Radicle built for Windows, legion.radnative)")
         home = rad_home(repo)
         with locks.held(_file(home, "legion-tunnels.lock"), wait=90):
+            now = time.time()
+            if m in ("hub", "client", "mesh"):
+                node = load(home)
+                node["explicit"] = {"mode": m, "repo": str(Path(repo).resolve()), "at": now}
+                save(home, node)
+            elif ex := deferring(repo, home, now):
+                notes.append(f"another clone of this node ({ex['repo']}) has it in {ex['mode']} mode")
+                _status(repo, m, notes)
+                return notes
             me = radicle.node_id(repo)
             st = coordgit.state(repo)
             if m in ("auto", "outbound"):
@@ -721,7 +856,7 @@ def off(repo) -> None:
     c = json.loads(path.read_text(encoding="utf-8"))
     local = "@127.0.0.1:"
     c["node"]["connect"] = [s for s in c["node"].get("connect") or [] if local not in s and s not in direct_]
-    c["preferredSeeds"] = [s for s in c.get("preferredSeeds") or [] if local not in s]
+    c["preferredSeeds"] = [s for s in c.get("preferredSeeds") or [] if local not in s and s not in direct_]
     path.write_text(json.dumps(c, indent=2), encoding="utf-8")
     if local in (radicle._cfg(repo, "legion.seed") or ""):
         subprocess.run(["git", "config", "--unset", "legion.seed"], cwd=repo, capture_output=True)
@@ -730,7 +865,8 @@ def off(repo) -> None:
 def status(repo) -> list[str]:
     from . import coordgit
     m = mode(repo)
-    lines = [f"Mode: {m}. dumbpipe: {binary() or 'not installed'}."]
+    told = radicle._cfg(repo, "legion.tunnel") is not None
+    lines = [f"Mode: {m}{'' if told else ' (the default)'}. dumbpipe: {binary() or 'not installed'}."]
     last = radicle.netsync_status(repo, "tunnel")
     if last:
         ago = time.time() - last.get("at", 0)
@@ -759,8 +895,8 @@ def status(repo) -> list[str]:
             lan = ", ".join(f"{x['addr']} ({x['net']})" for x in r.get("lan") or [])
             lines.append(f"Reachable from the internet at: {', '.join(r.get('public') or []) or 'nowhere found'}; "
                          f"from its local network at: {lan or 'nowhere found'}.")
-        if time.time() - node.get("seed_seen", 0) < SEED_GRACE:
-            lines.append("Connected to a seed of the project's own: no tunnels needed.")
+        if time.time() - node.get("anchor_seen", 0) < ANCHOR_GRACE:
+            lines.append("Connected to a node others reach directly: no tunnels needed.")
     st = coordgit.state(repo)
     sessions = connected(repo) if st.tunnels else set()
     names = st.names

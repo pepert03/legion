@@ -221,52 +221,63 @@ Radicle's web shows the project's `main` as the official main, with every accept
 `legion radicle status` shows this node, how many nodes have published project state, and its
 connections.
 
-#### Direct tunnels between the nodes
+#### Direct connections between the nodes
 
 Nodes behind NAT only reach each other through Radicle's public seeds, which pass things on when
-they get to them: minutes for an event to reach another machine. With
-[dumbpipe](https://github.com/n0-computer/dumbpipe) installed (`cargo install dumbpipe`, or a binary
-from its releases, on the PATH; MIT/Apache, no account), the nodes connect directly instead: dumbpipe
-punches through the NAT, or goes through n0's free public relays when it can't, and no port is opened.
-Every node then hears of what another one pushed within a second.
+they get to them: minutes for an event to reach another machine. legion connects the nodes directly,
+with nothing to set up and nothing central: updating legion is enough.
+
+As in BitTorrent, the nodes that can take connections seed the others, and those that can't connect
+out to them. Any node that can be reached **announces itself**, in a `node.tunnel` event any agent
+signs, with its own addresses: one the internet reaches (a global IPv4 or IPv6 address, a port its router maps for it
+through UPnP or NAT-PMP, or one you opened by hand and declare with `git config --add legion.address
+HOST:PORT`), its Tailscale address, and its address on its local network with the network. Every node
+connects to a few of the announced ones, the most active, up to 8, besides Radicle's public seeds, at
+the address it can reach: Tailscale's if it's on a tailnet too, the local one on a network of its own,
+the public one; a connection with a short timeout decides (a Wi-Fi that isolates its clients lets
+nothing through). They become its preferred seeds, and it reconnects to them at every start with
+nothing of legion's running. None of them is needed: if one goes, the others are there. An
+announcement gives no power (Radicle checks every node by its key: the worst is a failed connection),
+and one agent can make at most 24 a day.
+
+Where no announced node can be reached, and [dumbpipe](https://github.com/n0-computer/dumbpipe) is
+installed (`cargo install dumbpipe`, or a binary from its releases; MIT/Apache, no account), the nodes
+tunnel to each other instead: dumbpipe punches through the NAT, or goes through n0's free public relays.
+A node connected to an announced node runs no tunnel.
+
+That is the **auto** mode, the default. Its rules:
+
+- On Windows and macOS, listening on the network makes the system ask you to allow it, so there the
+  node listens on 127.0.0.1 only (for its tunnel), announces no address, asks no router, and connects
+  out, which is enough: a connection carries both directions. `git config legion.lan true` (and
+  allowing `radicle-node` in the firewall) lets it listen on the network. On Linux it does unless
+  `git config legion.lan false`.
+- A node whose background processes don't outlive the command that started them (agents' sandboxes)
+  never announces itself: a canary process tells, and until it has lived a minute the node only
+  connects out. `legion radicle tunnel outbound` says so from the start.
+- `git config legion.upnp false` keeps it from asking the router for a port.
 
 ```bash
-legion radicle tunnel auto     # each node works out by itself how it's reached (below): the usual choice
-legion radicle tunnel outbound # a machine whose background processes die with each command: only connect out
-legion radicle tunnel hub      # an integrator, on an always-on machine: be the project's hub
-legion radicle tunnel client   # every other node: connect to the hub and fetch from it first
-legion radicle tunnel mesh     # or: expose this node too, and connect to the hub and to up to 8 active nodes
-legion radicle tunnel status   # this node's tunnels and addresses, and every node that published one
-legion radicle tunnel off
+legion radicle announce                      # announce this node now, at the addresses it sees
+legion radicle announce NID@HOST:PORT ...    # announce a node by hand (another machine, a port opened by hand)
+legion radicle tunnel status                 # this node's addresses and connections, and every announced node
+legion radicle tunnel outbound               # only connect out
+legion radicle tunnel off                    # nothing at all
+legion radicle tunnel hub | client | mesh    # the older, explicit roles below
 ```
 
-With **auto**, nobody picks a role. Each node publishes, in a `node.tunnel` event, the ways it can be
-reached: an address the internet reaches, if it has one (a global IPv4 or IPv6 address, or a port its
-router maps for it through UPnP or NAT-PMP; Radicle announces it too), its address on its local
-network with the network, and its dumbpipe ticket. To reach another node it tries its public
-addresses, then its local ones (a connection with a short timeout: a network that isolates its
-clients lets nothing through), and else its tunnel. What works is kept in the node's own config, so
-it connects there whenever it starts, with nothing of legion's running. Nodes on the same Wi-Fi so
-talk over it directly. A node whose background processes don't outlive the command that started them
-(a canary process tells, after two checks) withdraws its addresses and only connects out; `outbound`
-says so from the start. `git config legion.upnp false` keeps auto from asking the router for a port.
-On Windows and macOS, listening on the network makes the system ask you to allow it, so there auto
-keeps the node on 127.0.0.1 (for its tunnel) and only connects out, unless you say otherwise with
-`git config legion.lan true` (and allow `radicle-node.exe` in the firewall). And a node connected to
-a seed of the project's own (`legion radicle prefer NID@HOST:PORT`) needs no tunnels: everyone
-reaches everyone through it, so auto runs none while it's connected (or was, in the last five
-minutes).
+With **hub**, an integrator's always-on node is the project's hub, reached by tunnel, and **client**
+nodes connect to it; with **mesh**, every node is reached by tunnel and connects to up to 8 active
+ones. A clone in one of these modes keeps the other clones of its node from auto for ten minutes.
+A node that exposes itself by tunnel listens on 127.0.0.1 (the first time, its Radicle node restarts to
+do so) and publishes its ticket in its `node.tunnel` event. The tunnels are processes of their own,
+checked and relaunched with every network fetch (at most every minute, by the sync process or by any
+command), so they come back by themselves after a reboot. They need Radicle and dumbpipe on the same
+side: on Windows, Radicle built for Windows (`legion.radnative`), not the one in WSL.
+`LEGION_TUNNEL_PEERS` changes the 8.
 
-A node that exposes itself listens on 127.0.0.1 (on every interface, in auto; the first time, its
-Radicle node restarts to do so) and publishes its ticket in a `node.tunnel` event; the others find it
-there. The tunnels are processes
-of their own, checked and relaunched with every network fetch (at most every minute, by the sync
-process or by any command), so they come back by themselves after a reboot or in a sandbox that kills
-background processes. They need Radicle and dumbpipe on the same side: on Windows, Radicle built for
-Windows (`legion.radnative`), not the one in WSL. `LEGION_TUNNEL_PEERS` changes the mesh's 8.
-
-On Windows, Radicle 1.10 accepts only the first inbound connection after it starts: a hub, or a node
-in a mesh, should run on Linux or macOS, or on a Windows build of Radicle with the listener fix (see
+On Windows, Radicle 1.10 accepts only the first inbound connection after it starts: a node others
+connect to should run on Linux or macOS, or on a Windows build of Radicle with the listener fix (see
 DESIGN.md). A Windows node that doesn't reconnect through a tunnel that came back is restarted by
 legion, at most every five minutes.
 
@@ -324,7 +335,8 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `join <url> [dir] [--number K]` | clone a project, give the clone its own identity (`<agent>-<computer>#K`; `--name` or `--identity` to choose), get it ready for your agent and open the live graph (`--no-viz` to skip) |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `radicle seed HOST:PORT` / `radicle prefer NID@HOST:PORT` | make an always-on node the project's own seed / keep a connection to it and fetch from it first |
-| `radicle tunnel auto / outbound / hub / client / mesh / off / status` | direct connections between the nodes: each works out how it's reached (internet, local network, dumbpipe tunnel) / only connect out / be the project's hub / connect to it / expose this node by tunnel and connect to the hub and other active nodes |
+| `radicle announce [NID@HOST:PORT ...]` | announce where a node can be reached (this one, at the addresses it sees, without any) |
+| `radicle tunnel auto / outbound / hub / client / mesh / off / status` | how the nodes connect directly: auto, the default (announced nodes, else tunnels) / only connect out / be the project's hub / connect to it / expose this node by tunnel and connect to the hub and other active nodes |
 | `daemon [--status]` | this machine's sync process: commands start it by themselves, and it syncs every clone they use so they only read and write locally; `--status` says whether it runs |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |

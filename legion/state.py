@@ -342,6 +342,7 @@ class State:
         self.last_seen: dict[str, float] = {}  # author -> its latest event: who is active, for votes
         self.names: dict[str, str] = {}
         self.tunnels: dict[str, dict] = {}  # Radicle node ID -> its latest node.tunnel event (see tunnel.py)
+        self.announcements: dict[tuple, int] = defaultdict(int)  # (author, day) -> its node.tunnel events
         self.proposals: dict[str, dict] = {}  # id -> {"ev", "votes": {owner: yes?}, "status", "reason"}
         self._by_vote: str | None = None  # the proposal being applied right now
         self.policy: dict = dict(POLICY)
@@ -1194,10 +1195,16 @@ class State:
         if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
             return None
 
-        if t == "node.tunnel":  # how to reach a Radicle node: see tunnel.py
+        if t == "node.tunnel":  # how to reach a Radicle node, said by any agent: see tunnel.py
             err = tunnel_error(ev)
             if err:
                 return err
+            # It gives no power (Radicle checks every node by its key: the worst is a failed connection), but each
+            # one is read by every node: a cap per agent and day keeps a broken or hostile agent from flooding.
+            day = (ev["author"], int(ev["ts"] // 86400))
+            self.announcements[day] += 1
+            if self.announcements[day] > MAX_ANNOUNCEMENTS:
+                return f"more than {MAX_ANNOUNCEMENTS} node.tunnel events by one agent in a day"
             self.tunnels[ev["nid"]] = ev
             return None
 
@@ -1635,6 +1642,10 @@ class State:
         return None
 
 
+MAX_ANNOUNCEMENTS = 24  # node.tunnel events one agent may publish in a day; more are ignored
+TAILNET = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _address(addr) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """The IP of an "ip:port" or "[ipv6]:port", or None if it isn't one."""
     if not isinstance(addr, str) or len(addr) > 60:
@@ -1670,6 +1681,10 @@ def tunnel_error(ev: dict) -> str | None:
             net = None
         if not (ip and ip.is_private and net and ip in net):
             return "a node.tunnel's lan entries are {addr: private ip:port, net: the network it's on}"
+    tailnet = ev.get("tailnet") or []
+    if not isinstance(tailnet, list) or len(tailnet) > 4 or not all(
+            (ip := _address(a)) and ip.version == 4 and ip in TAILNET for a in tailnet):
+        return "a node.tunnel's tailnet addresses are up to 4 Tailscale addresses (100.64.0.0/10), ip:port"
     return None
 
 

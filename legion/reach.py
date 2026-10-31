@@ -69,10 +69,19 @@ def prefixes() -> dict[str, int]:
         return {}
 
 
+TAILNET = ipaddress.ip_network("100.64.0.0/10")  # Tailscale's addresses (the range carriers' NAT uses too)
+
+
+def is_tailnet(ip) -> bool:
+    addr = ipaddress.ip_address(ip)
+    return addr.version == 4 and addr in TAILNET
+
+
 def local_addresses() -> dict:
-    """{"public": [ip...], "lan": [(ip, net)...]}: the addresses this machine goes out from."""
-    found = {"public": [], "lan": []}
-    known = None
+    """{"public": [ip...], "lan": [(ip, net)...], "tailnet": [ip...]}: the addresses this machine goes out from,
+    and its Tailscale ones (on an interface of their own: no route to the internet goes through them)."""
+    found = {"public": [], "lan": [], "tailnet": []}
+    known = prefixes()
     for family, target in ((socket.AF_INET, "8.8.8.8"), (socket.AF_INET6, "2001:4860:4860::8888")):
         ip = _source(family, target)
         if not ip:
@@ -81,10 +90,9 @@ def local_addresses() -> dict:
         if addr.is_global:
             found["public"].append(str(addr))
         elif addr.version == 4 and addr.is_private and not addr.is_loopback and not addr.is_link_local:
-            if known is None:
-                known = prefixes()
             plen = known.get(str(addr), 24)
             found["lan"].append((str(addr), str(ipaddress.ip_network(f"{addr}/{plen}", strict=False))))
+    found["tailnet"] = sorted(ip for ip in known if ":" not in ip and is_tailnet(ip))
     return found
 
 

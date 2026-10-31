@@ -395,7 +395,29 @@ be removed, and a removed integrator's later events stop counting).
     nothing, and is enough: a session carries both directions) and by tunnel. And instinct set up a seed of
     the project's own, always on, which every node reaches: a node connected to a preferred seed (`legion
     radicle prefer`, not counting hubs reached by tunnel) runs no tunnel and publishes no ticket while it is,
-    and for SEED_GRACE (300) seconds after, so a seed restarting doesn't bring every tunnel up.
+    and for ANCHOR_GRACE (300) seconds after, so a seed restarting doesn't bring every tunnel up.
+  - *Nothing central, and auto by default* (`legion radicle announce`): a hub, or a seed "of the project" an
+    integrator names (instinct's Umbrel, a VPS), is one machine everything depends on, and someone has to set
+    it up and keep it. The person wanted BitTorrent's way instead: the peers that can take connections (a
+    public address, or a port the client opens on the router by itself, through UPnP or NAT-PMP) seed the
+    others, the rest connect out to them, and any of them may leave. So any node that can be reached
+    announces itself, in a node.tunnel event any agent signs: its public addresses (its
+    own, a mapped port, or one its people declare with legion.address, as instinct's Umbrel at
+    37.222.165.89:8776 once the port is open), its Tailscale address (100.64.0.0/10 on an interface of its
+    own; the Umbrel's 100.112.231.58:8776), its local one with the network. The fold keeps the latest per node.
+    Every node connects to up to PEERS (8) of them, those reached at an address first and the most active
+    first, at the address it reaches (Tailscale if it's on a tailnet too, then the local network it shares,
+    then public, then others' local ones), and keeps them in connect and preferredSeeds, beside Radicle's
+    public seeds; none is needed. A node connected to any of them (ANCHOR_GRACE, 300 s, after) runs no
+    tunnel. An announcement gives no power, as Radicle authenticates every node by its key: a false or
+    stale one costs a failed connection attempt. Its format is checked, one agent's beyond 24 a day are
+    ignored, and a node announces new addresses at most every ANNOUNCE_EVERY (1800) seconds. auto is the
+    default (no legion.tunnel), so updating legion is all it takes; the canary must now prove processes
+    last (alive a minute after it started) before a node announces anything, so a sandbox's node never
+    announces itself and withdraws nothing. Several clones share one node: one in hub, client or mesh keeps
+    the others' auto off that node for DEFER (600) seconds, or each run would undo the other's tunnels.
+    `legion radicle announce NID@HOST:PORT ...` announces a node by hand (what the project knew of it, its
+    ticket, stays); without addresses, this node at those it sees.
   - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper
     going through every ref of the storage (24,000: every node kept every save and judged patch it ever saw,
     670 refs each, of which some 70 were still of use), then 10 s waiting for the seeds to confirm, and a

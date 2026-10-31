@@ -381,6 +381,9 @@ def cmd_radicle(args):
         if args.action == "tunnel":
             cmd_tunnel(repo, args.target or "status")
             return
+        if args.action == "announce":
+            cmd_announce(repo, [a for a in [args.target, *args.more] if a])
+            return
         if args.action == "prefer":
             if not args.target:
                 raise Fail("give the seed: `legion radicle prefer NID@HOST:PORT` (`legion radicle seed` prints it)")
@@ -416,6 +419,36 @@ def cmd_radicle(args):
             print(radicle.rad(repo, "node", "status", check=False))
     except radicle.RadError as e:
         raise Fail(str(e))
+
+
+def cmd_announce(repo, given: list[str]) -> None:
+    """Announce a node: NID@HOST:PORT for each address (several for one node: public, Tailscale, local), or nothing
+    for this clone's own node at the addresses it sees (and those in git config legion.address)."""
+    from . import radicle, tunnel
+    if not radicle.rid(repo):
+        raise Fail("this repository doesn't use Radicle (`legion radicle init` or `legion join rad:…`)")
+    nodes: dict[str, list[str]] = {}
+    if not given:
+        nodes[radicle.node_id(repo)] = tunnel.own_addresses(repo)
+    for a in given:
+        nid, at, addr = a.partition("@")
+        if not at or not re.fullmatch(r"z6Mk\w{40,60}", nid):
+            raise Fail(f"{a}: give each address as NID@HOST:PORT, like z6Mk…@100.112.231.58:8776")
+        nodes.setdefault(nid, []).append(addr)
+    for nid, addrs in nodes.items():
+        if not addrs:
+            raise Fail(f"no address of {nid[-6:]} that others could reach was found")
+        try:
+            ev = tunnel.announce_node(repo, nid, addrs)
+        except radicle.RadError as e:
+            raise Fail(str(e))
+        shown = ev.get("addrs", []) + ev.get("tailnet", []) + [x["addr"] for x in ev.get("lan", [])]
+        print(f"Announced node {nid[-6:]} at {', '.join(shown)} (event {ev['id'][:8]}): every node connects to it "
+              "once the event reaches it, if it can reach one of these.", flush=True)
+    try:
+        coordgit.publish_radicle(repo, Identity.load(repo=repo))
+    except coordgit.GitError as e:
+        print(f"legion: couldn't push it yet ({str(e).strip()[-200:]}); it goes out with your next command")
 
 
 def cmd_tunnel(repo, what: str) -> None:
@@ -2608,7 +2641,7 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_join)
 
     s = sub.add_parser("radicle", help="Radicle as the transport: across networks, no server, no open ports")
-    s.add_argument("action", choices=["setup", "init", "status", "doctor", "seed", "prefer", "tunnel"],
+    s.add_argument("action", choices=["setup", "init", "status", "doctor", "seed", "prefer", "tunnel", "announce"],
                    help="setup: install Radicle and start the node; init: publish this project; status; "
                         "doctor: can this machine reach the seeds, directly or through its HTTP proxy?; "
                         "seed HOST:PORT: make this always-on node the project's own seed; "
@@ -2617,9 +2650,12 @@ def parser() -> argparse.ArgumentParser:
                         "(hub: be the project's hub; client: connect to the hub; mesh: connect to the hub and to "
                         "the other active nodes, through dumbpipe tunnels; auto: each node works out how it can be "
                         "reached, by address on the internet or the local network or by tunnel; outbound: only "
-                        "connect out)")
+                        "connect out; auto is the default); "
+                        "announce [NID@HOST:PORT ...]: tell every node where a node can be reached (this one, at "
+                        "the addresses it sees, without any)")
     s.add_argument("target", nargs="?", help="for seed: HOST:PORT the others reach; for prefer: NID@HOST:PORT; "
-                                             "for tunnel: the mode, or status")
+                                             "for tunnel: the mode, or status; for announce: NID@HOST:PORT")
+    s.add_argument("more", nargs="*", help="for announce: more NID@HOST:PORT (HOST:PORT/PREFIX on a local network)")
     s.add_argument("--alias", help="node alias (default: your legion name)")
     s.add_argument("--rad-home", help="Radicle home to use (for running several nodes on one machine)")
     s.set_defaults(func=cmd_radicle)
