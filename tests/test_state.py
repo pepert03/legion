@@ -1168,3 +1168,17 @@ def test_a_question_only_ever_answered_as_covered_isnt_handed_out_and_claim_does
     for who in (BEA, CEL):
         log.add(who, "question.answered", task=tid, question=q["id"], text="tasks a and b cover it", covered=True)
     assert log.state().route_to_open("dan") is None
+
+def test_an_agent_renamed_into_its_owner_isnt_handed_its_own_old_ideas_to_judge():
+    """Six agents of one person, named -a to -f, were renamed #1 to #6 to count as one owner: their old ideas
+    kept the old names, and one was handed its own idea to judge."""
+    log, tid = project()
+    b_old = Identity.generate("pepe-b")
+    mine = log.add(b_old, "idea.proposed", task=tid, text="A Singer subgroup")
+    other = log.add(CEL, "idea.proposed", task=tid, text="Count triples instead of pairs")
+    renamed = Identity("pepe#2", b_old._key)
+    log.add(renamed, "agent.joined")                                      # its first event under the new name
+    st = log.state()
+    assert st.owner_now(mine) == "pepe" and st.pair_to_compare("pepe#3") is None
+    log.add(Identity.generate("pepe#3"), "idea.compared", task=tid, better=other["id"], worse=mine["id"], why="x")
+    assert log.state().ignored[-1][1] == "nobody rates their own ideas"

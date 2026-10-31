@@ -400,6 +400,12 @@ be removed, and a removed integrator's later events stop counting).
     started less than SETTLED (120 s) ago, a command with events of its own waits up to PUBLISH_WAIT (60 s)
     until the node holds them (legion.published matches published_mark); where it has lived longer, it
     will be there to push, and the command doesn't wait.
+    But whether it ran at all was told by its beat alone, fresh for a minute after the sandbox killed it:
+    commands woke a dead process and waited the full minute for nothing. The beat holds its pid, and a
+    process that no longer runs isn't alive, so the command pushes itself (see above).
+  - *Renamed agents*: instinct's six agents, named -a to -f, became instinct-pepe#1 to #6 to count as one
+    owner, but their earlier ideas kept the old names, and one was handed its own idea to judge. Whose an
+    idea or critique is goes by its author's key, named as it is now (`owner_now`).
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its

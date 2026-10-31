@@ -53,10 +53,18 @@ def register(repo) -> None:
 
 
 def alive() -> bool:
+    """A beat in the last FRESH seconds from a process that still runs. Where sandboxes kill it as each command
+    returns, its beat stayed fresh for a minute after: the next commands woke a dead process and waited for a
+    push that never came."""
+    from .radicle import pid_alive
+    beat = folder() / "beat"
     try:
-        return time.time() - (folder() / "beat").stat().st_mtime < FRESH
+        if time.time() - beat.stat().st_mtime >= FRESH:
+            return False
+        pid = beat.read_text(encoding="utf-8").strip()
     except OSError:
         return False
+    return pid_alive(int(pid)) if pid.isdigit() else True
 
 
 def serving(repo) -> bool:

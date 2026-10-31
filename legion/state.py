@@ -664,7 +664,7 @@ class State:
         if a is None or b is None or a is b or a["task"] != task.id or b["task"] != task.id:
             return "a comparison names two ideas on the same task"
         me = owner(ev["name"])
-        if me in (owner(a["ev"]["name"]), owner(b["ev"]["name"])):
+        if me in (self.owner_now(a["ev"]), self.owner_now(b["ev"])):
             return "nobody rates their own ideas"
         pair = frozenset((a["ev"]["id"], b["ev"]["id"]))
         if (me, pair) in self.compared:
@@ -691,12 +691,18 @@ class State:
         """A task's ideas, the best rated first."""
         return sorted((i for i in self.ideas.values() if i["task"] == tid), key=lambda i: (-i["elo"], i["ev"]["lamport"]))
 
+    def owner_now(self, ev: dict) -> str:
+        """The owner of an event's author as it is named now: an agent renamed (`id rename`, so that six agents
+        of one person count as one owner) keeps its key, and its earlier events their old name. An agent was
+        handed its own idea, posted under its old name, to judge."""
+        return owner(self.names.get(ev["author"], ev["name"]))
+
     def dead(self, idea: dict) -> bool:
         """Critiqued by two owners or more other than its own, and never shown to work: it needs fixing (a refined
         idea, --from it), not judging against others. In Erdős #902 agents were asked again and again to compare
         ideas whose premises two critiques had already refuted."""
-        mine = owner(idea["ev"]["name"])
-        return (len({owner(c["name"]) for c in idea["critiques"]} - {mine}) >= 2
+        mine = self.owner_now(idea["ev"])
+        return (len({self.owner_now(c) for c in idea["critiques"]} - {mine}) >= 2
                 and self.idea_status(idea) != "worked")
 
     def pair_to_compare(self, name: str) -> tuple | None:
@@ -708,7 +714,7 @@ class State:
         for tid in {i["task"] for i in self.ideas.values()}:
             if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid):
                 continue
-            pool = [i for i in self.ideas_for(tid) if owner(i["ev"]["name"]) != me and self.idea_status(i) != "worked"
+            pool = [i for i in self.ideas_for(tid) if self.owner_now(i["ev"]) != me and self.idea_status(i) != "worked"
                     and not self.dead(i)]
             for x in range(len(pool)):
                 for y in range(x + 1, len(pool)):

@@ -576,3 +576,15 @@ def test_a_command_waits_for_the_sync_process_to_push_its_events(tmp_path, monke
     monkeypatch.setattr(radicle, "published_mark", lambda repo: "m3")
     monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
     assert not radicle.wait_marked(repo, 0)                             # not yet: the command goes on
+
+def test_a_sync_process_the_sandbox_killed_isnt_taken_for_alive_by_its_fresh_beat(tmp_path, monkeypatch):
+    """Killed as each command returned, its beat stayed fresh for a minute: commands woke a dead process and
+    waited for a push that never came."""
+    import os
+    from legion import daemon
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path))
+    daemon.folder().mkdir(parents=True)
+    (daemon.folder() / "beat").write_text(str(os.getpid()))
+    assert daemon.alive()
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid: False)       # killed a moment ago
+    assert not daemon.alive()
