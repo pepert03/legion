@@ -280,6 +280,7 @@ def make_seed(repo, address: str, home: str | None = None) -> str:
     """Make this node the project's seed: it listens on the port of `address` (HOST:PORT, reachable from the
     others) and replicates every namespace of the project. Returns what the others pass to `prefer_seed`."""
     port = address.rsplit(":", 1)[1]
+    home = home or _cfg(repo, "legion.radhome")  # the clone's node, not the default ~/.radicle
     _edit_config(home, lambda c: (c["node"].__setitem__("listen", [f"0.0.0.0:{port}"]),
                                   c["node"].__setitem__("externalAddresses", [address])))
     run("rad", "seed", rid(repo), "--scope", "all", repo=repo, home=home, timeout=60, check=False)
@@ -293,6 +294,9 @@ def prefer_seed(repo, seed: str, home: str | None = None, restart: bool = True) 
     node reads the config at its next start, and the caller connects it by hand meanwhile."""
     if not re.fullmatch(r"z6Mk\w+@[\w.-]+:\d+", seed):
         raise RadError("a seed is NID@HOST:PORT, like z6Mk…@seed.example.org:8776 (`legion radicle seed` prints it)")
+    # The clone's node: a node whose home isn't the default one (a native node next to WSL's, ~/.radicle-jose) had
+    # its config looked for in ~/.radicle, which had none.
+    home = home or _cfg(repo, "legion.radhome")
 
     def change(c):
         c["node"]["connect"] = [seed] + [s for s in c["node"].get("connect") or [] if s != seed]

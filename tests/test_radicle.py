@@ -604,3 +604,13 @@ def test_the_push_a_command_waits_for_announces_too(tmp_path, monkeypatch):
     git(repo, "config", "--unset", "legion.published")
     radicle.publish(repo, "b")
     assert "no-sync" not in pushed[-1] and kicked == [1]                # the push announces, nothing apart
+
+def test_prefer_edits_the_config_of_the_clones_own_node(tmp_path, monkeypatch):
+    """A native node beside WSL's, with its own home: prefer looked for ~/.radicle/config.json, which it hadn't."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    git(repo, "config", "legion.radhome", "C:/Users/x/.radicle-jose")
+    homes = []
+    monkeypatch.setattr(radicle, "_edit_config", lambda home, change: homes.append(home))
+    radicle.prefer_seed(repo, "z6MkSeed1234@100.1.2.3:8776", restart=False)
+    assert homes == ["C:/Users/x/.radicle-jose"]
