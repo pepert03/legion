@@ -4,6 +4,7 @@ Every node holding the same events reaches the same state, without talking to an
 """
 
 import hashlib
+import ipaddress
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -1193,13 +1194,11 @@ class State:
         if t == "agent.joined":  # only so the others (and the viewer) know this agent is here
             return None
 
-        if t == "node.tunnel":  # where to reach a Radicle node through the NAT: see tunnel.py
-            nid, ticket = ev.get("nid"), ev.get("ticket")
-            if not (isinstance(nid, str) and re.fullmatch(r"z6Mk\w{40,60}", nid)):
-                return "a node.tunnel names the Radicle node it's for (nid, z6Mk…)"
-            if not (isinstance(ticket, str) and re.fullmatch(r"\w{20,1000}", ticket)):
-                return "a node.tunnel carries a dumbpipe ticket"
-            self.tunnels[nid] = ev
+        if t == "node.tunnel":  # how to reach a Radicle node: see tunnel.py
+            err = tunnel_error(ev)
+            if err:
+                return err
+            self.tunnels[ev["nid"]] = ev
             return None
 
         if t in ("hub.message", "lit.added"):
@@ -1634,6 +1633,44 @@ class State:
         if k.merge_commit:
             self.main_tip = k.merge_commit
         return None
+
+
+def _address(addr) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP of an "ip:port" or "[ipv6]:port", or None if it isn't one."""
+    if not isinstance(addr, str) or len(addr) > 60:
+        return None
+    m = re.fullmatch(r"\[?([0-9A-Fa-f:.]+)\]?:(\d{1,5})", addr)
+    if not m or not 0 < int(m.group(2)) < 65536:
+        return None
+    try:
+        return ipaddress.ip_address(m.group(1))
+    except ValueError:
+        return None
+
+
+def tunnel_error(ev: dict) -> str | None:
+    """Why a node.tunnel event is malformed: a node, and optionally a dumbpipe ticket, addresses the internet
+    reaches it at, and addresses on its local network with the network. None of them withdraws an earlier one."""
+    nid, ticket = ev.get("nid"), ev.get("ticket")
+    if not (isinstance(nid, str) and re.fullmatch(r"z6Mk\w{40,60}", nid)):
+        return "a node.tunnel names the Radicle node it's for (nid, z6Mk…)"
+    if ticket is not None and not (isinstance(ticket, str) and re.fullmatch(r"\w{20,1000}", ticket)):
+        return "a node.tunnel's ticket is a dumbpipe ticket"
+    addrs, lan = ev.get("addrs") or [], ev.get("lan") or []
+    if not isinstance(addrs, list) or len(addrs) > 8 or not all(
+            (ip := _address(a)) and ip.is_global for a in addrs):
+        return "a node.tunnel's addrs are up to 8 public addresses, ip:port"
+    if not isinstance(lan, list) or len(lan) > 8:
+        return "a node.tunnel's lan is up to 8 local addresses"
+    for x in lan:
+        ip = _address(x.get("addr")) if isinstance(x, dict) else None
+        try:
+            net = ipaddress.ip_network(x.get("net"), strict=False) if ip else None
+        except (TypeError, ValueError):
+            net = None
+        if not (ip and ip.is_private and net and ip in net):
+            return "a node.tunnel's lan entries are {addr: private ip:port, net: the network it's on}"
+    return None
 
 
 def build(events: list[dict], trusted=None) -> State:

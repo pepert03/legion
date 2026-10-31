@@ -11,7 +11,7 @@ import pytest
 
 from legion import coordgit
 from legion import events as E
-from legion import radicle, tunnel
+from legion import radicle, reach, tunnel
 from legion import state as S
 from legion.identity import Identity, bind
 
@@ -112,7 +112,9 @@ def node(tmp_path, monkeypatch):
     boss = Identity.generate("boss")
     coordgit.append(repo, boss, E.create(boss, "project.init", 1, project="p"))
 
-    rec = {"spawned": [], "connects": [], "restarts": 0, "dead": set(), "sessions": set(), "bound": {}}
+    rec = {"spawned": [], "connects": [], "restarts": 0, "dead": set(), "sessions": set(), "bound": {},
+           "canaries": [], "local": {"public": [], "lan": [("192.168.1.10", "192.168.1.0/24")]}, "mapped": None,
+           "mappings": 0, "answer": set()}
 
     class Proc:
         def __init__(self, pid):
@@ -124,7 +126,9 @@ def node(tmp_path, monkeypatch):
     def spawn(cmd, cwd, log=None, env=None):
         pid = 1000 + len(rec["spawned"])
         rec["spawned"].append((pid, cmd, env))
-        if cmd[1] == "listen-tcp":
+        if cmd[1] == "-c":  # the canary
+            rec["canaries"].append(pid)
+        elif cmd[1] == "listen-tcp":
             log.write_text(f"dumbpipe connect-tcp endpointfull{pid}\nor:\ndumbpipe connect-tcp endpointshort{env['IROH_SECRET'][:16]}\n")
         else:
             rec["bound"][pid] = int(cmd[3].rsplit(":", 1)[1])
@@ -143,7 +147,7 @@ def node(tmp_path, monkeypatch):
     monkeypatch.setattr(tunnel, "alive", lambda pid: bool(pid) and pid not in rec["dead"])
     monkeypatch.setattr(tunnel, "kill", lambda pid: rec["dead"].add(pid))
     monkeypatch.setattr(tunnel, "connected", lambda repo: set(rec["sessions"]))
-    monkeypatch.setattr(tunnel, "_taken", lambda port: port in {p for pid, p in rec["bound"].items()
+    monkeypatch.setattr(tunnel, "_taken", lambda port, host="127.0.0.1": port in {p for pid, p in rec["bound"].items()
                                                                 if pid not in rec["dead"]})
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     monkeypatch.setattr(tunnel, "IS_WINDOWS", False)
@@ -156,6 +160,14 @@ def node(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "restart_node", restart)
     monkeypatch.setattr(radicle, "ensure_node", lambda repo=None, home=None: None)
     monkeypatch.setattr(radicle, "kick_publish", lambda repo: None)
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": pid not in rec["dead"])
+
+    def mapped(lan_ip, port):
+        rec["mappings"] += 1
+        return rec["mapped"]
+    monkeypatch.setattr(reach, "local_addresses", lambda: rec["local"])
+    monkeypatch.setattr(reach, "mapped", mapped)
+    monkeypatch.setattr(reach, "probe", lambda addrs: {a: a in rec["answer"] for a in addrs})
     return {"repo": repo, "home": home, "rec": rec, "boss": boss, "me": me}
 
 
@@ -322,3 +334,186 @@ def test_a_windows_node_isnt_restarted_for_a_node_that_is_down(node, monkeypatch
     clock[0] += 60
     tunnel.keep(repo)
     assert rec["restarts"] == 1
+
+
+# --- auto and outbound -------------------------------------------------------------------------------------------
+
+LAN_PEER = {"addr": "192.168.1.20:8776", "net": "192.168.1.0/24"}
+
+
+def config(home):
+    return json.loads((home / "config.json").read_text())
+
+
+def peer_ev(ident, lamport, nid=PEER, ticket="peerticket" * 4, addrs=None, lan=None):
+    payload = {"ticket": ticket} if ticket else {}
+    payload.update({k: v for k, v in (("addrs", addrs), ("lan", lan)) if v})
+    return E.create(ident, "node.tunnel", lamport, nid=nid, hub=False, **payload)
+
+
+def test_auto_listens_everywhere_and_publishes_its_local_address_and_its_tunnel(node):
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    git(repo, "config", "legion.tunnel", "auto")
+    assert tunnel.keep(repo, strict=True) == ["published how to reach this node"]
+    assert config(home)["node"]["listen"] == ["0.0.0.0:8776"]  # the local network reaches it, not only the tunnel
+    assert rec["restarts"] == 1
+    ev = coordgit.state(repo).tunnels[ME]
+    assert ev["lan"] == [{"addr": "192.168.1.10:8776", "net": "192.168.1.0/24"}]
+    assert ev["ticket"].startswith("endpointshort") and "addrs" not in ev
+    assert rec["mappings"] == 1  # it asked the router; this one maps nothing
+    assert len(rec["canaries"]) == 1
+    assert tunnel.keep(repo) == []  # nothing changed: no event, no restart, the canary still lives
+    assert rec["restarts"] == 1 and len(rec["canaries"]) == 1
+
+
+def test_auto_publishes_a_port_the_router_mapped(node):
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    rec["mapped"] = "81.0.0.1:8776"
+    git(repo, "config", "legion.tunnel", "auto")
+    tunnel.keep(repo, strict=True)
+    assert coordgit.state(repo).tunnels[ME]["addrs"] == ["81.0.0.1:8776"]
+    assert config(home)["node"]["externalAddresses"] == ["81.0.0.1:8776"]  # Radicle announces it too
+
+
+def test_auto_asks_no_router_when_told_not_to(node):
+    repo, rec = node["repo"], node["rec"]
+    rec["mapped"] = "81.0.0.1:8776"
+    git(repo, "config", "legion.tunnel", "auto")
+    git(repo, "config", "legion.upnp", "false")
+    tunnel.keep(repo, strict=True)
+    assert rec["mappings"] == 0 and "addrs" not in coordgit.state(repo).tunnels[ME]
+
+
+def test_auto_reaches_a_node_on_its_network_directly_and_its_node_remembers_it(node):
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
+    rec["answer"].add(LAN_PEER["addr"])
+    git(repo, "config", "legion.tunnel", "auto")
+    tunnel.keep(repo, strict=True)
+    assert rec["connects"] == [f"{PEER}@192.168.1.20:8776"]
+    assert not [cmd for _, cmd, _ in rec["spawned"] if cmd[1] == "connect-tcp"]  # no tunnel needed
+    assert f"{PEER}@192.168.1.20:8776" in config(home)["node"]["connect"]  # it connects there whenever it starts
+
+
+def test_auto_takes_the_tunnel_where_the_network_isolates_its_clients(node):
+    repo, rec = node["repo"], node["rec"]
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
+    git(repo, "config", "legion.tunnel", "auto")
+    tunnel.keep(repo, strict=True)  # nothing answers at its local address
+    assert [cmd[1] for _, cmd, _ in rec["spawned"] if cmd[1] != "-c"] == ["listen-tcp", "connect-tcp"]
+    assert rec["connects"][0].startswith(f"{PEER}@127.0.0.1:")
+
+
+def test_a_direct_address_that_never_leads_to_the_node_is_left_for_the_tunnel(node, monkeypatch):
+    """Another device at that address (the same private network in another house), or a firewall that opens the
+    connection and nothing more."""
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
+    rec["answer"].add(LAN_PEER["addr"])
+    git(repo, "config", "legion.tunnel", "auto")
+    clock = [time.time()]
+    monkeypatch.setattr(tunnel.time, "time", lambda: clock[0])
+    tunnel.keep(repo, strict=True)
+    assert rec["connects"] == [f"{PEER}@192.168.1.20:8776"]
+    clock[0] += tunnel.DIRECT_STUCK + 30
+    tunnel.keep(repo)
+    assert rec["connects"][-1].startswith(f"{PEER}@127.0.0.1:")
+    assert f"{PEER}@192.168.1.20:8776" not in config(home)["node"]["connect"]
+    clock[0] += 60
+    tunnel.keep(repo)
+    assert len([c for c in rec["connects"] if "192.168" in c]) == 1  # not tried again so soon
+
+
+def test_auto_only_connects_out_where_processes_dont_outlive_the_command(node):
+    """Agents' sandboxes kill every background process when the command returns: the canary dies each time."""
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
+    rec["answer"].add(LAN_PEER["addr"])
+    git(repo, "config", "legion.tunnel", "auto")
+    tunnel.keep(repo, strict=True)
+    assert "ticket" in coordgit.state(repo).tunnels[ME]
+    for _ in range(2):  # the sandbox kills everything; the next command looks
+        rec["dead"].update(pid for pid, _, _ in rec["spawned"])
+        notes = tunnel.keep(repo)
+    assert notes == ["withdrew this node's addresses and ticket: it only connects out"]
+    ev = coordgit.state(repo).tunnels[ME]
+    assert not (ev.get("ticket") or ev.get("addrs") or ev.get("lan"))
+    assert "listen" not in tunnel.load(home)
+    assert rec["connects"][-1] == f"{PEER}@192.168.1.20:8776"  # it still reaches the others directly
+    assert not tunnel.choose(coordgit.state(repo), PEER, "mesh", time.time())  # nobody tries to reach it
+
+
+def test_outbound_exposes_nothing(node):
+    repo, home, rec = node["repo"], node["home"], node["rec"]
+    other = Identity.generate("other")
+    coordgit.append(repo, other, peer_ev(other, 2, ticket=None, addrs=["81.0.0.2:8776"]))
+    rec["answer"].add("81.0.0.2:8776")
+    git(repo, "config", "legion.tunnel", "outbound")
+    assert tunnel.keep(repo, strict=True) == []
+    assert config(home)["node"]["listen"] == [] and rec["restarts"] == 0
+    assert ME not in coordgit.state(repo).tunnels  # nothing to withdraw, so no event
+    assert rec["connects"] == [f"{PEER}@81.0.0.2:8776"]
+    assert rec["spawned"] == []  # no process of its own: told it lives in a sandbox, it needs no canary
+
+
+def test_a_tunnel_event_with_addresses():
+    boss = Identity.generate("boss")
+    good = E.create(boss, "node.tunnel", 2, nid=PEER, hub=False, addrs=["81.0.0.2:8776", "[2a01:4f8::1]:8776"],
+                    lan=[LAN_PEER])
+    withdrawn = E.create(boss, "node.tunnel", 3, nid=HUB, hub=False)
+    private_as_public = E.create(boss, "node.tunnel", 4, nid=ME, hub=False, addrs=["192.168.1.2:8776"])
+    public_as_local = E.create(boss, "node.tunnel", 5, nid=ME, hub=False,
+                               lan=[{"addr": "81.0.0.2:8776", "net": "81.0.0.0/24"}])
+    outside_its_net = E.create(boss, "node.tunnel", 6, nid=ME, hub=False,
+                               lan=[{"addr": "192.168.1.20:8776", "net": "10.0.0.0/8"}])
+    st = S.build([E.create(boss, "project.init", 1, project="p"), good, withdrawn, private_as_public,
+                  public_as_local, outside_its_net])
+    assert sorted(st.tunnels) == sorted([PEER, HUB]) and len(st.ignored) == 3
+    assert tunnel.candidates(st.tunnels[PEER], [{"addr": "192.168.1.10:8776", "net": "192.168.1.0/24"}]) == \
+        ["81.0.0.2:8776", "[2a01:4f8::1]:8776", "192.168.1.20:8776"]
+
+
+def test_the_addresses_this_machine_goes_out_from(monkeypatch):
+    sources = {reach.socket.AF_INET: "192.168.86.201", reach.socket.AF_INET6: None}
+    monkeypatch.setattr(reach, "_source", lambda family, target: sources[family])
+    monkeypatch.setattr(reach, "prefixes", lambda: {"192.168.86.201": 24})
+    assert reach.local_addresses() == {"public": [], "lan": [("192.168.86.201", "192.168.86.0/24")]}
+    sources.update({reach.socket.AF_INET: "100.64.3.4", reach.socket.AF_INET6: "2a01:4f8::1"})  # CGNAT; IPv6
+    assert reach.local_addresses() == {"public": ["2a01:4f8::1"], "lan": []}
+
+
+def test_nat_pmp_maps_only_behind_a_router_whose_own_address_is_public(monkeypatch):
+    import struct
+
+    class Router:
+        external = "81.0.0.1"
+
+        def __init__(self, *a):
+            self.answers = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def settimeout(self, t):
+            pass
+
+        def sendto(self, data, addr):
+            if data == b"\x00\x00":
+                self.answers.append(struct.pack("!BBHI", 0, 128, 0, 1) + reach.socket.inet_aton(self.external))
+            else:
+                _, _, _, internal, external, lifetime = struct.unpack("!BBHHHI", data)
+                self.answers.append(struct.pack("!BBHIHHI", 0, 130, 0, 1, internal, external, lifetime))
+
+        def recv(self, n):
+            return self.answers.pop(0)
+    monkeypatch.setattr(reach.socket, "socket", Router)
+    assert reach.natpmp_map("192.168.86.1", 8776) == "81.0.0.1:8776"
+    Router.external = "192.168.0.29"  # this PC's: a router behind another NAT
+    assert reach.natpmp_map("192.168.86.1", 8776) is None

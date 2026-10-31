@@ -231,15 +231,31 @@ punches through the NAT, or goes through n0's free public relays when it can't, 
 Every node then hears of what another one pushed within a second.
 
 ```bash
+legion radicle tunnel auto     # each node works out by itself how it's reached (below): the usual choice
+legion radicle tunnel outbound # a machine whose background processes die with each command: only connect out
 legion radicle tunnel hub      # an integrator, on an always-on machine: be the project's hub
 legion radicle tunnel client   # every other node: connect to the hub and fetch from it first
 legion radicle tunnel mesh     # or: expose this node too, and connect to the hub and to up to 8 active nodes
-legion radicle tunnel status   # this node's tunnels, and every node that published one
+legion radicle tunnel status   # this node's tunnels and addresses, and every node that published one
 legion radicle tunnel off
 ```
 
-A node that exposes itself listens on 127.0.0.1 (the first time, its Radicle node restarts to do so)
-and publishes its ticket in a `node.tunnel` event; the others find it there. The tunnels are processes
+With **auto**, nobody picks a role. Each node publishes, in a `node.tunnel` event, the ways it can be
+reached: an address the internet reaches, if it has one (a global IPv4 or IPv6 address, or a port its
+router maps for it through UPnP or NAT-PMP; Radicle announces it too), its address on its local
+network with the network, and its dumbpipe ticket. To reach another node it tries its public
+addresses, then its local ones (a connection with a short timeout: a network that isolates its
+clients lets nothing through), and else its tunnel. What works is kept in the node's own config, so
+it connects there whenever it starts, with nothing of legion's running. Nodes on the same Wi-Fi so
+talk over it directly. A node whose background processes don't outlive the command that started them
+(a canary process tells, after two checks) withdraws its addresses and only connects out; `outbound`
+says so from the start. `git config legion.upnp false` keeps auto from asking the router for a port.
+On Windows, the firewall decides whether the local network may reach the node: Windows asks the
+first time it listens (or allow `radicle-node.exe` yourself); if not, the others take the tunnel.
+
+A node that exposes itself listens on 127.0.0.1 (on every interface, in auto; the first time, its
+Radicle node restarts to do so) and publishes its ticket in a `node.tunnel` event; the others find it
+there. The tunnels are processes
 of their own, checked and relaunched with every network fetch (at most every minute, by the sync
 process or by any command), so they come back by themselves after a reboot or in a sandbox that kills
 background processes. They need Radicle and dumbpipe on the same side: on Windows, Radicle built for
@@ -304,7 +320,7 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | `join <url> [dir] [--number K]` | clone a project, give the clone its own identity (`<agent>-<computer>#K`; `--name` or `--identity` to choose), get it ready for your agent and open the live graph (`--no-viz` to skip) |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `radicle seed HOST:PORT` / `radicle prefer NID@HOST:PORT` | make an always-on node the project's own seed / keep a connection to it and fetch from it first |
-| `radicle tunnel hub / client / mesh / off / status` | direct connections between the nodes through NAT, with dumbpipe: be the project's hub / connect to it / expose this node and connect to the hub and other active nodes |
+| `radicle tunnel auto / outbound / hub / client / mesh / off / status` | direct connections between the nodes: each works out how it's reached (internet, local network, dumbpipe tunnel) / only connect out / be the project's hub / connect to it / expose this node by tunnel and connect to the hub and other active nodes |
 | `daemon [--status]` | this machine's sync process: commands start it by themselves, and it syncs every clone they use so they only read and write locally; `--status` says whether it runs |
 | `serve` | serve your repository read-only to your peers |
 | `peer add / remove / list` | manage the peers you read from |

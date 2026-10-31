@@ -329,7 +329,7 @@ be removed, and a removed integrator's later events stop counting).
     NID@HOST:PORT` on every node): public seeds are volunteers' machines, and the explicit fetch timed out
     waiting for them. A node that prefers the project's seed keeps a connection to it and fetches from it
     first.
-  - *Direct tunnels through NAT* (tunnel.py, `legion radicle tunnel hub|client|mesh`): an event took 3 minutes
+  - *Direct tunnels through NAT* (tunnel.py, `legion radicle tunnel hub|client|mesh`, and auto below): an event took 3 minutes
     to reach one machine and 9 another, because nodes behind NAT only met through public seeds, and a seed of
     the project's own needs a machine with an open port (this one has no public IPv6 nor UPnP, and the free VPS
     wasn't available). dumbpipe (iroh) opens a QUIC connection by hole punching, or through n0's free public
@@ -363,6 +363,34 @@ be removed, and a removed integrator's later events stop counting).
     hour don't make the others restart. A tunnel
     that died is thus back within the next fetch (a minute), and the connection through it within a few
     minutes at worst on Windows.
+  - *Each node works out how it's reached* (tunnel.py and reach.py, `legion radicle tunnel auto`): picking hub,
+    client or mesh for every machine asked people to know each machine's network, and none of them fits all
+    of them: this PC and instinct's Umbrel share a Wi-Fi, so a tunnel through n0 between them is a detour; and
+    instinct's agents run in sandboxes that kill every background process when a command returns, where a
+    tunnel, or anything listening, is gone before anyone uses it. In auto a node publishes, in its
+    node.tunnel event, every way it can be reached: addresses the internet reaches (a global address of the
+    interface it goes out by, or a port its router maps through UPnP IGD or NAT-PMP, only if the router's own
+    address is global: this PC's router answers both, but sits behind the provider's, with 192.168.0.29 for an
+    address, and a mapping there would reach nothing), which Radicle's externalAddresses announce too; its
+    private address on its local network, with the network; and its ticket. Its node listens on every
+    interface for that (restarted once). To reach another node it tries the public addresses, then the
+    local ones, those on a network of its own first (a node in a container goes out through its host's
+    network, on another subnet), with a TCP connection and a 1.5 s timeout, all at once; then the tunnel.
+    An address that opened but never gave a session in DIRECT_STUCK (180) seconds is another device, or a
+    firewall, and waits RETRY_DIRECT (600) seconds: 180 because a node that restarted is refused until the
+    other side drops its old session, 75 s in a test on this PC. Radicle's handshake checks the node, so the
+    same private network in another house is only a failed attempt. What works goes into the node's own
+    config (`connect`), so it reconnects at every start with nothing of legion's running, which is all a
+    sandbox's node gets. Whether processes outlive the command: a canary, a process that only sleeps, is
+    started and looked at the next time; two found dead in a row (a reboot kills one) make the node withdraw
+    what it published (an event with nothing in it) and only connect out, and one that lives a minute makes
+    it expose itself again (in a test: withdrawn at the second check, back a minute later). `outbound` says it
+    from the start. Measured with two nodes on this PC, one outbound reaching the other by its LAN address:
+    the event is in the other node's storage when the command that made it returns (6-7 s, the command's
+    own time). Two things are left to the people: Windows' firewall (on a network Windows takes for public,
+    as this PC's Wi-Fi, nothing from the LAN reaches the node until they allow it; then the others take the
+    tunnel, or the connection goes the other way, which is enough, since a session carries both directions),
+    and `legion.upnp=false` where nobody wants the router touched.
   - *A publish took a minute on its own machine*: each push to the node spent 11-17 s in Radicle's helper
     going through every ref of the storage (24,000: every node kept every save and judged patch it ever saw,
     670 refs each, of which some 70 were still of use), then 10 s waiting for the seeds to confirm, and a

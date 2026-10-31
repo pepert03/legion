@@ -432,11 +432,14 @@ def cmd_tunnel(repo, what: str) -> None:
         tunnel.off(repo)
         print("This node's tunnels are closed.")
         return
-    if not tunnel.binary():
+    if not tunnel.binary() and what not in ("auto", "outbound"):
         raise Fail("the tunnels need dumbpipe: `cargo install dumbpipe`, or put a binary from "
                    "https://github.com/n0-computer/dumbpipe/releases on the PATH")
     coordgit.git(repo, "config", "legion.tunnel", what)
-    print("Setting up the tunnels (dumbpipe; the first time, the node may restart to listen on 127.0.0.1)…",
+    print({"auto": "Finding out how this node can be reached (the first time, the node restarts to listen on "
+                   "every interface)…",
+           "outbound": "Connecting out to the nodes that can be reached…"}.get(
+        what, "Setting up the tunnels (dumbpipe; the first time, the node may restart to listen on 127.0.0.1)…"),
           flush=True)
     for note in tunnel.keep(repo, strict=True):
         print(f"  {note}")
@@ -444,7 +447,14 @@ def cmd_tunnel(repo, what: str) -> None:
                   "reaches them (only an integrator's hub counts). Keep this machine on.",
            "client": "This node connects to the project's hubs through their tunnels, and fetches from them first.",
            "mesh": "This node is exposed through its tunnel, and connects to the hubs and to up to "
-                   f"{tunnel.PEERS} other active nodes."}[what])
+                   f"{tunnel.PEERS} other active nodes.",
+           "auto": "This node publishes how it can be reached (from the internet, from its local network, through "
+                   "its tunnel), and connects to the hubs and to up to "
+                   f"{tunnel.PEERS} other active nodes the most direct way. If its background processes turn out "
+                   "not to outlive the commands that start them, it only connects out."
+                   + ("" if tunnel.binary() else " Without dumbpipe there are no tunnels: only direct connections."),
+           "outbound": "This node exposes nothing, and connects out to the nodes that published an address it "
+                       "reaches. Its node remembers them, and connects to them whenever it starts."}[what])
     print("The tunnels are checked and relaunched with every network fetch. `legion radicle tunnel status` "
           "shows them.")
 
@@ -2603,9 +2613,11 @@ def parser() -> argparse.ArgumentParser:
                         "doctor: can this machine reach the seeds, directly or through its HTTP proxy?; "
                         "seed HOST:PORT: make this always-on node the project's own seed; "
                         "prefer NID@HOST:PORT: keep a connection to that seed and fetch from it first; "
-                        "tunnel hub|client|mesh|off|status: direct connections between the nodes through NAT, "
-                        "with dumbpipe (hub: be the project's hub; client: connect to the hub; mesh: connect "
-                        "to the hub and to the other active nodes)")
+                        "tunnel hub|client|mesh|auto|outbound|off|status: direct connections between the nodes "
+                        "(hub: be the project's hub; client: connect to the hub; mesh: connect to the hub and to "
+                        "the other active nodes, through dumbpipe tunnels; auto: each node works out how it can be "
+                        "reached, by address on the internet or the local network or by tunnel; outbound: only "
+                        "connect out)")
     s.add_argument("target", nargs="?", help="for seed: HOST:PORT the others reach; for prefer: NID@HOST:PORT; "
                                              "for tunnel: the mode, or status")
     s.add_argument("--alias", help="node alias (default: your legion name)")
