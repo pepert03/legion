@@ -960,6 +960,9 @@ def tidy(repo) -> None:
     subprocess.run(["git", "pack-refs", "--all"], cwd=repo, capture_output=True)
 
 
+BIG_PUBLISH = 20  # more refspecs than this besides its own coord: the coord goes out first, alone
+
+
 def publish(repo, who: str) -> None:
     """Push this repository's legion refs to the node, under `who` (its identity's key, 16 hex characters);
     the node announces them to the network."""
@@ -974,9 +977,11 @@ def publish(repo, who: str) -> None:
     main = main_spec(repo)
     try:
         # Everything in one push when it goes through: Radicle's helper spends ten seconds and more on each
-        # before it sends anything, and a publish made four.
-        if len(rest) > 200:
-            raise RadError("too many refspecs for one command line")
+        # before it sends anything, and a publish made four. But not when there's a lot besides this node's own
+        # events (the first publish after an update deletes hundreds of refs): where a sandbox kills the push
+        # when the command returns, the big one never finished, and with it went this node's events.
+        if len(rest) > BIG_PUBLISH:
+            raise RadError("too much for one push")
         try:
             _push(repo, own + rest + main, strict=True)
         except RadError as e:

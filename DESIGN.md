@@ -403,6 +403,9 @@ be removed, and a removed integrator's later events stop counting).
     But whether it ran at all was told by its beat alone, fresh for a minute after the sandbox killed it:
     commands woke a dead process and waited the full minute for nothing. The beat holds its pid, and a
     process that no longer runs isn't alive, so the command pushes itself (see above).
+    And a publish with more than BIG_PUBLISH (20) refspecs besides this node's coord, as the first one after an
+    update that deletes hundreds of refs, pushes the coord alone first: killed halfway, the big push took this
+    node's events down with it.
   - *Renamed agents*: instinct's six agents, named -a to -f, became instinct-pepe#1 to #6 to count as one
     owner, but their earlier ideas kept the old names, and one was handed its own idea to judge. Whose an
     idea or critique is goes by its author's key, named as it is now (`owner_now`).
