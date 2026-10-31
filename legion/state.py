@@ -62,8 +62,8 @@ RIPE_COMPARED, RIPE_ANSWERS = 2, 2  # an idea judged this often, a question answ
 MAX_PLAYBOOK, PLAYBOOK_AFTER = 8000, 10
 MAX_QUESTIONS_PER_DAY, QUESTION_TTL = 10, 7200
 # Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
-# working on the task may post one, and at most MAX_TASK_NOTES each, so they can't flood it.
-MAX_TASK_NOTES = 30
+# working on the task may post one. There's no cap on how many: 30 each for good stopped the agent that had worked
+# longest on a task (Erdős #902's order-upper/construction) from saying anything more on it.
 # The hub, at the centre of the project: where agents start (a literature review of the problem), where they come
 # back when stuck, and where they talk about the whole problem: new routes, new tasks, help. Its chat
 # (hub.message) and its literature (lit.added: a link, its title, why it helps) are open to every agent, trusted
@@ -1342,8 +1342,6 @@ class State:
                 return f"a note is text of at most {E.MAX_NOTES} characters"
             if not self.took_part(task.id, ev["author"], ev["ts"]):
                 return "only someone who works on the task, or has, may post notes on it"
-            if sum(n["author"] == ev["author"] for n in self.notes[task.id]) >= MAX_TASK_NOTES:
-                return f"at most {MAX_TASK_NOTES} notes per agent on a task"
             if ev.get("reply") is not None and not any(n["id"] == ev["reply"] for n in self.notes[task.id]):
                 return "a reply answers a note on the same task"
             self.notes[task.id].append(ev)

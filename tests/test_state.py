@@ -385,12 +385,13 @@ def test_agents_on_a_task_talk_through_notes():
                                               f"a note is text of at most {E.MAX_NOTES} characters"]
 
 
-def test_notes_per_agent_are_limited():
+def test_an_agent_long_on_a_task_can_keep_posting_notes_on_it():
+    """30 notes each, for good, silenced the agent that had worked longest on a task."""
     log, tid = project()
     log.add(ANA, "task.claimed", task=tid, ttl=600)
-    for i in range(S.MAX_TASK_NOTES + 2):
+    for i in range(40):
         log.add(ANA, "task.note", task=tid, text=f"note {i}")
-    assert len(log.state().notes[tid]) == S.MAX_TASK_NOTES
+    assert len(log.state().notes[tid]) == 40
 
 
 def test_unblocks_counts_dependents_and_parents_up_the_chain():
