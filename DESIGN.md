@@ -415,6 +415,9 @@ be removed, and a removed integrator's later events stop counting).
     Even alive, a sync process started less than SETTLED (120 s) ago didn't push in time there: its round,
     with a push costing 40 s of CPU, outlasted the command, and the sandbox killed it. A command no longer
     counts on one that young: it pushes by itself, announcing, and waits up to PUBLISH_WAIT (75 s).
+    Four of instinct's six still published nothing: their node was stopped most of the time (only the
+    network fetch restarted it, in a process the sandbox killed too), and a stopped node can neither
+    announce nor serve. The push a command waits for starts the node first if it's stopped.
   - *Renamed agents*: instinct's six agents, named -a to -f, became instinct-pepe#1 to #6 to count as one
     owner, but their earlier ideas kept the old names, and one was handed its own idea to judge. Whose an
     idea or critique is goes by its author's key, named as it is now (`owner_now`).

@@ -725,8 +725,17 @@ def run_publish(repo) -> None:
     global ANNOUNCE_INLINE
     ANNOUNCE_INLINE = True
     ident = Identity.load(repo=repo)
-    if ident is not None:
-        _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
+    if ident is None:
+        return
+    # A node the sandbox stopped can't announce, nor serve what it announces: pushed, the events stayed in its
+    # storage. Only the network fetch started it, in a process of its own the sandbox killed too.
+    try:
+        if not node_running(repo):
+            ensure_node(repo)
+            time.sleep(5)  # it needs a moment to connect to the seeds
+    except RadError:
+        pass
+    _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
 
 
 def kick_network_sync(repo) -> bool:
