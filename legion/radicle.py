@@ -688,6 +688,19 @@ def kick_publish(repo) -> None:
     _kick(repo, "publish", stale=PUSH_TIMEOUT)
 
 
+def wait_marked(repo, seconds: float) -> bool:
+    """Wait until this clone's latest events and main are what the node holds from it (published_mark), as a
+    sync process records once it pushed them, up to `seconds`. True if they are."""
+    end = time.time() + seconds
+    while True:
+        last = (_cfg(repo, "legion.published") or "").split()
+        if last and last[0] == published_mark(repo):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+
+
 def wait_published(repo, seconds: float) -> bool:
     """Wait until no publish runs (it finished, or died), up to `seconds`. True if it's done."""
     end = time.time() + seconds

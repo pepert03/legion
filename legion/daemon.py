@@ -83,6 +83,15 @@ def start() -> None:
         pass
 
 
+def age() -> float:
+    """How long the running sync process has been up (0 if it can't tell). One that keeps being started anew
+    lives where sandboxes kill background processes, and a command waits for it to push (see Ctx.sync)."""
+    try:
+        return max(0.0, time.time() - float((folder() / "started").read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return 0.0
+
+
 def wake() -> None:
     """Something to publish: sync now rather than at the next round."""
     w = folder() / "wake"
@@ -207,6 +216,7 @@ def run(rounds: int | None = None, log=_log) -> int:
     if not lock_file(me):
         return 0  # another daemon serves this machine
     stamp, done = _code_stamp(), 0
+    (d / "started").write_text(str(time.time()), encoding="utf-8")
     log(f"{time.strftime('%H:%M:%S')} legion daemon started (pid {os.getpid()})")
     while rounds is None or done < rounds:
         (d / "beat").write_text(str(os.getpid()), encoding="utf-8")

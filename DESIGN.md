@@ -396,6 +396,10 @@ be removed, and a removed integrator's later events stop counting).
     agent recorded never went out (instinct's round 2: two acceptances stuck for two hours). A command
     with events of its own now waits for their push, up to PUBLISH_WAIT (45 s), as the push inside the
     command did before; a longer one carries on in the background.
+    The same went for a push left to the sync process, which those sandboxes kill as well: where it was
+    started less than SETTLED (120 s) ago, a command with events of its own waits up to PUBLISH_WAIT (60 s)
+    until the node holds them (legion.published matches published_mark); where it has lived longer, it
+    will be there to push, and the command doesn't wait.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its

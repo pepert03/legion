@@ -36,7 +36,8 @@ def need_identity(repo=None) -> Identity:
 
 AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
 LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see Ctx.sync)
-PUBLISH_WAIT = 45  # seconds a command with events of its own waits for their push (see Ctx._publish)
+PUBLISH_WAIT = 60  # seconds a command with events of its own waits for their push (see Ctx._publish)
+SETTLED = 120  # seconds after which a sync process is taken to stay, and a command doesn't wait for its push
 
 
 def remember_agent(repo) -> None:
@@ -77,12 +78,17 @@ class Ctx:
         # brought, and wakes it when there is something to publish. The integrator always syncs by itself.
         served = (not self.strict and coordgit.is_radicle(self.repo) and daemon.serving(self.repo))
         if served:
+            from . import radicle
             if getattr(self, "unpublished", None):
                 daemon.wake()
-                print(f"legion: {', '.join(self.unpublished)} go out within seconds (this machine's sync process "
-                      "publishes them).", file=sys.stderr)
+                # Waited for, as a push of its own is (see _publish), where the sync process is new: sandboxes
+                # kill it too once the command returns. One that has lived for a while will be there to push.
+                if daemon.age() < SETTLED and radicle.wait_marked(self.repo, PUBLISH_WAIT):
+                    print(f"legion: published {', '.join(self.unpublished)}.", file=sys.stderr)
+                else:
+                    print(f"legion: {', '.join(self.unpublished)} go out within seconds (this machine's sync "
+                          "process publishes them).", file=sys.stderr)
                 self.unpublished = []
-            from . import radicle
             self.unreachable = [] if radicle.netsync_status(self.repo).get("ok", True) else ["network"]
         else:
             try:

@@ -563,3 +563,16 @@ def test_a_command_with_events_of_its_own_waits_for_their_push(tmp_path, monkeyp
     alive[7] = True
     monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
     assert not radicle.wait_published(repo, 0)                          # still pushing: the command goes on
+
+def test_a_command_waits_for_the_sync_process_to_push_its_events(tmp_path, monkeypatch):
+    """Sandboxes kill the sync process too once the command returns: what it was to push never went out."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    monkeypatch.setattr(radicle, "published_mark", lambda repo: "m2")
+    git(repo, "config", "legion.published", "m1 0")                    # the node holds an older state
+    pushed = []
+    monkeypatch.setattr(radicle.time, "sleep", lambda s: pushed.append(1) or git(repo, "config", "legion.published", "m2 1"))
+    assert radicle.wait_marked(repo, 60) and pushed == [1]             # the sync process pushed it meanwhile
+    monkeypatch.setattr(radicle, "published_mark", lambda repo: "m3")
+    monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
+    assert not radicle.wait_marked(repo, 0)                             # not yet: the command goes on
