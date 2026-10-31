@@ -620,11 +620,19 @@ def kick_announce(repo) -> None:
     _kick(repo, "announce")
 
 
-def pid_alive(pid) -> bool:
-    """Whether the process runs. Sandboxes kill the background processes, which leave "running" behind them:
-    a publish taken for under way for ten minutes after it died, and a node nobody restarted meanwhile."""
+def pid_alive(pid, what: str = "legion") -> bool:
+    """Whether the process runs, and is the one meant (its command line names `what`, where it can be read).
+    Sandboxes kill the background processes, which leave "running" behind them: a publish taken for under way
+    for ten minutes after it died, and a node nobody restarted meanwhile. And a sandbox started anew numbers its
+    processes from low again, so the pid of a dead push was soon another process's."""
     if not isinstance(pid, int) or pid <= 0:
         return True  # an older legion's process, which noted no pid: as before, its age decides
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if not IS_WINDOWS and Path("/proc").is_dir():
+        try:
+            return what.encode() in cmdline.read_bytes()
+        except OSError:
+            return False
     if IS_WINDOWS:
         import ctypes
         k = ctypes.windll.kernel32

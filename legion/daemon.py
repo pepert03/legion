@@ -64,7 +64,7 @@ def alive() -> bool:
         pid = beat.read_text(encoding="utf-8").strip()
     except OSError:
         return False
-    return pid_alive(int(pid)) if pid.isdigit() else True
+    return pid_alive(int(pid), "daemon") if pid.isdigit() else True
 
 
 def serving(repo) -> bool:

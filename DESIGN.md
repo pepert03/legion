@@ -406,6 +406,9 @@ be removed, and a removed integrator's later events stop counting).
     And a publish with more than BIG_PUBLISH (20) refspecs besides this node's coord, as the first one after an
     update that deletes hundreds of refs, pushes the coord alone first: killed halfway, the big push took this
     node's events down with it.
+    A sandbox started anew numbers its processes from low again, so a dead push's pid was soon another
+    process's, and taken for the push still running: on Linux a pid counts only if its command line names
+    legion (the sync process: `daemon`).
   - *Renamed agents*: instinct's six agents, named -a to -f, became instinct-pepe#1 to #6 to count as one
     owner, but their earlier ideas kept the old names, and one was handed its own idea to judge. Whose an
     idea or critique is goes by its author's key, named as it is now (`owner_now`).

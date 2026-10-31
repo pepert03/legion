@@ -538,7 +538,7 @@ def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_pa
     monkeypatch.undo()                                                  # the real kick, not conftest's
     monkeypatch.setattr(radicle, "spawn_detached", lambda cmd, cwd, log=None, env=None: started.append(cmd[-1]) or Proc())
     alive = {4242: True}
-    monkeypatch.setattr(radicle, "pid_alive", lambda pid: alive.get(pid, True))
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": alive.get(pid, True))
     radicle.kick_publish(repo)
     radicle.kick_publish(repo)                                          # alive: it goes again, no second one
     assert started == ["--publish"]
@@ -556,7 +556,7 @@ def test_a_command_with_events_of_its_own_waits_for_their_push(tmp_path, monkeyp
     repo = tmp_path / "r"
     git(tmp_path, "init", "-q", str(repo))
     alive = {7: True}
-    monkeypatch.setattr(radicle, "pid_alive", lambda pid: alive[pid])
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": alive[pid])
     monkeypatch.setattr(radicle.time, "sleep", lambda s: alive.update({7: False}))   # it finishes meanwhile
     radicle._write_netsync(repo, {"started": radicle.time.time(), "running": True, "pid": 7}, "publish")
     assert radicle.wait_published(repo, 45)
@@ -586,5 +586,5 @@ def test_a_sync_process_the_sandbox_killed_isnt_taken_for_alive_by_its_fresh_bea
     daemon.folder().mkdir(parents=True)
     (daemon.folder() / "beat").write_text(str(os.getpid()))
     assert daemon.alive()
-    monkeypatch.setattr(radicle, "pid_alive", lambda pid: False)       # killed a moment ago
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": False)       # killed a moment ago
     assert not daemon.alive()
