@@ -549,3 +549,17 @@ def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_pa
     alive[4242] = False
     radicle.kick_network_sync(repo)                                     # within the minute, but it died
     assert started.count("netsync") == 2
+
+def test_a_command_with_events_of_its_own_waits_for_their_push(tmp_path, monkeypatch):
+    """Where a sandbox kills what runs in the background once the command returns, the push left to a process of
+    its own died with it, and nothing the agent recorded went out."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    alive = {7: True}
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid: alive[pid])
+    monkeypatch.setattr(radicle.time, "sleep", lambda s: alive.update({7: False}))   # it finishes meanwhile
+    radicle._write_netsync(repo, {"started": radicle.time.time(), "running": True, "pid": 7}, "publish")
+    assert radicle.wait_published(repo, 45)
+    alive[7] = True
+    monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
+    assert not radicle.wait_published(repo, 0)                          # still pushing: the command goes on

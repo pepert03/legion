@@ -688,6 +688,16 @@ def kick_publish(repo) -> None:
     _kick(repo, "publish", stale=PUSH_TIMEOUT)
 
 
+def wait_published(repo, seconds: float) -> bool:
+    """Wait until no publish runs (it finished, or died), up to `seconds`. True if it's done."""
+    end = time.time() + seconds
+    while _under_way(netsync_status(repo, "publish"), PUSH_TIMEOUT):
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+    return True
+
+
 def run_publish(repo) -> None:
     from .coordgit import publish_radicle
     from .identity import Identity

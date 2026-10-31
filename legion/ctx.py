@@ -36,6 +36,7 @@ def need_identity(repo=None) -> Identity:
 
 AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
 LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see Ctx.sync)
+PUBLISH_WAIT = 45  # seconds a command with events of its own waits for their push (see Ctx._publish)
 
 
 def remember_agent(repo) -> None:
@@ -95,13 +96,14 @@ class Ctx:
                     else:
                         print("legion: this clone is being synced by another process right now: reading what it "
                               "has", file=sys.stderr)
+                done = True
                 if coordgit.is_radicle(self.repo):
-                    self._publish()
+                    done = self._publish(wait=bool(getattr(self, "unpublished", None)))
                     daemon.clear_stale_locks(self.repo, lambda m: print(f"legion: {m}", file=sys.stderr))
                 if getattr(self, "unpublished", None):
-                    print(f"legion: published {', '.join(self.unpublished)}." if self.strict or not
-                          coordgit.is_radicle(self.repo) else f"legion: {', '.join(self.unpublished)} go out within "
-                          "seconds (a process of its own publishes them).", file=sys.stderr)
+                    print(f"legion: published {', '.join(self.unpublished)}." if done else
+                          f"legion: {', '.join(self.unpublished)} go out within seconds (a process of its own "
+                          "publishes them).", file=sys.stderr)
                     self.unpublished = []
             except coordgit.GitError as e:
                 self._sync_failed(e)
@@ -115,7 +117,7 @@ class Ctx:
                     daemon.wake()
                 else:
                     try:
-                        self._publish()
+                        self._publish(wait=True)
                     except coordgit.GitError as e:
                         self._sync_failed(e)
             coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
@@ -129,14 +131,17 @@ class Ctx:
                 print(f"legion: warning: couldn't reach any peer ({', '.join(peers)}); "
                       "working with what you have locally", file=sys.stderr)
 
-    def _publish(self) -> None:
+    def _publish(self, wait: bool = False) -> bool:
         """With no sync process to push for it, the integrator pushes itself; any other command leaves the push
-        to a process of its own (see radicle.kick_publish)."""
+        to a process of its own (see radicle.kick_publish), and with something of its own to publish (`wait`)
+        waits up to PUBLISH_WAIT for it: where a sandbox kills what runs in the background once the command
+        returns, the push died with it, and nothing an agent recorded went out. True if it's out."""
         from . import radicle
         if self.strict:
             coordgit.publish_radicle(self.repo, self.ident)
-        else:
-            radicle.kick_publish(self.repo)
+            return True
+        radicle.kick_publish(self.repo)
+        return wait and radicle.wait_published(self.repo, PUBLISH_WAIT)
 
     def _sync_failed(self, e: Exception) -> None:
         if self.strict:

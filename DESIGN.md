@@ -391,6 +391,11 @@ be removed, and a removed integrator's later events stop counting).
   - *Background processes the sandbox killed*: they left "running" in their status file, and the next
     commands took a publish for under way for ten minutes after it died, and the network fetch that restarts
     a stopped node for five. Each now notes its pid, and one that no longer runs is started again at once.
+  - *Pushes the sandbox killed when the command returned*: leaving the push to a process of its own
+    worked where background processes live; in sandboxes that kill them as each command returns, what an
+    agent recorded never went out (instinct's round 2: two acceptances stuck for two hours). A command
+    with events of its own now waits for their push, up to PUBLISH_WAIT (45 s), as the push inside the
+    command did before; a longer one carries on in the background.
   - *Silent failures*: a claim that lapsed while its agent kept working (now every command on the task warns,
     and `heartbeat` says until when), `update` saying "up to date" where git couldn't reach GitHub (now it asks
     GitHub's API, installs the zip if `git+` fails, and says when it can't tell), an owner's vote replaced by its
