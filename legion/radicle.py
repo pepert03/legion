@@ -690,6 +690,15 @@ def _rounds(repo, name: str, work) -> None:
         _write_netsync(repo, {"started": time.time(), "running": False}, name)
 
 
+def announce_waiting(repo) -> bool:
+    """Announce this node's refs and wait, up to 40 s, until one seed has fetched them. True if one did."""
+    try:
+        return run("rad", "sync", "--announce", rid(repo), "--replicas", "1", "--timeout", "40sec", repo=repo,
+                   check=False, timeout=50).returncode == 0
+    except (RadError, OSError):
+        return False
+
+
 def run_announce(repo) -> None:
     _rounds(repo, "announce", lambda: run("rad", "sync", "--announce", rid(repo), "--timeout", "30sec", repo=repo,
                                           check=False, timeout=60))
@@ -1084,6 +1093,14 @@ def publish(repo, who: str) -> None:
     own = [s for s in specs if s.startswith("+refs/legion/pub/")]
     rest = [s for s in specs if s not in own]
     main = main_spec(repo)
+    if ANNOUNCE_INLINE and own:
+        # Where the node lives only as long as the command (a sandbox), this node's own events go first and alone,
+        # and it waits until a seed has fetched them: instinct's b and e (400 patches to push, storages of 0.5 and
+        # 1.7 GB) were cut off before any seed fetched what they had pushed, and for days their events reached
+        # nobody. The seeds pass them on among themselves.
+        _push(repo, own, strict=True)
+        announce_waiting(repo)
+        own = []
     try:
         # Everything in one push when it goes through: Radicle's helper spends ten seconds and more on each
         # before it sends anything, and a publish made four. But not when there's a lot besides this node's own

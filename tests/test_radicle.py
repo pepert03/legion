@@ -644,6 +644,25 @@ def test_a_node_whose_storage_went_back_takes_up_the_networks_chain_of_its_signe
     assert not git(store, "for-each-ref", "refs/legion-heal/")
 
 
+def test_where_the_node_lives_as_long_as_the_command_its_events_go_out_first_and_wait_for_a_seed(tmp_path, monkeypatch):
+    """Instinct's b and e had 400 patches to push: cut off before any seed fetched what they pushed, their events
+    reached nobody for days."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    specs = (["refs/legion/pub/me/coord:refs/legion/pub/me/coord"]
+             + [f"refs/legion/patches/t-1/a-{n}:refs/legion/patches/t-1/a-{n}" for n in range(radicle.BIG_PUBLISH + 5)])
+    for name, value in (("tidy", lambda repo: None), ("publish_specs", lambda repo, who: specs),
+                        ("main_spec", lambda repo: []), ("published_mark", lambda repo: "m"),
+                        ("publish_main", lambda repo: None), ("ANNOUNCE_INLINE", True)):
+        monkeypatch.setattr(radicle, name, value)
+    done = []
+    monkeypatch.setattr(radicle, "_push", lambda repo, specs, strict, sync=False: specs and done.append(
+        "own" if all(s.startswith("+refs/legion/pub/") for s in specs) else "rest"))
+    monkeypatch.setattr(radicle, "announce_waiting", lambda repo: done.append("announced") or True)
+    radicle.publish(repo, "me")
+    assert done[:2] == ["own", "announced"] and set(done[2:]) == {"rest"}
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""
