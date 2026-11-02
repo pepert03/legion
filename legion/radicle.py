@@ -654,7 +654,7 @@ def pid_alive(pid, what: str = "legion") -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError:
+    except (OSError, SystemError):  # Windows' os.kill raises SystemError for some processes of others
         return True  # someone else's: it exists
     return True
 
