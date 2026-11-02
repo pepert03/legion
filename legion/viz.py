@@ -81,7 +81,8 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
                       "working": [c.author for c in working],
                       "best": st.best(t.id), "zone": t.zone, "accept": t.accept, "body": t.body,
                       "refute": st.refute_command(t) if t.mode == "exclusive" and t.kind == "task" else "",
-                      "children": len(kids), "children_done": sum(st.done(k.id) for k in kids)})
+                      "children": len(kids), "children_done": sum(st.done(k.id) for k in kids),
+                      "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None})
 
     agents = {}
     for ev in evs:
@@ -154,6 +155,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         a["silent"] = int(now - a["last_ts"]) if a["holds"] and now - a["last_ts"] > SILENT_SECONDS else None
         a["claim_ends"] = max(ends) if ends else None
         a["trust"] = None if a["role"] == "integrator" else (by_agent.get(a["author"]) or trust.Trust()).as_dict()
+        a["plateau"] = st.plateau(a["author"])
     people = {}  # names are agents on computers now, not people: no per-person scores
 
     counts = {}

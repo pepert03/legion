@@ -918,6 +918,87 @@ def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, mo
     assert cli.main(["run", "--", "my-agent"]) == 0 and ran == []
 
 
+def test_run_stops_an_agent_that_runs_again_and_again_without_doing_anything(project, monkeypatch, capsys):
+    """Two thirds of a plateaued agent's spend went on turns that proposed nothing (arXiv 2610.20563). And under
+    run, the agent is told to end its session after each task: run starts it again with a clean context."""
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    ran, run_agent = [], cli.run_agent
+    monkeypatch.setattr(cli, "run_agent", lambda argv: ran.append(argv) or 0)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(["run", "--", "my-agent"]) == 3 and len(ran) == cli.RUN_EMPTY
+    assert "without recording anything" in capsys.readouterr().out
+    envs = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, env=None: envs.append(env) or subprocess.CompletedProcess(argv, 0))
+    run_agent(["my-agent"])
+    monkeypatch.undo()
+    assert envs[0]["LEGION_RUN"] == "1"
+    monkeypatch.setenv("LEGION_RUN", "1")
+    assert "end this session" in cli.keep_going() and "end this session" in cli.keep_going(start=True)
+
+
+def test_a_competitive_candidate_that_gains_nothing_keeps_its_metric_for_the_pool(project, capsys):
+    """A team shares its candidates and their scores (arXiv 2610.20563): one that doesn't beat the best is still
+    one to look at, with its metric, and so are the lines it changes."""
+    from legion import cli
+    repo, tids, _ = project
+    boss, luis = make_project.people["boss"], make_project.people["luis"]
+    ana = Identity.generate("ana#2")
+    (repo / "c.txt").write_text("10\n")
+    (repo / "metric.py").write_text("print(open('c.txt').read())\n")
+    (repo / "holdout.py").write_text("import sys; sys.exit(open('c.txt').read().strip() == '6')\n")  # 6 games it
+    git(repo, "add", "c.txt", "metric.py", "holdout.py")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "c")
+    make_project.add(boss, "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    tid = S.task_id(make_project.add(boss, "task.created", key="c", title="c", zone=["c.txt"], accept="python -c pass",
+                                     mode="competitive", metric="python metric.py", goal="min",
+                                     holdout="python holdout.py"))
+
+    def candidate(who, value):
+        main = Ctx(sync=False).st.main_tip
+        git(repo, "checkout", "-q", "--detach", main)
+        (repo / "c.txt").write_text(value)
+        git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qam", value)
+        branch = coordgit.patch_branch(repo, tid, who.short, 1)
+        coordgit.publish_patch(repo, branch)
+        make_project.add(who, "patch.submitted", task=tid, commit=git(repo, "rev-parse", "HEAD"), branch=branch,
+                         lines=cli.changed_lines(repo, main))
+        git(repo, "checkout", "-q", "main")
+        integrator.integrate_once(Ctx(), 60, log=lambda line: None)
+
+    candidate(ana, "7\n")
+    candidate(luis, "8\n")
+    candidate(make_project.people["marta"], "6\n")  # a better metric, but the holdout check fails
+    st = Ctx(sync=False).st
+    assert [(p.verdict, p.code, p.metric, p.lines) for p in st.patches_for(tid)] == [
+        ("accepted", None, 7.0, 2), ("rejected", "no_gain", 8.0, 2), ("rejected", "holdout", None, 2)]
+    assert [p.metric for p in st.pool(tid)] == [7.0, 8.0]
+    capsys.readouterr()
+    assert cli.main(["pool", tid]) == 0
+    shown = capsys.readouterr().out
+    assert "round 1" in shown and "8 by luis#1" in shown and "no gain" in shown
+
+
+def test_events_stream_and_recording_commands_answer_in_json(project, capsys):
+    """Small tools that compose: a program reads the project as a stream of events and drives it through
+    commands that answer in JSON."""
+    import json
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    capsys.readouterr()
+    assert cli.main(["events", "--no-sync", "--type", "task.created"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(x)["key"] for x in lines] == ["a", "b"]
+    assert cli.main(["idea", tids["a"], "prove it by induction on n", "--json"]) == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["code"] == 0 and [e["type"] for e in answer["events"]] == ["idea.proposed"]
+    assert cli.main(["idea", tids["a"], "Prove it by induction on n!", "--json"]) == 5  # the same route again
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["events"] == [] and "nearly the same route" in answer["error"]
+
+
 def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
     """The saves that couldn't be dropped were looked at again on every command: 25 s a command."""
     repo, tids, patch = project

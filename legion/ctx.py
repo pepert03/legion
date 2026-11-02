@@ -14,6 +14,9 @@ from . import state as S
 from .identity import Identity
 
 
+EMITTED: list[dict] = []  # the events this process recorded, in order: what a command's --json reports
+
+
 class Fail(Exception):
     def __init__(self, msg: str, code: int = 1):
         super().__init__(msg)
@@ -166,6 +169,7 @@ class Ctx:
         with locks.held(daemon.repo_lock(self.repo)):  # this machine's sync process may be merging into it
             coordgit.append(self.repo, self.ident, ev)
         self.st = trial
+        EMITTED.append(ev)
         # The receipt, before anything goes out: an agent whose tool cut the command off while it published used
         # to retry, or check by hand, not knowing whether the event counted. Recorded here, it counts, and goes
         # out with this command's sync or the next command's.

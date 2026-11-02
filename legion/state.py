@@ -87,6 +87,19 @@ RESULT_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.
 # Once the exclusive tasks are done, claim hands out competitive ones: each agent keeps trying one until it has
 # made COMPETITIVE_TRIES attempts on it since its best last improved, and is done when that holds for all.
 COMPETITIVE_TRIES = 10  # the policy's competitive_tries, unless it says otherwise
+# Rounds with forgetting (arXiv 2610.20563): a team on a competitive task plateaus as its history grows, its agents
+# anchored to what they tried, making ever smaller changes; dropping the history and starting every agent again from
+# the best unblocks it (+10% over agents in parallel there, at the same spend). A round ends when every agent that
+# tried the task since it last improved has made competitive_tries attempts, or ROUND_AFTER were made in all with no
+# improvement; the next opens then, while fewer than ROUNDS were opened and the round ending improved the best (the
+# first always counts). Attempts count from the round's start, and agents are shown the best and this round's
+# candidates, not the notes and ideas of earlier rounds (`log` keeps them). From events, so every node agrees.
+# The policy's rounds 1 is the old way: no rounds, the task ends for each agent at its tries.
+ROUNDS, ROUND_AFTER = 4, 20
+# The view of a stuck task an agent gets on claim (fresh_view): "full", every note; "fresh", the saved work and one
+# line per route that failed, since agents handed the history of failed attempts solve fewer tasks than those that
+# start clean (Recovery-Bench); "ab", half the agents each (by key), to measure which gets more patches accepted.
+FRESH_VIEWS = ("full", "fresh", "ab")
 # Verification by other nodes. A node checks a patch the way the integrator would and signs the result
 # (patch.verified): on which tree it merged it (main plus the patches ahead of it in the queue, which every node
 # works out the same way) and which tree came out. Merges are deterministic, so when the integrator gets there
@@ -107,7 +120,10 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
           # How many agents may work on one exclusive task at once: its holder and those who joined it.
           "max_shared": MAX_SHARED,
           # How many attempts claim hands an agent on one competitive task since its best last improved.
-          "competitive_tries": COMPETITIVE_TRIES}
+          "competitive_tries": COMPETITIVE_TRIES,
+          # Rounds on competitive tasks: at most `rounds`, each ending after `round_after` attempts with no gain
+          # (see ROUNDS). `fresh_view`: what claim shows of a stuck task (see FRESH_VIEWS).
+          "rounds": ROUNDS, "round_after": ROUND_AFTER, "fresh_view": "full"}
 # What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
@@ -158,6 +174,10 @@ class Task:
     contract: dict = field(default_factory=dict)  # file name -> text, written to contract_dir(key) for each check
     kind: str = "task"  # or "result": born with its patch, from a result.submitted event
     refute: str = ""  # the command that checks a refutation (a proof of its negation); "": the policy's, if any
+    # A competitive task's second check, kept apart from the metric it optimizes: a patch that improves the metric
+    # but fails it is rejected. Loops that optimize one number drift away from what it stands for (in-loop gains
+    # three times the audited ones, arXiv 2609.00077): e.g. the metric on the public cases, this on other seeds.
+    holdout: str = ""
 
 
 @dataclass
@@ -191,6 +211,7 @@ class Claim:
     last_beat: float
     released: bool = False
     join: bool = False  # joins whoever holds the task, instead of competing for it
+    view: str = ""  # on a stuck task: the view claim showed it, fresh or full (see FRESH_VIEWS)
     released_ts: float = 0.0
 
     def active(self, now: float) -> bool:
@@ -219,6 +240,18 @@ class Patch:
     on: list = field(default_factory=list)  # patches in review it was built on: it waits for them to be accepted
     refutes: bool = False  # it proves the task's statement false, checked with `check` instead of the task's accept
     check: str = ""
+    lines: int | None = None  # lines it adds and removes: edits that shrink as an agent goes on are a plateau
+
+
+SIMILAR = 0.7  # the share of words in common that makes two ideas the same route (see similar_idea)
+
+
+def words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2}
+
+
+def better(value: float, ref: float, goal: str) -> bool:
+    return value < ref if goal == "min" else value > ref
 
 
 def task_id(ev: dict) -> str:
@@ -316,6 +349,7 @@ class State:
         self.sketches: dict[str, Sketch] = {}
         self.resolved: set = set()  # tasks done because their subtasks were completed
         self.attempts: list[dict] = []
+        self._rounds: dict[str, list[int]] = {}  # task -> where its rounds start (round_starts), until an event
         self.notes: dict[str, list[dict]] = defaultdict(list)  # task -> its notes, in order
         self.saved: dict[str, list[dict]] = defaultdict(list)  # task -> work in progress published on it, in order
         self.hub: list[dict] = []  # the central chat's messages, in order
@@ -689,9 +723,22 @@ class State:
             return "worked"
         return "tried" if idea["tries"] else "in a path" if idea["paths"] else "open"
 
+    def similar_idea(self, tid: str, text: str, skip=()) -> dict | None:
+        """A live idea on the task that says nearly the same (SIMILAR of their words in common): the loop that
+        looks varied while its mechanism collapses (arXiv 2609.00077) starts with the same route proposed again."""
+        mine = words(text)
+        for i in self.ideas_for(tid):
+            theirs = words(i["ev"]["text"])
+            if (i["ev"]["id"] not in skip and mine and theirs
+                    and len(mine & theirs) / len(mine | theirs) >= SIMILAR):
+                return i
+        return None
+
     def ideas_for(self, tid: str) -> list[dict]:
-        """A task's ideas, the best rated first."""
-        return sorted((i for i in self.ideas.values() if i["task"] == tid), key=lambda i: (-i["elo"], i["ev"]["lamport"]))
+        """A task's ideas, the best rated first: of this round, on a competitive task (see ROUNDS)."""
+        since = self.round_start(tid) if tid in self.tasks else -1
+        return sorted((i for i in self.ideas.values() if i["task"] == tid and i["ev"]["lamport"] > since),
+                      key=lambda i: (-i["elo"], i["ev"]["lamport"]))
 
     def owner_now(self, ev: dict) -> str:
         """The owner of an event's author as it is named now: an agent renamed (`id rename`, so that six agents
@@ -915,9 +962,81 @@ class State:
         return max([task.lamport] + [p.lamport for p in self.patches_for(tid, "accepted")]
                    + [k.lamport for k in self.sketches.values() if k.task == tid and k.verdict == "accepted"])
 
+    def round_starts(self, tid: str) -> list[int]:
+        """Where each round of a task begins (see ROUNDS): the lamport after which its attempts count. Exclusive
+        tasks have one, from their creation."""
+        if tid in self._rounds:
+            return self._rounds[tid]
+        task, pol = self.tasks[tid], self.policy
+        starts = [task.lamport]
+        if task.mode == "competitive" and pol["rounds"] > 1:
+            gains = ([(p.lamport, 1, p.author) for p in self.patches_for(tid, "accepted")]
+                     + [(k.lamport, 1, k.author) for k in self.sketches.values() if k.task == tid
+                        and k.verdict == "accepted"])
+            tries = ([(a["lamport"], 0, a["author"]) for a in self.attempts if a.get("task") == tid]
+                     + [(p.lamport, 0, p.author) for p in self.patches_for(tid) if p.verdict != "accepted"])
+            count, improved = defaultdict(int), False
+            for lamport, gain, author in sorted(gains + tries):
+                if gain:
+                    count, improved = defaultdict(int), True
+                    continue
+                count[author] += 1
+                if sum(count.values()) >= pol["round_after"] or min(count.values()) >= pol["competitive_tries"]:
+                    if len(starts) >= pol["rounds"] or len(starts) > 1 and not improved:
+                        break  # the last round: it goes on as before rounds, each agent up to its tries
+                    starts.append(lamport)
+                    count, improved = defaultdict(int), False
+        self._rounds[tid] = starts
+        return starts
+
+    def clean_view(self, author: str) -> bool:
+        """Whether claim shows this agent the fresh view of a stuck task (see FRESH_VIEWS)."""
+        view = self.policy["fresh_view"]
+        return view == "fresh" or view == "ab" and int(hashlib.sha256(author.encode()).hexdigest(), 16) % 2 == 0
+
+    def views(self) -> dict[str, dict]:
+        """The fresh-view experiment so far: for each view, the stuck tasks agents claimed under it and how many of
+        those claims ended in a patch of theirs accepted on that task."""
+        out = {v: {"claims": 0, "accepted": 0} for v in ("fresh", "full")}
+        for tid, claims in self.claims.items():
+            for c in claims:
+                if c.view in out:
+                    out[c.view]["claims"] += 1
+                    out[c.view]["accepted"] += any(p.author == c.author and p.lamport > c.lamport
+                                                   for p in self.patches_for(tid, "accepted"))
+        return out
+
+    def plateau(self, author: str) -> dict:
+        """Signs that an agent has plateaued, measured, not asked (arXiv 2610.20563: as a session grows, its edits
+        shrink from a hundred lines to a few, and turns end proposing nothing): the lines of its latest patches,
+        whether they shrank (`narrowing`: the last two average under a quarter of its first two), and `spinning`,
+        how many claims and reports it made since its last patch."""
+        mine = sorted((p for p in self.patches.values() if p.author == author), key=lambda p: p.lamport)
+        lines = [p.lines for p in mine if p.lines is not None]
+        last = mine[-1].lamport if mine else -1
+        spinning = (sum(1 for a in self.attempts if a["author"] == author and a["lamport"] > last)
+                    + sum(1 for cs in self.claims.values() for c in cs if c.author == author and c.lamport > last))
+        return {"lines": lines[-8:], "spinning": spinning,
+                "narrowing": len(lines) >= 4 and sum(lines[-2:]) * 4 < sum(lines[:2])}
+
+    def round_start(self, tid: str) -> int:
+        return self.round_starts(tid)[-1]
+
+    def pool(self, tid: str) -> list[Patch]:
+        """This round's candidates on a competitive task: each agent's best patch with a metric, the best first.
+        What a team shares in arXiv 2610.20563: candidates and their scores, not the reasoning behind them."""
+        task, since = self.tasks[tid], self.round_start(tid)
+        mine: dict[str, Patch] = {}
+        for p in self.patches_for(tid):
+            if p.lamport > since and p.metric is not None and (
+                    p.author not in mine or better(p.metric, mine[p.author].metric, task.goal)):
+                mine[p.author] = p
+        return sorted(mine.values(), key=lambda p: p.metric if task.goal == "min" else -p.metric)
+
     def attempts_by(self, tid: str, author: str) -> int:
-        """How many times this agent tried the task since it last advanced: reports, patches, released claims."""
-        since = self.last_progress(tid)
+        """How many times this agent tried the task since it last advanced, in this round: reports, patches,
+        released claims."""
+        since = max(self.last_progress(tid), self.round_start(tid))
         return (sum(1 for a in self.attempts if a.get("task") == tid and a["author"] == author and a["lamport"] > since)
                 + sum(1 for p in self.patches_for(tid) if p.author == author and p.lamport > since)
                 + sum(1 for c in self.claims[tid] if c.author == author and c.released and c.lamport > since))
@@ -1157,6 +1276,7 @@ class State:
 
     def apply(self, ev: dict) -> str | None:
         t = ev["type"]
+        self._rounds.clear()
         if t == "project.init":
             if self.project:
                 return "duplicate project.init"
@@ -1247,12 +1367,15 @@ class State:
                                          or ev["refute_check"] and not any(f"{{{k}}}" in ev["refute_check"]
                                                                            for k in ("key", "accept", "arg"))):
                 return "refute_check must be a command with {key}, {accept} or {arg} in it"
-            policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check", "refute_check")
-                           if k in ev})
+            if "fresh_view" in ev and ev["fresh_view"] not in FRESH_VIEWS:
+                return f"fresh_view must be one of {', '.join(FRESH_VIEWS)}"
+            policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check", "refute_check",
+                                              "fresh_view") if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
                                       ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
                                       ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400),
-                                      ("max_shared", int, 1, 50), ("competitive_tries", int, 1, 1000)):
+                                      ("max_shared", int, 1, 50), ("competitive_tries", int, 1, 1000),
+                                      ("rounds", int, 1, 20), ("round_after", int, 1, 10000)):
                 if key in ev:
                     v = ev[key]
                     if not isinstance(v, kind) or isinstance(v, bool) or not lo <= v <= hi:
@@ -1289,7 +1412,8 @@ class State:
             if not isinstance(ttl, int) or not MIN_TTL <= ttl <= MAX_TTL:
                 return "ttl out of range"
             self.claims[task.id].append(Claim(task.id, ev["author"], ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"],
-                                              join=ev.get("join") is True))
+                                              join=ev.get("join") is True,
+                                              view=ev["view"] if ev.get("view") in ("fresh", "full") else ""))
         elif t == "task.heartbeat":
             c = self._my_claim(ev)
             if c is None:
@@ -1389,9 +1513,12 @@ class State:
                 check = self.refute_command(task)
                 if task.mode != "exclusive" or task.kind != "task" or not check:
                     return "this task can't be refuted: it has no refute command, and the policy gives none"
+            lines = ev.get("lines")
+            if lines is not None and (not isinstance(lines, int) or isinstance(lines, bool) or lines < 0):
+                return "lines must be a count"
             self.patches[ev["id"]] = Patch(ev["id"], task.id, ev["author"], ev["name"], ev["commit"],
                                            ev["branch"], ev["lamport"], ts=ev["ts"], on=on, refutes=refutes,
-                                           check=check)
+                                           check=check, lines=lines)
         elif t in ("patch.accepted", "patch.rejected"):
             p = self.patches.get(ev.get("patch"))
             if p is None:
@@ -1503,6 +1630,10 @@ class State:
         if ev.get("refute") is not None and (not isinstance(ev["refute"], str) or not ev["refute"].strip()
                                              or len(ev["refute"]) > 300 or ev.get("sketch") or ev.get("path")):
             return "a refute command is a command, set by whoever creates the task (not a sketch's subtasks)"
+        if ev.get("holdout") is not None and (not isinstance(ev["holdout"], str) or not ev["holdout"].strip()
+                                              or len(ev["holdout"]) > 300 or ev.get("mode") != "competitive"
+                                              or ev.get("sketch") or ev.get("path")):
+            return "a holdout check is a command, for a competitive task, set by whoever creates it"
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
@@ -1522,7 +1653,8 @@ class State:
         self.tasks[tid] = Task(tid, key, ev["title"], zone, ev["accept"], ev.get("mode", "exclusive"),
                                ev.get("metric"), ev.get("goal", "min"), deps, ev.get("size", "M"),
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
-                               depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "")
+                               depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "",
+                               holdout=ev.get("holdout") or "")
         if sketch:
             sketch.child_ids.append(tid)
         return None

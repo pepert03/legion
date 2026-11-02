@@ -26,7 +26,7 @@ from .ctx import Ctx, Fail
 NUM = re.compile(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
 
 # Every rejection carries a code, so the trust score can tell "your tests fail" from bad luck.
-# missing · empty · zone · conflict · done · deps · tests · metric · no_gain · invalid · scaffold
+# missing · empty · zone · conflict · done · deps · tests · metric · no_gain · holdout · invalid · scaffold
 
 
 def tail(text: str, n: int = 15) -> str:
@@ -151,8 +151,8 @@ def measure(cmd: str, cwd, timeout: int) -> tuple[float | None, str]:
     return (float(nums[-1]) if nums else None), out
 
 
-def better(value: float, ref: float, goal: str) -> bool:
-    return value < ref if goal == "min" else value > ref
+better = S.better
+HOLDOUT = "[holdout] "  # marks a check's output as the holdout's
 
 
 def reject(reason: str, code: str):
@@ -405,6 +405,9 @@ def check(repo, job: Job, name: str, timeout: int) -> tuple:
             baseline, _ = measure(job.task.metric, place(repo, job.head, name, scratch), timeout)
         wt = write_contract(place(repo, job.merged, name, scratch), job.task)
         code, out = run_cmd(job.accept, wt, timeout)
+        if code == 0 and job.task.holdout:  # the check kept apart from the metric (S.Task.holdout)
+            code, out = run_cmd(job.task.holdout, wt, timeout)
+            out = HOLDOUT + out if code else out
         value, mout = measure(job.task.metric, wt, timeout) if code == 0 and job.task.metric else (None, "")
         return code, out, value, mout, baseline
     finally:
@@ -429,6 +432,8 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
         return "retry", {"reason": out}
     if code != 0 and broken(out):  # nor does a crash, or a missing tool
         return "retry", {"reason": f"the check broke on this machine:\n{tail(out)}"}
+    if code != 0 and out.startswith(HOLDOUT):
+        return reject(f"the holdout check fails, whatever the metric says:\n{tail(out[len(HOLDOUT):])}", "holdout")
     if code != 0:
         what = "refutation" if job.patch.refutes else "acceptance"
         return reject(f"the {what} command fails:\n{tail(out)}", "tests")
@@ -438,7 +443,9 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
             return reject(f"the metric did not print a number:\n{tail(mout)}", "metric")
         ref = st.best(task.id) if st.best(task.id) is not None else baseline
         if ref is not None and not better(value, ref, task.goal):
-            return reject(f"does not improve the metric: {value:g} vs {ref:g}", "no_gain")
+            # its value goes with it: a candidate of this round all the same, for the others to look at (pool)
+            return "rejected", {"reason": f"does not improve the metric: {value:g} vs {ref:g}", "code": "no_gain",
+                                "metric": value}
         payload["metric"] = value
     payload["merge_commit"] = job.merged
     payload["base"] = job.head

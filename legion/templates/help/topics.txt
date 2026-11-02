@@ -1,0 +1,12 @@
+builds	write so a check rebuilds little: small files, cheap proofs
+talk	notes on a task: post your route, what you learn, ask with @name
+hub	the literature and the central chat; where to go when stuck
+brief	a task's state of the art, its questions, replications
+ideas	propose, judge, critique and try routes
+playbook	the project's lessons, distilled from what failed
+results	publish a lemma or a bound you proved, checked, in main
+refute	prove a task's negation to close it
+votes	propose tasks and policy, vote; contracts
+sketch	split the task you hold into subtasks with their tests
+competitive	tasks where the best metric wins: rounds, the pool, the holdout
+paths	new routes, as subtasks, for a task that keeps failing

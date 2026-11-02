@@ -45,7 +45,8 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "children_done": sum(st.done(c.id) for c in st.children(t.id)),
             "children": len(st.children(t.id)),
             "stalled": st.stalled(t.id), "failures": st.failures_since_progress(t.id),
-            "open_paths": len(st.open_paths(t.id))}
+            "open_paths": len(st.open_paths(t.id)),
+            "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None, "holdout": t.holdout}
 
 
 def tree_order(st: S.State) -> list[S.Task]:
@@ -69,6 +70,8 @@ def task_text(t: dict) -> str:
     if t.get("refute"):
         lines.append(f"  refutation:  {t['refute']} (if the statement is false, prove its negation and "
                      "`submit --refutes`: that closes the task)")
+    if t.get("holdout"):
+        lines.append(f"  holdout:     {t['holdout']} (it must pass too: don't tune to the metric alone)")
     if t.get("contract"):
         lines.append(f"  contract:    {', '.join(t['contract'])} in {S.contract_dir(t['key'])}/ "
                      "(`start` writes it; the patch must pass it unchanged)")
@@ -162,7 +165,8 @@ def status_table(st: S.State, now: float) -> str:
     rows = [("ID", "KEY", "MODE", "STATUS", "CLAIMED BY", "BEST", "DEPENDS ON")]
     for t in tree_order(st):
         d = task_dict(st, t, now)
-        status = d["status"] + (f" {d['children_done']}/{d['children']}" if d["status"] == "sketched" else "")
+        status = (d["status"] + (f" {d['children_done']}/{d['children']}" if d["status"] == "sketched" else "")
+                  + (f" round {d['round']}" if (d["round"] or 0) > 1 else ""))
         holder = " + ".join(d["working"]) if d["status"] in ("claimed", "review", "blocked") else "-"
         rows.append((d["id"], "  " * st.depth_under(t) + d["key"], d["mode"][:4], status, holder or "-",
                      "-" if d["best"] is None else f"{d['best']:g}", ",".join(d["deps"]) or "-"))
@@ -293,7 +297,8 @@ def cmd_init(args):
     coordgit.sync(repo, ident)
     agents = repo / "AGENTS.md"
     if not agents.exists():
-        agents.write_text((TEMPLATES / "AGENTS.md").read_text(encoding="utf-8").replace("{project}", name),
+        agents.write_text((TEMPLATES / "AGENTS.md").read_text(encoding="utf-8").replace("{project}", name)
+                          .replace("{topics}", topics_text()),
                           encoding="utf-8")
     claude = repo / "CLAUDE.md"  # Claude Code reads CLAUDE.md; other agents read AGENTS.md
     if not claude.exists():
@@ -304,10 +309,46 @@ def cmd_init(args):
 
 
 AGENT_PROMPT = "Read AGENTS.md and follow its protocol until it says you are done."
+# AGENTS.md holds the work loop, one page; the rest of the protocol is in topics an agent reads when it needs one
+# (`legion help <topic>`), as Unix keeps its manual in pages: the whole protocol was 5,400 words every agent read in
+# every session, needed or not, and long contexts narrow what agents try (arXiv 2610.20563).
+HELP = TEMPLATES / "help"
+
+
+def help_topics() -> list[tuple[str, str]]:
+    lines = (HELP / "topics.txt").read_text(encoding="utf-8").splitlines()
+    return [tuple(line.split("\t", 1)) for line in lines if "\t" in line]
+
+
+def topics_text() -> str:
+    return "\n".join(f"- `{topic}`: {what}" for topic, what in help_topics())
+
+
+def cmd_help(args):
+    topics = dict(help_topics())
+    if not args.topic:
+        print("Parts of the protocol, each explained by `python -m legion help <topic>` (AGENTS.md has the work "
+              "loop):\n" + topics_text())
+        return
+    if args.topic not in topics:
+        raise Fail(f"no topic {args.topic!r}; there are: {', '.join(topics)}", 2)
+    print((HELP / f"{args.topic}.md").read_text(encoding="utf-8").rstrip())
 # What every step that ends a piece of work reminds the agent: it's a loop, and stopping early is the usual mistake.
 KEEP_GOING = ("verify one patch with `python -m legion verify`, then go straight back to `python -m legion context` "
               "and `python -m legion claim --wait`, without stopping or asking: you're done only when claim exits "
               "with code 4.")
+# Under `legion run`, a session ends after each task and run starts a fresh one: long sessions narrow, an agent
+# making ever smaller changes and ending turns with nothing (arXiv 2610.20563), while a fresh one starts from what
+# the repository holds, not from what it tried. run sets LEGION_RUN in the agent's environment.
+END_SESSION = ("verify one patch with `python -m legion verify`, then end this session: `legion run` starts a fresh "
+               "one, with a clean context, for the next task.")
+START_SESSION = ("claim a task with `python -m legion claim --wait` and work on it. Once you have submitted it, or "
+                 "reported and released it, verify one patch and end this session: `legion run` starts a fresh one.")
+
+
+def keep_going(cap: bool = False, start: bool = False) -> str:
+    text = (START_SESSION if start else END_SESSION) if os.environ.get("LEGION_RUN") else KEEP_GOING
+    return text[0].upper() + text[1:] if cap else text
 
 
 def radicle_ready(alias: str, home: str | None) -> str:
@@ -642,7 +683,8 @@ def create_task(c: Ctx, spec: dict, keymap: dict) -> str:
     ev = c.emit("task.created", key=spec.get("key"), title=spec.get("title"),
                 zone=[zone] if isinstance(zone, str) else zone, accept=spec.get("accept"),
                 mode=spec.get("mode", "exclusive"), metric=spec.get("metric"), goal=spec.get("goal", "min"),
-                deps=deps, size=spec.get("size", "M"), body=spec.get("body", ""), refute=spec.get("refute"))
+                deps=deps, size=spec.get("size", "M"), body=spec.get("body", ""), refute=spec.get("refute"),
+                **({"holdout": spec["holdout"]} if spec.get("holdout") else {}))
     tid = S.task_id(ev)
     if spec.get("key"):
         keymap[spec["key"]] = tid
@@ -656,7 +698,7 @@ def cmd_task(args):
     if args.action == "add":
         spec = {"key": args.key, "title": args.title, "zone": args.zone, "accept": args.accept, "mode": args.mode,
                 "metric": args.metric, "goal": args.goal, "deps": args.deps, "size": args.size, "body": args.body,
-                "refute": args.refute}
+                "refute": args.refute, "holdout": args.holdout}
         print(f"Task created: {create_task(c, spec, keymap)}")
     else:
         specs = json.loads(Path(args.file).read_text(encoding="utf-8"))
@@ -673,7 +715,8 @@ def cmd_status(args):
             "project": st.project.get("project") if st.project else None,
             "tasks": [task_dict(st, t, now) for t in sorted(st.tasks.values(), key=lambda t: t.lamport)],
             "patches": [{"id": p.id, "task": p.task, "key": st.tasks[p.task].key, "name": p.name, "author": p.author,
-                         "verdict": p.verdict, "reason": p.reason, "code": p.code, "metric": p.metric}
+                         "verdict": p.verdict, "reason": p.reason, "code": p.code, "metric": p.metric,
+                         "lines": p.lines}
                         for p in sorted(st.patches.values(), key=lambda p: p.lamport)],
             "sketches": [{"id": k.id, "kind": k.kind, "task": k.task, "key": st.tasks[k.task].key, "name": k.name,
                           "verdict": k.verdict, "outcome": k.outcome, "reason": k.reason,
@@ -738,7 +781,7 @@ def cmd_claim(args):
                 best = "no result yet: any valid one is the first best" if d["best"] is None else f"best so far {d['best']:g}"
                 out(args, {"won": True, "task": d, "competitive": True},
                     f"No exclusive task is free: compete on this one ({best}; goal: {d['goal']}). Work on it and "
-                    f"submit when you beat the best; don't claim it.\n{task_text(d)}")
+                    f"submit when you beat the best; don't claim it.\n{round_text(c.st, helped[0])}{task_text(d)}")
                 return 0
             if not free and helped:
                 t = helped[0]  # nothing open: don't wait, help with the hardest task, or prepare a blocked one
@@ -776,8 +819,10 @@ def cmd_claim(args):
                 # agent already tried since they last advanced go last.
                 t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0,
                                              hashlib.sha256((c.me + t.id).encode()).hexdigest()))
+    clean = c.st.stalled(t.id) and c.st.clean_view(c.me)  # the fresh view of a stuck task (S.FRESH_VIEWS)
     if not c.holder_is_me(t.id):
-        c.emit("task.claimed", task=t.id, ttl=args.ttl, **({"join": True} if join else {}))
+        c.emit("task.claimed", task=t.id, ttl=args.ttl, **({"join": True} if join else {}),
+               **({"view": "fresh" if clean else "full"} if c.st.stalled(t.id) else {}))
         c.sync()
         time.sleep(float(os.environ.get("LEGION_CLAIM_SETTLE", "1.0")))
         c.sync()
@@ -788,7 +833,7 @@ def cmd_claim(args):
             how = (f"You join {', '.join(others)} on this task: it's the hardest one under way. Try your own "
                    "route (read their reports first with `python -m legion log`); the first patch accepted wins. "
                    f"Say which route you take with `python -m legion note {t.id} \"...\"`.\n")
-            if c.st.notes.get(t.id):
+            if c.st.notes.get(t.id) and not clean:
                 how += "Their latest notes:\n" + "\n".join(notes_text(c.st, t.id, 4, 300)) + "\n"
         elif d["status"] == "blocked":
             how = (f"This task is blocked by {', '.join(d['deps'])}: prepare it. Split it with `sketch` into "
@@ -796,7 +841,9 @@ def cmd_claim(args):
                    "reviewed once they are accepted.\n")
         else:
             how = ""
-        if not others and c.st.notes.get(t.id):  # the conversation of those who were on it before you
+        if clean:
+            how += failed_routes(c.st, t)
+        elif not others and c.st.notes.get(t.id):  # the conversation of those who were on it before you
             how += ("The agents who were on it before left notes: read them all (`python -m legion note "
                     f"{t.id}`), build on them, and answer the ones you can (`--reply <id>`). The latest:\n"
                     + "\n".join(notes_text(c.st, t.id, 4, 300)) + "\n")
@@ -848,6 +895,54 @@ def cmd_claim(args):
     out(args, {"won": False, "task": task_dict(c.st, t, time.time())},
         f"{h.name if h else 'Another agent'} claimed {t.key} first. Try again with `claim`.")
     return 3
+
+
+def failed_routes(st: S.State, t: S.Task) -> str:
+    """The fresh view of a stuck task (S.FRESH_VIEWS): one line per route that failed since it last advanced,
+    instead of everything its agents wrote. Agents handed the full history of failed attempts solve fewer tasks."""
+    since = st.last_progress(t.id)
+    fails = [a for a in st.attempts if a.get("task") == t.id and a.get("outcome") == "failure" and a["lamport"] > since]
+    lines = [f"  - {cut(a.get('notes', '').split(chr(10))[0], 140)}" for a in fails[-5:]]
+    return (("This task is stuck. What failed, one line each (that's all you're shown, on purpose: start clean, "
+             "and don't read the old notes before you have your own route):\n" + "\n".join(lines) + "\n")
+            if lines else "")
+
+
+def round_text(st: S.State, t: S.Task) -> str:
+    """What an agent on a competitive task is told of its round (see S.ROUNDS)."""
+    n, pool = len(st.round_starts(t.id)), st.pool(t.id)
+    text = (f"Round {n} of up to {st.policy['rounds']}: the team plateaued, so earlier rounds' notes and ideas are "
+            "set aside on purpose. Start from main, which holds the best, and try your own route, a bold one: "
+            "fresh agents make larger changes.\n" if n > 1 else "")
+    if pool:
+        text += (f"This round's candidates, each agent's best (`python -m legion pool {t.id}`; look at one with "
+                 "`git show <commit>`, and take an idea from it only if it's clearly better, with a change of your "
+                 "own):\n" + "".join(f"  {pool_line(p)}\n" for p in pool[:4]))
+    return text
+
+
+def pool_line(p: S.Patch) -> str:
+    state = "accepted" if p.verdict == "accepted" else "pending" if p.verdict is None else "no gain"
+    return (f"{p.metric:g} by {p.name} (patch {p.id[:8]}, commit {p.commit[:10]}, {state}"
+            + (f", {p.lines} lines changed" if p.lines is not None else "") + ")")
+
+
+def cmd_pool(args):
+    """This round's candidates on a competitive task: each agent's best with its metric. What a team shares in
+    arXiv 2610.20563, the candidates and their scores, without the reasoning that led to them: reading others'
+    full solutions makes a team's ideas converge (arXiv 2608.23541)."""
+    c = Ctx()
+    t = c.task(args.task)
+    if t.mode != "competitive":
+        raise Fail(f"{t.key} isn't competitive: its work is in `note {t.id}` and in its saves", 2)
+    pool, n, best = c.st.pool(t.id), len(c.st.round_starts(t.id)), c.st.best(t.id)
+    out(args, {"task": t.key, "round": n, "best": best,
+               "pool": [{"patch": p.id, "author": p.name, "metric": p.metric, "commit": p.commit, "branch": p.branch,
+                         "verdict": p.verdict, "lines": p.lines} for p in pool]},
+        f"{t.key}, round {n} of up to {c.st.policy['rounds']}; best so far: "
+        + (f"{best:g} (goal: {t.goal})" if best is not None else "none yet") + ".\n"
+        + ("".join(f"  {pool_line(p)}\n" for p in pool) if pool else "  No candidates in this round yet.\n")
+        + "Look at one with `git show <commit>`; borrow from it only if it's clearly better, with a change of your own.")
 
 
 def verify_first(c: Ctx) -> str:
@@ -1171,7 +1266,7 @@ def cmd_report(args):
         print(SAVE_HINT.format(tid=t.id))
     if args.outcome == "failure":
         print(STUCK.format(tid=t.id))
-    print(f"Next: {KEEP_GOING}")
+    print(f"Next: {keep_going()}")
 
 
 def need_git_merge_tree() -> None:
@@ -1329,6 +1424,7 @@ def cmd_propose(args):
             key = f"{parent.key}/{key}"
         payload = {"key": key, "title": args.title, "zone": args.zone, "accept": args.accept,
                    **({"refute": args.refute} if args.refute else {}),
+                   **({"holdout": args.holdout} if args.holdout else {}),
                    "body": args.body or "", "size": args.size, "mode": args.mode, "deps": deps}
         if parent:
             payload["parent"] = parent.id
@@ -1355,11 +1451,13 @@ def cmd_propose(args):
                                      ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
                                      ("results_dir", args.results_dir), ("results_check", args.results_check),
                                      ("refute_check", args.refute_check), ("max_shared", args.max_shared),
-                                     ("competitive_tries", args.competitive_tries))
+                                     ("competitive_tries", args.competitive_tries), ("rounds", args.rounds),
+                                     ("round_after", args.round_after), ("fresh_view", args.fresh_view))
                    if v is not None}
         if not payload:
             raise Fail("say what to change: --quorum, --window, --audit, --reads, --vote-window, --results-dir, "
-                       "--results-check, --refute-check, --max-shared or --competitive-tries")
+                       "--results-check, --refute-check, --max-shared, --competitive-tries, --rounds, "
+                       "--round-after or --fresh-view")
         kind = "project.policy"
     else:
         text = read_description(args)
@@ -1420,7 +1518,8 @@ def cmd_policy(args):
                                 ("vote_window", int(args.vote_window * 3600) if args.vote_window is not None else None),
                                 ("results_dir", args.results_dir), ("results_check", args.results_check),
                                 ("refute_check", args.refute_check), ("max_shared", args.max_shared),
-                                ("competitive_tries", args.competitive_tries))
+                                ("competitive_tries", args.competitive_tries), ("rounds", args.rounds),
+                                ("round_after", args.round_after), ("fresh_view", args.fresh_view))
               if v is not None}
     if change:
         c.require_integrator()
@@ -1430,7 +1529,11 @@ def cmd_policy(args):
     results = (f" Results go in {p['results_dir']}/, checked with `{p['results_check']}`." if p["results_dir"]
                and p["results_check"] else " No results yet (`--results-dir`, `--results-check`).")
     results += (f" Up to {p['max_shared']} agents work on a task at once, and each makes up to "
-                f"{p['competitive_tries']} attempts on a competitive task since its best last improved."
+                f"{p['competitive_tries']} attempts on a competitive task since its best last improved"
+                + (f", in up to {p['rounds']} rounds that start again from the best, each ending after "
+                   f"{p['round_after']} attempts with no gain." if p["rounds"] > 1 else ".")
+                + (f" Stuck tasks are shown {'fresh' if p['fresh_view'] == 'fresh' else 'fresh to half the agents'}"
+                   " (saved work, one line per failed route)." if p["fresh_view"] != "full" else "")
                 + (f" Refutations are checked with `{p['refute_check']}`." if p["refute_check"] else ""))
     if p["mode"] == "open":
         out(args, p, f"Open mode, no integrator: any trusted agent finalizes a patch as soon as "
@@ -1467,11 +1570,14 @@ def cmd_note(args):
         print(f"Note posted on {t.key}; the agents who took part see it in `context` and `note {t.id}`, and anyone "
               "you @mention sees it first.")
         return
-    saves = saves_text(c.st, t.id)
+    saves, earlier = saves_text(c.st, t.id), len(notes) - len(round_notes(c.st, t.id))
+    notes = round_notes(c.st, t.id)
     out(args, {"task": t.key, "notes": [{"id": n["id"], "name": n["name"], "ts": n["ts"], "text": n["text"],
                                          "reply": n.get("reply")} for n in notes],
                "saved": [{k: w[k] for k in ("id", "name", "commit", "ts", "notes")} for w in c.st.saves(t.id)]},
         ("\n\n".join(note_line(n, notes) for n in notes) or f"No notes on {t.key} yet.")
+        + (f"\n\n({earlier} notes of earlier rounds are set aside on purpose: start from the best, your own way. "
+           "`legion log` keeps them.)" if earlier else "")
         + (f"\n\nSaved work (build on it with `start {t.id} --from <id>`):\n" + "\n".join(saves) if saves else ""))
 
 
@@ -1666,8 +1772,8 @@ def research_work(c: Ctx, args, now: float) -> int | None:
                f"a task of its own.\n\n{question_line(st, x, None)}\n\nTurn it into a task")
         return hand_work(c, args, "path", t, f"{t.key} is stuck ({st.failures_since_progress(t.id)} failures since "
                          f"it last advanced), and here is {why}: a path, with the subtasks it takes (statements to "
-                         "prove and their tests, each small enough for one agent; see \"When a task is stuck\" in "
-                         "AGENTS.md). "
+                         "prove and their tests, each small enough for one agent; see `python -m "
+                         "legion help paths`). "
                          f"Propose it with `python -m legion path {t.id} FILE --{kind}s {x['ev']['id'][:8]}`. Once "
                          "it's accepted they are tasks anyone can claim. If tasks that exist already cover it, say "
                          "which instead, and it isn't handed out again: "
@@ -1762,6 +1868,12 @@ def cmd_idea(args):
     c = Ctx()
     t = c.task(args.task)
     frm = [find_idea(c, x)["ev"]["id"] for x in args.from_ or []]
+    same = None if args.force else c.st.similar_idea(t.id, args.text, skip=frm)
+    if same:
+        raise Fail(f"it's nearly the same route as idea {same['ev']['id'][:8]} ({c.st.idea_status(same)}): "
+                   f"{cut(same['ev']['text'], 200)}\nTry it instead (`report ... --idea {same['ev']['id'][:8]}`), "
+                   f"refine it (`idea {t.id} \"...\" --from {same['ev']['id'][:8]}`), or propose a route that's "
+                   "really different. --force if it is.", 5)
     ev = c.emit("idea.proposed", task=t.id, text=args.text, **({"from": frm} if frm else {}))
     c.sync()
     print(f"Idea {ev['id'][:8]} proposed for {t.key}. Agents of other owners compare it with the others, which rates "
@@ -1893,8 +2005,14 @@ def note_line(n: dict, notes: list[dict], width: int | None = None) -> str:
             + f": {cut(n['text'], width)}")
 
 
+def round_notes(st: S.State, tid: str) -> list[dict]:
+    """A task's notes, of this round on a competitive one (see S.ROUNDS): earlier rounds' are set aside."""
+    since = st.round_start(tid)
+    return [n for n in st.notes.get(tid, []) if n["lamport"] > since]
+
+
 def notes_text(st: S.State, tid: str, last: int = 5, width: int | None = None) -> list[str]:
-    notes = st.notes.get(tid, [])
+    notes = round_notes(st, tid)
     return ["  " + note_line(n, notes, width) for n in notes[-last:]]
 
 
@@ -2030,6 +2148,7 @@ def cmd_submit(args):
     branch = coordgit.patch_branch(repo, t.id, c.ident.short, len(mine) + 1)
     coordgit.publish_patch(repo, branch)
     ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch,
+                lines=changed_lines(repo, base),
                 **({"on": [p.id for p in on]} if on else {}), **({"refutes": True} if args.refutes else {}))
     c.sync()
     waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
@@ -2039,7 +2158,13 @@ def cmd_submit(args):
         + (f"It's built on work still in review ({', '.join(waits)}): it's checked once that is accepted. Don't "
            "wait for it: whatever needs this task can be worked on now, on top of this patch. " if waits else "")
         + f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
-        f"for the verdict: `context` will show it to you. {KEEP_GOING}")
+        f"for the verdict: `context` will show it to you. {keep_going()}")
+
+
+def changed_lines(repo, base: str) -> int:
+    """Lines a branch adds and removes since `base` (binary files count none)."""
+    rows = (line.split("\t") for line in git(repo, "diff", "--numstat", base, "HEAD").splitlines())
+    return sum(int(a) + int(b) for a, b, *_ in rows if a.isdigit() and b.isdigit())
 
 
 def cmd_result(args):
@@ -2099,7 +2224,7 @@ def cmd_result(args):
                "extra": extra},
         f"Result {t.key}/{key} published ({rid}). It's checked like a patch, goes into main, and shows under "
         f"{t.key}. Others can use it before that: `start <task> --on {rid}`. Say in the hub what it gives "
-        f"(`python -m legion chat --task {t.id} \"...\"`). {KEEP_GOING[0].upper()}{KEEP_GOING[1:]}")
+        f"(`python -m legion chat --task {t.id} \"...\"`). {keep_going(True)}")
 
 
 MAX_COMPANION = 10 * 2 ** 20  # bytes in a result's companion file: what reproduces it, not every byte it produced
@@ -2208,7 +2333,7 @@ def cmd_path(args):
     out(args, {"path": ev["id"], "branch": branch},
         f"Path {ev['id'][:8]} proposed for {t.key}: {keys}. Once the integrator accepts it, the subtasks are open\n"
         f"to anyone. {t.key} itself stays as it is, and still needs its own acceptance command to pass.\n"
-        f"Next: {KEEP_GOING}")
+        f"Next: {keep_going()}")
 
 
 # --- reading -------------------------------------------------------------------------------
@@ -2356,15 +2481,16 @@ def cmd_context(args):
     if stuck:
         lines += ["", "## Stuck tasks: new paths welcome",
                   "These keep failing. If you see a different route (a lemma, a tool, a smaller case, another method),",
-                  "propose it as a path: `python -m legion path <task-id> path.json` (see AGENTS.md). Talk them over in",
+                  "propose it as a path: `python -m legion path <task-id> path.json` (`help paths`). Talk them over in",
                   "the hub, and look for the step that fails in the literature: `python -m legion hub`."]
         for t in stuck:
-            fails = [a for a in st.attempts if a.get("task") == t.id and a.get("outcome") == "failure"][-3:]
+            fails = [a for a in st.attempts if a.get("task") == t.id and a.get("outcome") == "failure"
+                     and a["lamport"] > st.round_start(t.id)][-3:]  # a new round sets the earlier ones aside
             paths = st.open_paths(t.id)
             lines.append(f"- {t.id} ({t.key}): {st.failures_since_progress(t.id)} failures since its last progress"
                          + (f", {len(paths)} path(s) under way" if paths else ""))
             lines += [f"    tried: {a.get('notes', '').replace(chr(10), ' ')[:160]}" for a in fails]
-    lines += ["", f"Next: {KEEP_GOING[0].upper()}{KEEP_GOING[1:]}"]
+    lines += ["", f"Next: {keep_going(True, start=True)}"]
     print("\n".join(lines))
 
 
@@ -2372,10 +2498,32 @@ def cmd_log(args):
     c = Ctx(sync=not args.no_sync)
     evs = [e for e in c.st.events if e["lamport"] >= args.since]
     for e in evs[-args.limit:]:
-        print(describe(e, c.st, full=args.full))
+        print(json.dumps(e, ensure_ascii=False) if args.json else describe(e, c.st, full=args.full))
     if args.ignored:
         for e, why in c.st.ignored:
             print(f"IGNORED {e.get('id', '?')}: {why}")
+
+
+def cmd_events(args):
+    """Every valid event, in order, one JSON object a line (--follow: and each new one as it arrives). The way in
+    for programs that read the project, a viewer, a plateau detector, a diversity measure, without living in
+    this CLI: legion keeps the state, they read its stream."""
+    seen, first = set(), True
+    while True:
+        st = Ctx(sync=first and not args.no_sync).st  # once following, this machine's sync process fetches
+        for ev in st.events:
+            if ev["id"] in seen:
+                continue
+            seen.add(ev["id"])
+            if ev["lamport"] >= args.since and (not args.type or ev["type"] in args.type):
+                print(json.dumps(ev, ensure_ascii=False), flush=True)
+        if not args.follow:
+            return 0
+        first = False
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
 
 
 def auto_digest(st: S.State) -> str:
@@ -2546,10 +2694,13 @@ def cmd_daemon(args):
 
 
 RUN_QUICK, RUN_BACKOFF, RUN_MAX_WAIT = 120, 60, 1800  # seconds: a run this short failed; its waits double to this
+# A run that records nothing (no claim, report, patch, note: no event at all) is empty. In arXiv 2610.20563 two thirds
+# of a plateaued agent's spend went on turns that proposed nothing; past RUN_EMPTY empty runs in a row, run stops.
+RUN_EMPTY = 3
 
 
 def run_agent(argv: list[str]) -> int:
-    return subprocess.run(argv).returncode
+    return subprocess.run(argv, env=dict(os.environ, LEGION_RUN="1")).returncode
 
 
 def cmd_run(args):
@@ -2562,12 +2713,13 @@ def cmd_run(args):
     if not cmd:
         raise Fail("say how your agent runs: `python -m legion run -- <command>`, e.g. `python -m legion run -- "
                    "claude -p \"Read AGENTS.md and follow its work loop\"`", 2)
-    exe, runs, quick = shutil.which(cmd[0]) or cmd[0], 0, 0
+    exe, runs, quick, empty = shutil.which(cmd[0]) or cmd[0], 0, 0, 0
     while True:
         c = Ctx()
         if c.st.exclusive_done() and not c.st.competitive_for(c.me):
             print("legion run: every exclusive task is done and the competitive ones have had your attempts: done.")
             return 0
+        seen = c.st.last_seen.get(c.me)
         print(f"legion run: {time.strftime('%H:%M:%S')} starting the agent (run {runs + 1})", flush=True)
         started = time.time()
         try:
@@ -2579,6 +2731,12 @@ def cmd_run(args):
         runs, took = runs + 1, time.time() - started
         if args.max_runs and runs >= args.max_runs:
             return 0
+        empty = 0 if Ctx(sync=False).st.last_seen.get(c.me) != seen else empty + 1
+        if empty >= RUN_EMPTY:
+            print(f"legion run: the agent ran {empty} times in a row without recording anything (no claim, report "
+                  "or patch): it has nothing to do here, or it's stuck. Stopping; look at what it says, and start "
+                  "it again with `legion run`.", flush=True)
+            return 3
         quick = quick + 1 if took < RUN_QUICK else 0
         wait = min(RUN_MAX_WAIT, RUN_BACKOFF * 2 ** (quick - 1)) if quick else args.pause
         print(f"legion run: the agent stopped after {took / 60:.1f} min (exit code {code})"
@@ -2595,6 +2753,13 @@ REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without i
 MAX_SHARED_HELP = f"how many agents may work on one task at once (default {S.MAX_SHARED})"
 COMPETITIVE_TRIES_HELP = (f"attempts each agent makes on a competitive task since its best last improved "
                           f"(default {S.COMPETITIVE_TRIES})")
+HOLDOUT_HELP = ("competitive tasks: a second check, kept apart from the metric, that a patch must pass too (e.g. the "
+                "metric's program on other seeds), so the metric can't be gamed")
+ROUNDS_HELP = (f"rounds on a competitive task: when its team plateaus, a new round starts every agent again from the "
+               f"best, its history set aside (default {S.ROUNDS}; 1: no rounds)")
+ROUND_AFTER_HELP = f"attempts with no gain that end a round (default {S.ROUND_AFTER})"
+FRESH_VIEW_HELP = ("what claim shows of a stuck task: full (every note), fresh (the saved work and one line per "
+                   "failed route) or ab (half the agents each, to compare)")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2668,6 +2833,7 @@ def parser() -> argparse.ArgumentParser:
     a.add_argument("--zone", nargs="+", required=True)
     a.add_argument("--accept", required=True)
     a.add_argument("--refute", help="the command that checks a refutation: a proof that the statement is false")
+    a.add_argument("--holdout", help=HOLDOUT_HELP)
     a.add_argument("--mode", choices=["exclusive", "competitive"], default="exclusive")
     a.add_argument("--metric")
     a.add_argument("--goal", choices=["min", "max"], default="min")
@@ -2704,6 +2870,25 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--max-runs", type=int, default=0, help="stop after this many runs (default: no limit)")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- and the command that runs your agent")
     s.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("help", help="explain a part of the protocol (`help` alone lists them)")
+    s.add_argument("topic", nargs="?")
+    s.set_defaults(func=cmd_help)
+
+    s = sub.add_parser("events", help="every event, one JSON object a line, for other programs to read "
+                                      "(--follow: and the new ones as they come)")
+    s.add_argument("--since", type=int, default=0, help="from this Lamport time on")
+    s.add_argument("--type", action="append", help="only events of this type (repeatable)")
+    s.add_argument("--follow", action="store_true")
+    s.add_argument("--interval", type=float, default=10, help="with --follow, seconds between looks (default 10)")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_events)
+
+    s = sub.add_parser("pool", help="a competitive task's candidates in this round: each agent's best, with "
+                                    "its metric")
+    s.add_argument("task")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_pool)
 
     s = sub.add_parser("claim", help="claim a task (with no argument, one is assigned to you)")
     s.add_argument("task", nargs="?")
@@ -2786,6 +2971,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("task")
     s.add_argument("text", help="the route: what to do, why it could work, and what it would take")
     s.add_argument("--from", dest="from_", nargs="+", metavar="IDEA", help="the ideas it evolves from")
+    s.add_argument("--force", action="store_true", help="propose it even if it looks like an idea already there")
     s.set_defaults(func=cmd_idea)
 
     s = sub.add_parser("ideas", help="the ideas on the tasks, the best rated first")
@@ -2831,6 +3017,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--zone", nargs="+")
     s.add_argument("--accept")
     s.add_argument("--refute", help="the command that checks a refutation: a proof that the statement is false")
+    s.add_argument("--holdout", help=HOLDOUT_HELP)
     s.add_argument("--body")
     s.add_argument("--deps", nargs="*", help="tasks, or keys of tasks other open proposals create")
     s.add_argument("--parent", help="make it a subtask of this task: its zone must lie inside the parent's, and the "
@@ -2851,6 +3038,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--refute-check", help=REFUTE_CHECK_HELP)
     s.add_argument("--max-shared", type=int, help=MAX_SHARED_HELP)
     s.add_argument("--competitive-tries", type=int, help=COMPETITIVE_TRIES_HELP)
+    s.add_argument("--rounds", type=int, help=ROUNDS_HELP)
+    s.add_argument("--round-after", type=int, help=ROUND_AFTER_HELP)
+    s.add_argument("--fresh-view", choices=S.FRESH_VIEWS, help=FRESH_VIEW_HELP)
     s.add_argument("--audit", type=float)
     s.add_argument("--reads")
     s.set_defaults(func=cmd_propose)
@@ -2883,6 +3073,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--refute-check", help=REFUTE_CHECK_HELP)
     s.add_argument("--max-shared", type=int, help=MAX_SHARED_HELP)
     s.add_argument("--competitive-tries", type=int, help=COMPETITIVE_TRIES_HELP)
+    s.add_argument("--rounds", type=int, help=ROUNDS_HELP)
+    s.add_argument("--round-after", type=int, help=ROUND_AFTER_HELP)
+    s.add_argument("--fresh-view", choices=S.FRESH_VIEWS, help=FRESH_VIEW_HELP)
     s.add_argument("--reads", help="the command that lists the files an acceptance command reads, e.g. "
                                    "'python check.py --reads' (verifications then survive changes elsewhere)")
     s.add_argument("--json", action="store_true")
@@ -2982,13 +3175,13 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sketch", help="propose splitting your task into subtasks")
     s.add_argument("task")
-    s.add_argument("file", help="JSON with the subtasks (see AGENTS.md)")
+    s.add_argument("file", help="JSON with the subtasks (see `legion help sketch`)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_sketch)
 
     s = sub.add_parser("path", help="open a new route towards a stuck task: subtasks of any kind (anyone may)")
     s.add_argument("task")
-    s.add_argument("file", help="JSON with notes (why this route) and the subtasks (see AGENTS.md)")
+    s.add_argument("file", help="JSON with notes (why this route) and the subtasks (see `legion help paths`)")
     s.add_argument("--ideas", nargs="+", default=[], metavar="IDEA", help="the ideas on the task it turns into subtasks")
     s.add_argument("--questions", nargs="+", default=[], metavar="QUESTION",
                    help="the questions on the task its subtasks settle")
@@ -3001,6 +3194,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--full", action="store_true")
     s.add_argument("--ignored", action="store_true", help="also show ignored events and why")
     s.add_argument("--no-sync", action="store_true")
+    s.add_argument("--json", action="store_true", help="each event as JSON, one a line")
     s.set_defaults(func=cmd_log)
 
     s = sub.add_parser("digest", help="shared digest")
@@ -3032,13 +3226,42 @@ def parser() -> argparse.ArgumentParser:
 
     from . import sim
     sim.add_parser(sub)
+    for command in sub.choices.values():  # see RECORDING
+        if command.get_default("func") in RECORDING:
+            command.add_argument("--json", action="store_true",
+                                 help="print the exit code and the events recorded as JSON (the rest goes to stderr)")
     return p
+
+
+# Commands that only record events: with --json, what they say goes to stderr and stdout gets one JSON object,
+# the code and the events recorded, so a program can drive them (every other command's --json has its own data).
+RECORDING = {cmd_report, cmd_release, cmd_heartbeat, cmd_idea, cmd_compare, cmd_critique, cmd_vote, cmd_ask,
+             cmd_take, cmd_answer, cmd_delegate, cmd_start, cmd_describe}
+
+
+def recorded_json(args) -> int:
+    import contextlib
+    from . import ctx as ctx_module
+    start, code, error = len(ctx_module.EMITTED), 0, None
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            code = args.func(args) or 0
+        except Fail as e:
+            code, error = e.code, str(e)
+        except coordgit.GitError as e:
+            code, error = 1, f"git error: {e}"
+    events = [{"id": ev["id"], "type": ev["type"], "lamport": ev["lamport"],
+               **({"task": ev["task"]} if ev.get("task") else {})} for ev in ctx_module.EMITTED[start:]]
+    print(json.dumps({"code": code, "events": events, **({"error": error} if error else {})}))
+    return code
 
 
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
     args = parser().parse_args(argv)
+    if getattr(args, "json", False) and args.func in RECORDING:
+        return recorded_json(args)
     try:
         return args.func(args) or 0
     except Fail as e:

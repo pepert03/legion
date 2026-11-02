@@ -730,6 +730,17 @@ function trustBlock(a) {
   ];
 }
 
+// Signs it has plateaued, from what it published: edits that shrink, or claims and reports with no patch.
+const SPINNING = 6;
+function plateauNode(p) {
+  if (!p || (!p.narrowing && p.spinning < SPINNING)) return null;
+  const say = [];
+  if (p.narrowing) say.push(`its edits are shrinking (${p.lines.join(" → ")} lines changed)`);
+  if (p.spinning >= SPINNING) say.push(`${p.spinning} claims and reports since its last patch`);
+  return h("div", { style: `font-style:italic;color:${P.cancelled};margin:8px 0` },
+    `Plateaued? ${say.join("; ")}. A fresh session, or another task, usually unblocks it.`);
+}
+
 async function viewAgent(a) {
   const kind = kindOf(a), s = a.stats;
   const items = await history(a.id);
@@ -745,6 +756,7 @@ async function viewAgent(a) {
       h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
       h("div", {}, h("b", {}, s.claims), h("span", { class: "caps" }, "claims"))),
     trustBlock(a),
+    plateauNode(a.plateau),
     a.done.length ? h("dl", { class: "kv" }, h("dt", {}, "finished"), h("dd", {}, a.done.map(taskKey).join(", "))) : null,
     h("h2", { class: "caps" }, "What it has done"),
     eventList(items, false),

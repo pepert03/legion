@@ -16,7 +16,7 @@ legion = "legion.cli:main"
 include = ["legion*"]
 
 [tool.setuptools.package-data]
-legion = ["templates/*.md", "templates/*.html", "static/logos/*"]
+legion = ["templates/*.md", "templates/help/*", "templates/*.html", "static/logos/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

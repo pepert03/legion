@@ -431,7 +431,7 @@ def test_attempts_since_the_task_last_advanced():
 def test_competitive_tasks_are_handed_out_until_the_policys_attempts():
     log, fresh = project(key="c1", mode="competitive", metric="m", goal="min")
     assert log.state().policy["competitive_tries"] == S.COMPETITIVE_TRIES == 10
-    log.add(BOSS, "project.policy", competitive_tries=3)               # the project sets how many
+    log.add(BOSS, "project.policy", competitive_tries=3, rounds=1)     # the project sets how many; no rounds
     done = S.task_id(log.add(BOSS, "task.created", key="c2", title="C2", zone=["c2"], accept="true",
                              mode="competitive", metric="m", goal="min"))
     p = log.add(BEA, "patch.submitted", task=done, commit="c", branch="legion/c2/b-1")
@@ -446,6 +446,91 @@ def test_competitive_tasks_are_handed_out_until_the_policys_attempts():
     assert log.state().competitive_for(ANA.author) == []  # its patch waits for the verdict
     log.add(BOSS, "patch.accepted", patch=q["id"], metric=4.0)  # it improved: the count starts again
     assert [t.id for t in log.state().competitive_for(ANA.author)] == [done]
+
+
+def test_a_competitive_task_that_plateaus_opens_a_new_round_from_the_best():
+    """arXiv 2610.20563: a team that keeps its history plateaus; dropping it and starting again from the best
+    unblocks it. Each round is worked out from events, the same on every node."""
+    log, tid = project(key="c", mode="competitive", metric="m", goal="min")
+    log.add(BOSS, "project.policy", competitive_tries=2, rounds=3)
+    p = log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/c/a-1")
+    log.add(BOSS, "patch.accepted", patch=p["id"], metric=5.0)
+    idea = log.add(BEA, "idea.proposed", task=tid, text="anneal longer")
+    for who in (ANA, BEA, ANA):
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    st = log.state()
+    assert len(st.round_starts(tid)) == 1 and [t.id for t in st.competitive_for(BEA.author)] == [tid]
+    assert st.competitive_for(ANA.author) == []  # her tries are used up, but Bea's aren't: the round goes on
+    end = log.add(BEA, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    st = log.state()
+    assert st.round_starts(tid)[-1] == end["lamport"]  # everyone who tried is out of tries: round 2
+    assert [t.id for t in st.competitive_for(ANA.author)] == [tid] == [t.id for t in st.competitive_for(BEA.author)]
+    assert st.ideas_for(tid) == [] and idea["id"]  # what round 1 thought isn't handed to round 2
+    q = log.add(BEA, "patch.submitted", task=tid, commit="d", branch="legion/c/b-1")
+    log.add(BOSS, "patch.rejected", patch=q["id"], code="no_gain", reason="no", metric=6.0)
+    r = log.add(ANA, "patch.submitted", task=tid, commit="e", branch="legion/c/a-2")
+    log.add(BOSS, "patch.accepted", patch=r["id"], metric=4.0)
+    assert [x.id for x in log.state().pool(tid)] == [r["id"], q["id"]]  # this round's candidates, the best first
+    for who in (ANA, ANA, BEA, BEA):
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    assert len(log.state().round_starts(tid)) == 3  # round 2 improved the best: round 3
+    for who in (ANA, ANA, BEA, BEA):
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    st = log.state()
+    assert len(st.round_starts(tid)) == 3 and st.competitive_for(ANA.author) == []  # the last one: it's over
+
+
+def test_a_round_that_improves_nothing_is_the_last_and_a_busy_team_moves_on_by_count():
+    log, tid = project(key="c", mode="competitive", metric="m", goal="max")
+    log.add(BOSS, "project.policy", competitive_tries=5, rounds=4, round_after=3)
+    for who in (ANA, BEA, ANA):  # nobody is out of tries, but three attempts with no gain end the round
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    assert len(log.state().round_starts(tid)) == 2
+    for who in (ANA, BEA, ANA, BEA):  # round 2 improved nothing: no round 3
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no gain")
+    assert len(log.state().round_starts(tid)) == 2
+    assert log.add(BOSS, "project.policy", rounds=30) and log.state().policy["rounds"] == 4  # out of range: refused
+
+
+def test_the_fresh_view_experiment_splits_agents_and_counts_what_they_get_accepted():
+    log, tid = project()
+    st = log.state()
+    assert not st.clean_view(ANA.author) and not st.clean_view(BEA.author)  # full, unless the project says
+    log.add(BOSS, "project.policy", fresh_view="ab")
+    st = log.state()
+    arms = {who.name: st.clean_view(who.author) for who in (ANA, BEA, BOSS)}
+    log.add(ANA, "task.claimed", task=tid, ttl=600, view="fresh" if arms["ana"] else "full")
+    p = log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/a/a-1")
+    log.add(BOSS, "patch.accepted", patch=p["id"])
+    views = log.state().views()
+    assert views["fresh" if arms["ana"] else "full"] == {"claims": 1, "accepted": 1}
+    log.add(BOSS, "project.policy", fresh_view="fresh")
+    assert log.state().clean_view(BEA.author)
+    assert log.add(BOSS, "project.policy", fresh_view="none") and log.state().policy["fresh_view"] == "fresh"
+
+
+def test_an_idea_that_says_the_same_as_one_on_the_task_is_found():
+    log, tid = project()
+    a = log.add(ANA, "idea.proposed", task=tid, text="Use simulated annealing over circulant tournaments of order 563")
+    st = log.state()
+    assert st.similar_idea(tid, "use simulated annealing over the circulant tournaments of order 563")["ev"]["id"] == a["id"]
+    assert st.similar_idea(tid, "Count the bad orbits with a SAT solver after fixing the Z63 symmetry") is None
+    assert st.similar_idea(tid, "use simulated annealing over circulant tournaments of order 563", skip=[a["id"]]) is None
+
+
+def test_an_agent_whose_edits_shrink_or_that_spins_without_patches_shows_it():
+    """Measured, not asked: in arXiv 2610.20563 edits fell from a hundred lines to a few as sessions grew, and in
+    Erdős #902 one agent claimed, reported and released one task dozens of times without a patch."""
+    log, tid = project(mode="competitive", metric="m")
+    for n, lines in enumerate((120, 90, 20, 6)):
+        log.add(ANA, "patch.submitted", task=tid, commit="c", branch=f"legion/a/a-{n}", lines=lines)
+    assert log.state().plateau(ANA.author) == {"lines": [120, 90, 20, 6], "spinning": 0, "narrowing": True}
+    for _ in range(3):
+        log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="status unchanged")
+    assert log.state().plateau(ANA.author)["spinning"] == 3
+    assert log.state().plateau(BEA.author) == {"lines": [], "spinning": 0, "narrowing": False}
+    assert log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/a/a-9", lines=-1) and \
+        len(log.state().patches_for(tid)) == 4  # a count can't be negative
 
 
 def test_a_blocked_task_someone_prepares_can_be_joined():
