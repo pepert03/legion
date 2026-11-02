@@ -845,6 +845,27 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
         return subprocess.Popen(cmd, creationflags=flags, **kw)
 
 
+# Each fetch into the node's storage leaves a pack of its own, and nothing compacts them: instinct's machine `e` had
+# 980 packs (1.24 GB, its storage four times jose's with the same in it), a fetch from it had to look through all
+# of them, and no seed finished one before giving up. After a network fetch, past MAX_PACKS, a geometric repack
+# merges them (it only ever merges a few small ones into a bigger one, so it stays quick once caught up).
+MAX_PACKS = 64
+
+
+def compact_storage(repo, seconds: float = 100) -> bool:
+    """Repack the node's storage if it holds more than MAX_PACKS packs. True if it did."""
+    if IS_WINDOWS and not native(repo):
+        return False  # inside WSL: its own git, and no sandbox piling packs up
+    store = storage(repo)
+    if len(list((Path(store) / "objects" / "pack").glob("*.pack"))) <= MAX_PACKS:
+        return False
+    try:
+        return subprocess.run(["git", "-C", store, "repack", "-d", "-q", "--geometric=2"], capture_output=True,
+                              timeout=seconds).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False  # it goes on from where it got, next time
+
+
 def run_network_sync(repo, quick: bool = False) -> bool:
     """What the background process does: make sure the node runs, and fetch from the network."""
     from . import tunnel
@@ -855,6 +876,7 @@ def run_network_sync(repo, quick: bool = False) -> bool:
             time.sleep(5)  # it needs a moment to connect to the seeds
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True, quick=quick)
+        compact_storage(repo, 40 if quick else 300)
     except RadError:
         ok = False
     finally:

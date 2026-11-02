@@ -663,6 +663,23 @@ def test_where_the_node_lives_as_long_as_the_command_its_events_go_out_first_and
     assert done[:2] == ["own", "announced"] and set(done[2:]) == {"rest"}
 
 
+def test_a_storage_piling_up_packs_is_compacted(tmp_path, monkeypatch):
+    """Instinct's `e` had 980 packs in its node's storage, and no seed finished a fetch from it."""
+    store = tmp_path / "storage"
+    git(tmp_path, "init", "-q", str(store))
+    for n in range(5):
+        git(store, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "--allow-empty", "-m", str(n))
+        git(store, "repack", "-q")                                      # one pack per fetch, as the node leaves them
+    packs = lambda: len(list((store / ".git" / "objects" / "pack").glob("*.pack")))  # noqa: E731
+    assert packs() == 5
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(radicle, "storage", lambda repo: str(store / ".git"))
+    monkeypatch.setattr(radicle, "MAX_PACKS", 3)
+    assert radicle.compact_storage(tmp_path) and packs() < 5
+    monkeypatch.setattr(radicle, "MAX_PACKS", 64)
+    assert not radicle.compact_storage(tmp_path)                       # few enough: left alone
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""
