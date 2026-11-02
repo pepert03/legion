@@ -847,8 +847,10 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
 
 # Each fetch into the node's storage leaves a pack of its own, and nothing compacts them: instinct's machine `e` had
 # 980 packs (1.24 GB, its storage four times jose's with the same in it), a fetch from it had to look through all
-# of them, and no seed finished one before giving up. After a network fetch, past MAX_PACKS, a geometric repack
-# merges them (it only ever merges a few small ones into a bigger one, so it stays quick once caught up).
+# of them, and no seed finished one before giving up. After a network fetch, past MAX_PACKS, they're compacted
+# in steps that each stay done: one index over all the packs (lookups are quick at once, however many there are),
+# then batches of small packs merged into one. A whole repack of 1.2 GB outlasted the sandbox, and cut off, it
+# kept nothing.
 MAX_PACKS = 64
 
 
@@ -859,11 +861,16 @@ def compact_storage(repo, seconds: float = 100) -> bool:
     store = storage(repo)
     if len(list((Path(store) / "objects" / "pack").glob("*.pack"))) <= MAX_PACKS:
         return False
-    try:
-        return subprocess.run(["git", "-C", store, "repack", "-d", "-q", "--geometric=2"], capture_output=True,
-                              timeout=seconds).returncode == 0
-    except subprocess.TimeoutExpired:
-        return False  # it goes on from where it got, next time
+    end = time.time() + seconds
+    for step in (["multi-pack-index", "write"], ["multi-pack-index", "repack", "--batch-size=300m"],
+                 ["multi-pack-index", "expire"]):
+        try:
+            if subprocess.run(["git", "-C", store, *step], capture_output=True,
+                              timeout=max(1.0, end - time.time())).returncode:
+                return False
+        except subprocess.TimeoutExpired:
+            return False  # what's done stays done: it goes on from there next time
+    return True
 
 
 def run_network_sync(repo, quick: bool = False) -> bool:
