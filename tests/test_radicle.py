@@ -487,13 +487,13 @@ def test_a_command_with_no_sync_process_leaves_the_push_to_one_of_its_own(tmp_pa
 def test_a_command_doesnt_wait_long_for_a_clone_another_process_syncs(network, monkeypatch, capsys):
     """A sync process of an older legion held the clone's lock over pushes of minutes, and commands waited two
     minutes for it, past their tools' limit."""
-    from legion import ctx, daemon, identity, locks
+    from legion import ctx, daemon, identity, locks, transport
     alice = network["z6MkAlice"]
     boss = Identity.generate("boss")
     identity.bind(alice, boss)
     coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
     monkeypatch.chdir(alice)
-    monkeypatch.setattr(ctx, "LOCK_WAIT", 0.5)
+    monkeypatch.setattr(transport, "LOCK_WAIT", 0.5)
     synced = []
     monkeypatch.setattr(coordgit, "sync", lambda *a, **kw: synced.append(1) or [])
     with locks.held(daemon.repo_lock(alice)):                          # someone else syncs it right now

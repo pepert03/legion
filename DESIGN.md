@@ -619,6 +619,48 @@ characters each. Joining a task shows its latest notes, and
 `context` shows those of your own tasks. In the viewer, the agents on one task sit in a row inside one
 capsule, with one working line for the group.
 
+## 8e. Decision 9 — Forgetting on purpose, and small tools
+
+Agents that keep their whole history plateau. In *Scaling Discovery Requires Forgetting* (arXiv 2610.20563) one
+agent, agents in parallel and agents that share their candidates all stall as their sessions and their record of
+candidates grow: edits shrink from a hundred lines to a few, reasoning to a third, and turns end proposing nothing
+(two thirds of a plateaued agent's spend). Dropping every session and every candidate but the best, and starting
+the whole team again from it, gave 10% over agents in parallel at the same spend. Legion applies it where it fits,
+and measures where it might:
+
+- **Rounds on competitive tasks.** A round ends when every agent that tried the task since it last improved has
+  made `competitive_tries` attempts, or `round_after` (20) attempts in all brought no gain. The next round starts
+  from main, which holds the best: attempts count from zero, and `claim`, `note`, `context` and the ideas no
+  longer show the earlier rounds' notes, reports and ideas (`log` keeps them). A round that improves nothing is
+  the last, and there are at most `rounds` (4). From events, so every node agrees. Exclusive tasks, whose
+  negative results are knowledge (a proof route that fails), keep their history.
+- **The pool.** What a team shares, in the paper, is candidates and their scores, not the reasoning behind them:
+  reading another's full solutions makes everyone's next attempt the same one (arXiv 2608.23541). `pool <task>`
+  lists this round's best candidate of each agent, with its metric; a patch rejected for not beating the best
+  keeps its metric for it.
+- **Signs of a plateau, measured.** A patch records the lines it changes; the viewer flags an agent whose edits
+  shrink, or that keeps claiming and reporting without a patch. `legion run` stops an agent that runs three times
+  in a row without recording anything.
+- **One session per task.** Under `legion run` (it sets `LEGION_RUN`) commands tell the agent to end its session
+  after each task: run starts a fresh one, which begins from the repository, not from what it tried.
+- **The fresh view, as an experiment.** Agents handed the history of failed attempts solve fewer tasks than
+  those that start clean (Recovery-Bench), but on a proof, knowing what fails is worth something. The policy's
+  `fresh_view` decides what `claim` shows of a stuck task: every note (`full`), the saved work and one line per
+  failed route (`fresh`), or each half of the agents one of them (`ab`), with the view recorded in the claim, so
+  which one gets more patches accepted can be read from events (`State.views`).
+- **A holdout check** for competitive tasks, kept apart from the metric: loops that optimize one number drift
+  from what it stands for (in-loop gains three times the audited ones, arXiv 2609.00077).
+- **Ideas that repeat one another are refused** (70% of their words in common), unless the author insists.
+
+And the same lesson for legion itself, Unix's: a program that does one thing. **AGENTS.md is the work loop, one
+page**; the rest of the protocol is in topics an agent reads when it needs one (`legion help <topic>`), where every
+agent used to read 5,400 words in every session. **The transport is apart**: one sync round around each command,
+in `transport.py`, the only part of the core that meets Radicle and the sync process (a test keeps it so); the
+network commands are in `netcli.py`, also as `legion-net`; with `LEGION_SYNC=off` commands don't touch the network
+at all. And **text streams to compose**: `legion events` prints every event as a JSON line (`--follow` for the new
+ones), and the commands that only record events answer with `--json` too, so a viewer, a plateau detector or a
+diversity measure can be a program of its own.
+
 ## 9. Example event
 
 `coord/events/000142-9b1e4c.json`:

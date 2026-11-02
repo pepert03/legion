@@ -7,10 +7,10 @@ import time
 from pathlib import Path
 
 from . import coordgit
-from . import daemon
 from . import events as E
 from . import locks
 from . import state as S
+from . import transport
 from .identity import Identity
 
 
@@ -38,9 +38,7 @@ def need_identity(repo=None) -> Identity:
 
 
 AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
-LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see Ctx.sync)
-PUBLISH_WAIT = 75  # seconds a command with events of its own waits for their push (see Ctx._publish)
-SETTLED = 120  # seconds after which a sync process is taken to stay, and a command doesn't wait for its push
+LOCK_WAIT, PUBLISH_WAIT, SETTLED = transport.LOCK_WAIT, transport.PUBLISH_WAIT, transport.SETTLED  # older callers
 
 
 def remember_agent(repo) -> None:
@@ -77,87 +75,15 @@ class Ctx:
     strict = False  # the integrator sets it: a pass with a failed sync is retried, not run on stale state
 
     def sync(self) -> None:
-        # With this machine's sync process running (see daemon.py), it syncs: the command only reads what it
-        # brought, and wakes it when there is something to publish. The integrator always syncs by itself.
-        # Not by one that keeps being started anew (younger than SETTLED): it lives where sandboxes kill background
-        # processes, its rounds there outlast the command (a push costs 40 s of CPU), and what it was to push died
-        # with it. The command pushes by itself then, and waits (see _publish).
-        served = (not self.strict and coordgit.is_radicle(self.repo) and daemon.serving(self.repo)
-                  and daemon.age() >= SETTLED)
-        if served:
-            from . import radicle
-            if getattr(self, "unpublished", None):
-                daemon.wake()
-                print(f"legion: {', '.join(self.unpublished)} go out within seconds (this machine's sync process "
-                      "publishes them).", file=sys.stderr)
-                self.unpublished = []
-            self.unreachable = [] if radicle.netsync_status(self.repo).get("ok", True) else ["network"]
-        else:
-            try:
-                # Not long for the lock: a sync process of an older legion, or one stuck, held it over pushes of
-                # minutes, and commands waited two minutes for it, past their tools' limit. Busy, the clone is
-                # being synced already: the command reads what it has.
-                wait = 120 if self.strict or not coordgit.is_radicle(self.repo) else LOCK_WAIT
-                with locks.held(daemon.repo_lock(self.repo), wait=wait) as got:
-                    if got or wait > LOCK_WAIT:
-                        self.unreachable = coordgit.sync(self.repo, self.ident, publish=False)
-                    else:
-                        print("legion: this clone is being synced by another process right now: reading what it "
-                              "has", file=sys.stderr)
-                done = True
-                if coordgit.is_radicle(self.repo):
-                    done = self._publish(wait=bool(getattr(self, "unpublished", None)))
-                    daemon.clear_stale_locks(self.repo, lambda m: print(f"legion: {m}", file=sys.stderr))
-                if getattr(self, "unpublished", None):
-                    print(f"legion: published {', '.join(self.unpublished)}." if done else
-                          f"legion: {', '.join(self.unpublished)} go out within seconds (a process of its own "
-                          "publishes them).", file=sys.stderr)
-                    self.unpublished = []
-            except coordgit.GitError as e:
-                self._sync_failed(e)
-        self.reload()
-        if coordgit.is_p2p(self.repo):
-            # The push went out before the state said where main is now: when that moves what this node offers
-            # as main (it published a main, or finalized a patch), push again, or the commit would wait for
-            # this node's next command, and a founder's `main publish` may have none after it.
-            if coordgit.update_main(self.repo, self.st.main_tip) and coordgit.is_radicle(self.repo):
-                if served:
-                    daemon.wake()
-                else:
-                    try:
-                        self._publish(wait=True)
-                    except coordgit.GitError as e:
-                        self._sync_failed(e)
-            coordgit.prune_patches(self.repo, {p.branch for p in self.st.patches.values() if p.verdict}
-                                   | {w["branch"] for tid, ws in self.st.saved.items() if self.st.done(tid) for w in ws}
-                                   | coordgit.superseded(self.repo, self.st.superseded_saves()))
-            peers = coordgit.peers(self.repo)
-            if "network" in self.unreachable:
-                print("legion: warning: the last fetch from the Radicle network (it runs in the background) "
-                      "couldn't reach it; working with what this node has, which its peers keep sending", file=sys.stderr)
-            elif peers and len(self.unreachable) == len(peers):
-                print(f"legion: warning: couldn't reach any peer ({', '.join(peers)}); "
-                      "working with what you have locally", file=sys.stderr)
+        """Pull what the network has and push what this clone recorded: one round of transport.sync, unless
+        LEGION_SYNC=off says commands stay local (then `legion netsync`, or the sync process, does it)."""
+        transport.sync(self)
 
     def _publish(self, wait: bool = False) -> bool:
-        """With no sync process to push for it, the integrator pushes itself; any other command leaves the push
-        to a process of its own (see radicle.kick_publish), and with something of its own to publish (`wait`)
-        waits up to PUBLISH_WAIT for it: where a sandbox kills what runs in the background once the command
-        returns, the push died with it, and nothing an agent recorded went out. True if it's out."""
-        from . import radicle
-        if self.strict:
-            coordgit.publish_radicle(self.repo, self.ident)
-            return True
-        radicle.kick_publish(self.repo)
-        return wait and radicle.wait_published(self.repo, PUBLISH_WAIT)
+        return transport.publish(self, wait)
 
     def _sync_failed(self, e: Exception) -> None:
-        if self.strict:
-            raise e
-        # A slow network, or another process on the same Radicle node: carry on with the local state, and
-        # what this command records goes out with the next sync. An agent mustn't stop over it.
-        print(f"legion: warning: couldn't sync ({str(e).strip()[-200:]}); working with the local state, "
-              "and your events go out on the next command", file=sys.stderr)
+        transport.sync_failed(self, e)
 
     def emit(self, type: str, **payload) -> dict:
         """Validate the event against the current state and, if valid, append it to the local coord."""
@@ -166,7 +92,7 @@ class Ctx:
         err = next((e for x, e in trial.ignored if x.get("id") == ev["id"]), None)
         if err:
             raise Fail(f"event rejected: {err}")
-        with locks.held(daemon.repo_lock(self.repo)):  # this machine's sync process may be merging into it
+        with locks.held(transport.repo_lock(self.repo)):  # this machine's sync process may be merging into it
             coordgit.append(self.repo, self.ident, ev)
         self.st = trial
         EMITTED.append(ev)

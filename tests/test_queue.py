@@ -999,6 +999,21 @@ def test_events_stream_and_recording_commands_answer_in_json(project, capsys):
     assert answer["events"] == [] and "nearly the same route" in answer["error"]
 
 
+def test_with_sync_off_a_command_does_what_it_says_and_nothing_on_the_network(project, monkeypatch, capsys):
+    """A command that pulled, pushed, cleaned locks and pruned branches besides its own work surprised the
+    sandboxes it ran in; LEGION_SYNC=off leaves all that to `legion netsync` or the sync process."""
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    touched = []
+    monkeypatch.setattr(coordgit, "sync", lambda *a, **kw: touched.append("sync") or [])
+    monkeypatch.setattr(coordgit, "prune_patches", lambda *a, **kw: touched.append("prune"))
+    monkeypatch.setenv("LEGION_SYNC", "off")
+    assert cli.main(["idea", tids["a"], "a route nobody tried"]) == 0
+    assert touched == [] and "stay in this clone" in capsys.readouterr().err
+    assert [i["ev"]["text"] for i in Ctx(sync=False).st.ideas_for(tids["a"])] == ["a route nobody tried"]
+
+
 def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
     """The saves that couldn't be dropped were looked at again on every command: 25 s a command."""
     repo, tids, patch = project
