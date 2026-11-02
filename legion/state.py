@@ -100,6 +100,10 @@ ROUNDS, ROUND_AFTER = 4, 20
 # line per route that failed, since agents handed the history of failed attempts solve fewer tasks than those that
 # start clean (Recovery-Bench); "ab", half the agents each (by key), to measure which gets more patches accepted.
 FRESH_VIEWS = ("full", "fresh", "ab")
+# How much of the digest `context` shows (the policy's digest): all of it, or its start and where to read the rest.
+# A memory read whether or not the work needs it is a cost (arXiv 2610.07907 learns to skip its long-term store when
+# a task doesn't use it): on competitive work, with exclusive tasks done, context shows the start anyway.
+DIGEST_VIEWS = ("full", "short")
 # Verification by other nodes. A node checks a patch the way the integrator would and signs the result
 # (patch.verified): on which tree it merged it (main plus the patches ahead of it in the queue, which every node
 # works out the same way) and which tree came out. Merges are deterministic, so when the integrator gets there
@@ -123,7 +127,9 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
           "competitive_tries": COMPETITIVE_TRIES,
           # Rounds on competitive tasks: at most `rounds`, each ending after `round_after` attempts with no gain
           # (see ROUNDS). `fresh_view`: what claim shows of a stuck task (see FRESH_VIEWS).
-          "rounds": ROUNDS, "round_after": ROUND_AFTER, "fresh_view": "full"}
+          "rounds": ROUNDS, "round_after": ROUND_AFTER, "fresh_view": "full",
+          # How much of the digest context shows (see DIGEST_VIEWS).
+          "digest": "full"}
 # What a trusted node may publish in the open mode, besides the founders (the integrators at the start).
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
@@ -1369,8 +1375,10 @@ class State:
                 return "refute_check must be a command with {key}, {accept} or {arg} in it"
             if "fresh_view" in ev and ev["fresh_view"] not in FRESH_VIEWS:
                 return f"fresh_view must be one of {', '.join(FRESH_VIEWS)}"
+            if "digest" in ev and ev["digest"] not in DIGEST_VIEWS:
+                return f"digest must be one of {', '.join(DIGEST_VIEWS)}"
             policy.update({k: ev[k] for k in ("mode", "reads", "results_dir", "results_check", "refute_check",
-                                              "fresh_view") if k in ev})
+                                              "fresh_view", "digest") if k in ev})
             for key, kind, lo, hi in (("quorum", int, 0, 9), ("verifier_trust", int, 0, 100),
                                       ("spot_check", (int, float), 0, 1), ("window", int, 600, 30 * 86400),
                                       ("audit", (int, float), 0, 1), ("vote_window", int, 600, ACTIVE_DAYS * 86400),

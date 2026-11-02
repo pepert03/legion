@@ -55,6 +55,7 @@ def radicle_ready(alias: str, home: str | None) -> str:
         raise Fail(str(e))
     return nid
 
+
 def cmd_radicle(args):
     from . import radicle
     home = args.rad_home
@@ -124,6 +125,7 @@ def cmd_radicle(args):
     except radicle.RadError as e:
         raise Fail(str(e))
 
+
 def cmd_announce(repo, given: list[str]) -> None:
     """Announce a node: NID@HOST:PORT for each address (several for one node: public, Tailscale, local), or nothing
     for this clone's own node at the addresses it sees (and those in git config legion.address)."""
@@ -152,6 +154,7 @@ def cmd_announce(repo, given: list[str]) -> None:
         coordgit.publish_radicle(repo, Identity.load(repo=repo))
     except coordgit.GitError as e:
         print(f"legion: couldn't push it yet ({str(e).strip()[-200:]}); it goes out with your next command")
+
 
 def cmd_tunnel(repo, what: str) -> None:
     from . import radicle, tunnel
@@ -193,6 +196,7 @@ def cmd_tunnel(repo, what: str) -> None:
     print("The tunnels are checked and relaunched with every network fetch. `legion radicle tunnel status` "
           "shows them.")
 
+
 def cmd_peer(args):
     repo = repo_root()
     if args.action == "add":
@@ -214,6 +218,7 @@ def cmd_peer(args):
             url = coordgit.run(repo, "remote", "get-url", n).stdout.decode().strip()
             print(f"{n:<16} {url}")
 
+
 def cmd_serve(args):
     """Serve this repository read-only so peers can read it (git daemon, git:// protocol)."""
     repo = repo_root()
@@ -233,6 +238,7 @@ def cmd_serve(args):
     except KeyboardInterrupt:
         return 0
 
+
 def cmd_netsync(args):
     """The background network fetch every command starts (see radicle.kick_network_sync); not for agents."""
     from . import radicle
@@ -243,6 +249,7 @@ def cmd_netsync(args):
         radicle.run_publish(repo_root())
         return 0
     return 0 if radicle.run_network_sync(repo_root()) else 1
+
 
 def cmd_daemon(args):
     """This machine's sync process (see daemon.py): commands start it; --status says how it's doing."""
@@ -308,4 +315,3 @@ def main(argv=None) -> int:
     add_parsers(p.add_subparsers(dest="cmd", required=True))
     args = p.parse_args(argv)
     return legion_main([args.cmd, *(argv if argv is not None else sys.argv[1:])[1:]])
-

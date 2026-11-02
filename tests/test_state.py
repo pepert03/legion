@@ -507,6 +507,9 @@ def test_the_fresh_view_experiment_splits_agents_and_counts_what_they_get_accept
     log.add(BOSS, "project.policy", fresh_view="fresh")
     assert log.state().clean_view(BEA.author)
     assert log.add(BOSS, "project.policy", fresh_view="none") and log.state().policy["fresh_view"] == "fresh"
+    log.add(BOSS, "project.policy", digest="short")
+    assert log.state().policy["digest"] == "short"
+    assert log.add(BOSS, "project.policy", digest="half") and log.state().policy["digest"] == "short"
 
 
 def test_an_idea_that_says_the_same_as_one_on_the_task_is_found():
