@@ -83,6 +83,19 @@ def task_text(t: dict) -> str:
     return "\n".join(lines)
 
 
+def tunnel_text(ev: dict) -> str:
+    """What a node.tunnel event says: how a node is reached, which isn't always a tunnel. Every one read "opens a
+    tunnel", and sandboxes that can't open any, saying only their address inside the sandbox, seemed to."""
+    nid = str(ev.get("nid", ""))[-6:]
+    ways = ((["a tunnel"] if ev.get("ticket") else []) + [f"at {a}" for a in ev.get("addrs") or []]
+            + [f"over Tailscale at {a}" for a in ev.get("tailnet") or []]
+            + [f"inside its own network {x.get('net')}" for x in ev.get("lan") or [] if isinstance(x, dict)])
+    if not ways:
+        return f"says its Radicle node {nid} can't be reached: it only connects out"
+    return (f"says how to reach its Radicle node {nid}: {', '.join(ways)}"
+            + (" (the project's hub)" if ev.get("hub") else ""))
+
+
 def describe(ev: dict, st: S.State, full: bool = False) -> str:
     who = ev["name"] + (f" ({ev['agent']})" if ev.get("agent") else "")
     return f"[{ev['lamport']}] {who}: {event_text(ev, st, full)}"
@@ -102,8 +115,7 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "project.init": f"starts the project {ev.get('project', '')}",
         "project.described": "describes the project",
         "agent.joined": "joins the project",
-        "node.tunnel": f"opens a tunnel to its Radicle node {str(ev.get('nid', ''))[-6:]}"
-                       + (" (the project's hub)" if ev.get("hub") else ""),
+        "node.tunnel": tunnel_text(ev),
         "agent.delegated": f"vouches for its subagent {ev.get('member') or str(ev.get('key', ''))[:16]}",
         "task.created": f"creates task {S.task_id(ev)} ({ev.get('key')}): {ev.get('title')}",
         "task.claimed": f"claims {key}",

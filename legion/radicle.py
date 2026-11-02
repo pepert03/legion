@@ -692,6 +692,8 @@ def _rounds(repo, name: str, work) -> None:
 
 def announce_waiting(repo) -> bool:
     """Announce this node's refs and wait, up to 40 s, until one seed has fetched them. True if one did."""
+    if not rid(repo):
+        return False
     try:
         return run("rad", "sync", "--announce", rid(repo), "--replicas", "1", "--timeout", "40sec", repo=repo,
                    check=False, timeout=50).returncode == 0
@@ -1098,7 +1100,7 @@ def publish(repo, who: str) -> None:
         # and it waits until a seed has fetched them: instinct's b and e (400 patches to push, storages of 0.5 and
         # 1.7 GB) were cut off before any seed fetched what they had pushed, and for days their events reached
         # nobody. The seeds pass them on among themselves.
-        _push(repo, own, strict=True)
+        _push(repo, own, strict=True, sync=True)
         announce_waiting(repo)
         own = []
     try:

@@ -33,3 +33,13 @@ def test_the_network_commands_run_on_their_own_too(capsys):
     except SystemExit as e:
         assert e.code == 0
     assert "legion-net daemon" in capsys.readouterr().out
+
+
+def test_a_node_that_only_announces_its_sandbox_address_isnt_said_to_open_a_tunnel():
+    """sergi-cedar's sandbox can't open a tunnel, and every one of its announcements read "opens a tunnel"."""
+    from legion.cli import tunnel_text
+    nid = "z6Mkri3RXjEGGp5zrj8EddyYdMc56fCk7EYyXHW14sq88Njd"
+    assert tunnel_text({"nid": nid, "hub": False}) == "says its Radicle node q88Njd can't be reached: it only connects out"
+    lan = tunnel_text({"nid": nid, "lan": [{"addr": "172.20.54.11:8776", "net": "172.20.54.0/24"}]})
+    assert "tunnel" not in lan and "inside its own network 172.20.54.0/24" in lan
+    assert tunnel_text({"nid": nid, "ticket": "endpoint...", "hub": True}).endswith("a tunnel (the project's hub)")
