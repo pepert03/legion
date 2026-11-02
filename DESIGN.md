@@ -632,8 +632,11 @@ and measures where it might:
   made `competitive_tries` attempts, or `round_after` (20) attempts in all brought no gain. The next round starts
   from main, which holds the best: attempts count from zero, and `claim`, `note`, `context` and the ideas no
   longer show the earlier rounds' notes, reports and ideas (`log` keeps them). A round that improves nothing is
-  the last, and there are at most `rounds` (4). From events, so every node agrees. Exclusive tasks, whose
-  negative results are knowledge (a proof route that fails), keep their history.
+  the last, and there are at most `rounds` (4). From events, so every node agrees.
+- **Rounds on every task.** Research tasks pile up notes, failed reports and ideas just the same. An exclusive
+  task starts a new round every `round_after` failures since it last advanced: main, the saved work and the state
+  of the art carry over, the rest is set aside. No last round there: a proof is all or nothing, and counted over
+  their whole history, Erdős #902's long tasks were at their fourth round the moment rounds came in.
 - **The pool.** What a team shares, in the paper, is candidates and their scores, not the reasoning behind them:
   reading another's full solutions makes everyone's next attempt the same one (arXiv 2608.23541). `pool <task>`
   lists this round's best candidate of each agent, with its metric; a patch rejected for not beating the best

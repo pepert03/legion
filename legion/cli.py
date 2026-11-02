@@ -716,6 +716,11 @@ def cmd_claim(args):
             how = ("Routes nobody has tried yet, the best rated first (when you report, say which one you tried: "
                    "`report ... --idea <id>`; propose your own with `idea`):\n"
                    + "".join(f"  {idea_line(c.st, i, 250)}\n" for i in fresh) + how)
+        n = len(c.st.round_starts(t.id))
+        if n > 1:  # see S.ROUNDS
+            how = (f"Round {n} on this task: after many failures, the notes, reports "
+                   "and ideas of earlier rounds are set aside on purpose (`log` keeps them). Start from what's proved "
+                   "in main, the saved work and the state of the art, and take a route of your own.\n" + how)
         how = verify_first(c) + how
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "

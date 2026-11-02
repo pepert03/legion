@@ -95,6 +95,12 @@ COMPETITIVE_TRIES = 10  # the policy's competitive_tries, unless it says otherwi
 # first always counts). Attempts count from the round's start, and agents are shown the best and this round's
 # candidates, not the notes and ideas of earlier rounds (`log` keeps them). From events, so every node agrees.
 # The policy's rounds 1 is the old way: no rounds, the task ends for each agent at its tries.
+# Exclusive tasks too: a research task piles up notes, failed reports and ideas the same way. Their round ends after
+# ROUND_AFTER failures since the task last advanced (failed reports, rejected patches), whoever made them; what goes
+# on is main (what's proved), the saved work and the state of the art, which is curated rather than piled up. And
+# no last round: a proof is all or nothing, so a round that advanced nothing doesn't end them, nor does ROUNDS
+# (counted over its whole history, Erdős #902's long tasks were at their fourth round the moment rounds came in,
+# and would have piled up again from there): a new one every ROUND_AFTER failures.
 ROUNDS, ROUND_AFTER = 4, 20
 # The view of a stuck task an agent gets on claim (fresh_view): "full", every note; "fresh", the saved work and one
 # line per route that failed, since agents handed the history of failed attempts solve fewer tasks than those that
@@ -969,17 +975,19 @@ class State:
                    + [k.lamport for k in self.sketches.values() if k.task == tid and k.verdict == "accepted"])
 
     def round_starts(self, tid: str) -> list[int]:
-        """Where each round of a task begins (see ROUNDS): the lamport after which its attempts count. Exclusive
-        tasks have one, from their creation."""
+        """Where each round of a task begins (see ROUNDS): the lamport after which its attempts count; the first,
+        its creation."""
         if tid in self._rounds:
             return self._rounds[tid]
         task, pol = self.tasks[tid], self.policy
         starts = [task.lamport]
-        if task.mode == "competitive" and pol["rounds"] > 1:
+        if task.kind == "task" and pol["rounds"] > 1:
+            competitive = task.mode == "competitive"
             gains = ([(p.lamport, 1, p.author) for p in self.patches_for(tid, "accepted")]
                      + [(k.lamport, 1, k.author) for k in self.sketches.values() if k.task == tid
                         and k.verdict == "accepted"])
-            tries = ([(a["lamport"], 0, a["author"]) for a in self.attempts if a.get("task") == tid]
+            tries = ([(a["lamport"], 0, a["author"]) for a in self.attempts if a.get("task") == tid
+                      and (competitive or a.get("outcome") == "failure")]
                      + [(p.lamport, 0, p.author) for p in self.patches_for(tid) if p.verdict != "accepted"])
             count, improved = defaultdict(int), False
             for lamport, gain, author in sorted(gains + tries):
@@ -987,8 +995,9 @@ class State:
                     count, improved = defaultdict(int), True
                     continue
                 count[author] += 1
-                if sum(count.values()) >= pol["round_after"] or min(count.values()) >= pol["competitive_tries"]:
-                    if len(starts) >= pol["rounds"] or len(starts) > 1 and not improved:
+                if (sum(count.values()) >= pol["round_after"]
+                        or competitive and min(count.values()) >= pol["competitive_tries"]):
+                    if competitive and (len(starts) >= pol["rounds"] or len(starts) > 1 and not improved):
                         break  # the last round: it goes on as before rounds, each agent up to its tries
                     starts.append(lamport)
                     count, improved = defaultdict(int), False

@@ -536,6 +536,23 @@ def test_an_agent_whose_edits_shrink_or_that_spins_without_patches_shows_it():
         len(log.state().patches_for(tid)) == 4  # a count can't be negative
 
 
+def test_an_exclusive_task_that_keeps_failing_starts_a_new_round_too():
+    """Research tasks pile up notes, failed reports and ideas just as competitive ones do."""
+    log, tid = project()
+    log.add(BOSS, "project.policy", rounds=3, round_after=4)
+    old = log.add(ANA, "idea.proposed", task=tid, text="induction on n")
+    for who in (ANA, BEA, ANA):
+        log.add(who, "attempt.reported", task=tid, outcome="failure", notes="no")
+    log.add(BEA, "attempt.reported", task=tid, outcome="success", notes="a lemma, saved")  # not a failure
+    assert len(log.state().round_starts(tid)) == 1
+    end = log.add(BEA, "attempt.reported", task=tid, outcome="failure", notes="no")
+    st = log.state()
+    assert st.round_starts(tid)[-1] == end["lamport"] and st.ideas_for(tid) == [] and old["id"]
+    for _ in range(8):  # no advance, and new rounds all the same, past the policy's 3: a proof is all or nothing
+        log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="no")
+    assert len(log.state().round_starts(tid)) == 4
+
+
 def test_a_blocked_task_someone_prepares_can_be_joined():
     log, a = project()
     b = S.task_id(log.add(BOSS, "task.created", key="b", title="B", zone=["b"], accept="true", deps=[a]))
