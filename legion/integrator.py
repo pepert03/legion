@@ -110,6 +110,12 @@ def check_slot():
             held.close()
 
 
+# Checks run Python in UTF-8 mode: tests written where UTF-8 is the default (`Path.read_text()` with no encoding)
+# read the project's files in Windows' legacy codepage there, failed on the first character outside it, and a
+# Windows verifier rejected a sound patch in Erdős #902 over it.
+CHECK_ENV = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+
+
 def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True) -> tuple[int | None, str]:
     """Run a check's command; with `slot`, in one of the machine's check slots (see LEGION_CHECKS)."""
     if slot:
@@ -118,7 +124,7 @@ def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True) -> tuple[int | None,
     # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
     cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', portable(cmd.strip()), count=1)
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         encoding="utf-8", errors="replace")
+                         encoding="utf-8", errors="replace", env=CHECK_ENV)
     deadline = time.time() + timeout
     while True:
         try:

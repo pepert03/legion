@@ -926,3 +926,14 @@ def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
     monkeypatch.setattr(coordgit, "has_commit", lambda repo, sha: calls.append(sha) or False)
     assert coordgit.superseded(repo, [(old, new)]) == set() == coordgit.superseded(repo, [(old, new)])
     assert len(calls) == 1
+
+
+def test_checks_read_utf8_files_the_way_tests_written_on_linux_expect(tmp_path):
+    """A Windows verifier rejected a sound patch: its test read the project's UTF-8 file with read_text() and no
+    encoding, which on Windows means the legacy codepage, where bytes of characters such as ∏ and ℝ mean nothing."""
+    text = "∀ n ≥ 5: ∏ ∈ ℝ — é\n"
+    (tmp_path / "f.txt").write_bytes(text.encode("utf-8"))
+    (tmp_path / "check.py").write_text(f"import pathlib\nassert pathlib.Path('f.txt').read_text() == {text!r}\n",
+                                       encoding="utf-8")
+    code, out = integrator.run_cmd("python check.py", tmp_path, 60, slot=False)
+    assert code == 0, out
