@@ -93,7 +93,7 @@ def _sync(c) -> None:
                     c._sync_failed(e)
         coordgit.prune_patches(c.repo, {p.branch for p in c.st.patches.values() if p.verdict}
                                | {w["branch"] for tid, ws in c.st.saved.items() if c.st.done(tid) for w in ws}
-                               | coordgit.superseded(c.repo, c.st.superseded_saves()))
+                               | coordgit.superseded(c.st.superseded_saves()))
         peers = coordgit.peers(c.repo)
         if "network" in c.unreachable:
             print("legion: warning: the last fetch from the Radicle network (it runs in the background) "

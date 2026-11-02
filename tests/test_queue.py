@@ -1028,14 +1028,21 @@ def test_a_patch_whose_work_is_in_main_already_is_accepted_not_rejected_as_empty
     assert verdicts(tids)["a"] == ["accepted"]
 
 
-def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
-    """The saves that couldn't be dropped were looked at again on every command: 25 s a command."""
+def test_each_authors_latest_save_replaces_the_earlier_ones_and_big_files_are_refused(project, capsys):
+    """A thousand earlier saves stayed in Erdős #902, s-four's with SAT certificates of 50 to 200 MB each."""
+    from legion import cli
     repo, tids, patch = project
     old, new = ({"branch": f"refs/legion/patches/{tids['a']}/wip-x-{n}", "commit": c * 40} for n, c in ((1, "a"), (2, "b")))
-    calls = []
-    monkeypatch.setattr(coordgit, "has_commit", lambda repo, sha: calls.append(sha) or False)
-    assert coordgit.superseded(repo, [(old, new)]) == set() == coordgit.superseded(repo, [(old, new)])
-    assert len(calls) == 1
+    assert coordgit.superseded([(old, new)]) == {old["branch"]}
+    assert coordgit.superseded([(new, new)]) == set()
+    as_(repo, "luis")
+    make_project.add(make_project.people["luis"], "task.claimed", task=tids["a"], ttl=600)
+    git(repo, "checkout", "-q", "-b", "work/a", "main")
+    (repo / "a.txt").write_bytes(b"x" * (S.MAX_FILE + 1))
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qam", "big")
+    capsys.readouterr()
+    assert cli.main(["save", tids["a"], "--notes", "a certificate"]) == 5
+    assert "over 20 MB" in capsys.readouterr().err
 
 
 def test_checks_read_utf8_files_the_way_tests_written_on_linux_expect(tmp_path):

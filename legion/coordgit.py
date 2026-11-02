@@ -375,28 +375,11 @@ def update_main(repo, tip: str | None) -> bool:
     return moved
 
 
-def superseded(repo, pairs) -> set[str]:
-    """The refs of earlier saves whose commit the same author's later save contains: nothing is lost with them.
-    Each pair is looked at once, whatever it gave (noted in .git/legion-superseded): looking again at the ones
-    that weren't on every command cost 25 s a command, two hundred git calls, and agents' tools cut them off."""
-    from . import radicle
-    gone = radicle.judged(repo)
-    seen_file = Path(run(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()
-                     or Path(repo) / ".git") / "legion-superseded"
-    try:
-        seen = set(seen_file.read_text(encoding="utf-8").split())
-    except OSError:
-        seen = set()
-    todo = [(old, new) for old, new in pairs if old["branch"] not in gone and old["branch"] != new["branch"]
-            and f"{old['branch']}@{new['commit']}" not in seen]
-    found = set()
-    with open(seen_file, "a", encoding="utf-8") as f:
-        for old, new in todo:  # noted one by one: a command cut off halfway keeps what it looked at
-            if has_commit(repo, new["commit"]) and is_ancestor(repo, old["commit"], new["commit"]):
-                found.add(old["branch"])
-            f.write(f"{old['branch']}@{new['commit']}\n")
-            f.flush()
-    return found
+def superseded(pairs) -> set[str]:
+    """The refs of earlier saves: each author's latest save on a task is what carries over, as a round carries over
+    the best and forgets the rest. They went only once the latest held their commit, and in Erdős #902 a thousand
+    stayed, s-four's among them with SAT certificates of 50 to 200 MB each, copied into every node's storage."""
+    return {old["branch"] for old, new in pairs if old["branch"] != new["branch"]}
 
 
 def prune_patches(repo, judged: set[str]) -> None:

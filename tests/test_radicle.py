@@ -682,6 +682,17 @@ def test_a_storage_piling_up_packs_is_compacted(tmp_path, monkeypatch):
     assert not radicle.compact_storage(tmp_path)                       # few enough: left alone
 
 
+def test_the_nodes_storage_is_collected_once_a_day(tmp_path, monkeypatch):
+    """Dropping refs doesn't free the disk by itself: what no ref holds stays until a gc."""
+    store, repo = tmp_path / "storage", tmp_path / "r"
+    for r in (store, repo):
+        git(tmp_path, "init", "-q", str(r))
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(radicle, "storage", lambda repo: str(store / ".git"))
+    assert radicle.gc_storage(repo)
+    assert not radicle.gc_storage(repo)                                 # once a day
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""

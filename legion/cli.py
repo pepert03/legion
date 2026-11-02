@@ -1838,6 +1838,7 @@ def cmd_save(args):
     files = [f for f in git(repo, "diff", "--name-only", git(repo, "merge-base", "HEAD", main), "HEAD").splitlines() if f]
     if not files:
         raise Fail(f"your branch has nothing that {main} doesn't: nothing to save", 5)
+    too_big(repo, files)
     # Not this branch's change: what the patches it was built on bring, and files it holds exactly as main does
     # (commits of patches accepted since, which the merge base doesn't see past). An agent's saves were refused
     # over those, again and again, until it rebuilt its branch by hand.
@@ -1878,6 +1879,19 @@ def built_on(c: Ctx, t: S.Task) -> list:
     return [p for p in c.st.patches.values() if p.verdict is None and p.task != t.id and not c.st.doomed(p)
             and coordgit.has_commit(c.repo, p.commit)
             and coordgit.run(c.repo, "merge-base", "--is-ancestor", p.commit, "HEAD").returncode == 0]
+
+
+def too_big(repo, files: list[str]) -> None:
+    """Refuse files over S.MAX_FILE: they'd be copied into every node's storage, for good."""
+    big = []
+    for name in files:
+        p = coordgit.run(repo, "cat-file", "-s", f"HEAD:{name}")
+        if p.returncode == 0 and int(p.stdout.decode().strip() or 0) > S.MAX_FILE:
+            big.append(f"{name} ({int(p.stdout.decode()) / 2**20:.0f} MB)")
+    if big:
+        raise Fail(f"files over {S.MAX_FILE // 2**20} MB: {', '.join(big)}. Every node would keep a copy of them for "
+                   "good. Compress them (xz -9 or zstd -19: a DRAT proof shrinks tenfold), or commit the script that "
+                   "makes them and the sha256 of what it makes instead, then amend the commit.", 5)
 
 
 def blob(repo, rev: str, path: str) -> str:
@@ -1931,6 +1945,7 @@ def cmd_submit(args):
         if not files:
             print(f"legion: this work is in {main} already, but {t.key} isn't marked done: submitting it marks it, "
                   "once it passes its check there.", file=sys.stderr)
+        too_big(repo, files)
         theirs = brought(repo, main, on)  # what those patches bring isn't this patch's change
         outside = [f for f in files if not S.in_zone(f, t.zone) and blob(repo, "HEAD", f) not in theirs.get(f, ())]
         if outside:

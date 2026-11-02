@@ -48,6 +48,10 @@ COOLDOWN = 3600
 # out when an agent has no task with a new route. A computed result asks for its own replication, and each owner
 # other than its author's that settles it counts as one replication.
 MAX_BRIEF, MAX_QUESTION = 6000, 1000
+# The largest file a save or a patch may bring. SAT certificates of 50 to 200 MB, saved again and again, made
+# Erdős #902's storage grow past a gigabyte on some machines, and their nodes too slow to serve. A certificate goes
+# compressed (DRAT shrinks tenfold), or as the script that makes it and the hash of what it makes.
+MAX_FILE = 20 * 2**20
 # Ideas: the routes towards a task, kept as research teams keep their hypotheses. Anyone proposes one
 # (idea.proposed), possibly evolved from others (`from`: combined, refined, generalized); agents of owners other than
 # their authors compare two at a time (idea.compared), which rates them, Elo from ELO_START with ELO_K, since
@@ -930,8 +934,8 @@ class State:
         return sorted(latest.values(), key=lambda w: -w["lamport"])
 
     def superseded_saves(self) -> list[tuple[dict, dict]]:
-        """(save, the same author's latest on that open task) for every earlier save: once the latest holds the
-        earlier one's commit, nothing needs the earlier one's ref."""
+        """(save, the same author's latest on that open task) for every earlier save: the latest replaces it (see
+        coordgit.superseded)."""
         out = []
         for tid, ws in self.saved.items():
             if not self.done(tid):

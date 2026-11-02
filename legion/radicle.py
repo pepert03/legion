@@ -876,6 +876,22 @@ def compact_storage(repo, seconds: float = 100, merge: bool = True) -> bool:
     return True
 
 
+GC_EVERY = 86400
+
+
+def gc_storage(repo) -> bool:
+    """Once a day, where a sync process stays: drop from the node's storage what no ref holds any more (dropped
+    saves, judged patches) and pack the rest. Refs going doesn't free the disk by itself. True if it ran."""
+    if IS_WINDOWS and not native(repo) or time.time() - float(_cfg(repo, "legion.gced") or 0) < GC_EVERY:
+        return False
+    subprocess.run(["git", "config", "legion.gced", str(time.time())], cwd=repo, capture_output=True)
+    try:
+        return subprocess.run(["git", "-C", storage(repo), "gc", "--quiet", "--prune=2.weeks.ago"],
+                              capture_output=True, timeout=1800).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
 def run_network_sync(repo, quick: bool = False) -> bool:
     """What the background process does: make sure the node runs, and fetch from the network."""
     from . import tunnel
@@ -887,6 +903,8 @@ def run_network_sync(repo, quick: bool = False) -> bool:
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True, quick=quick)
         compact_storage(repo, 20 if quick else 300, merge=not quick)
+        if not quick:
+            gc_storage(repo)
     except RadError:
         ok = False
     finally:
