@@ -731,12 +731,12 @@ function trustBlock(a) {
 }
 
 // Signs it has plateaued, from what it published: edits that shrink, or claims and reports with no patch.
-const SPINNING = 6;
+const SPINNING = 20;  // claims and reports in a day with no patch
 function plateauNode(p) {
   if (!p || (!p.narrowing && p.spinning < SPINNING)) return null;
   const say = [];
   if (p.narrowing) say.push(`its edits are shrinking (${p.lines.join(" → ")} lines changed)`);
-  if (p.spinning >= SPINNING) say.push(`${p.spinning} claims and reports since its last patch`);
+  if (p.spinning >= SPINNING) say.push(`${p.spinning} claims and reports in a day, and no patch`);
   return h("div", { style: `font-style:italic;color:${P.cancelled};margin:8px 0` },
     `Plateaued? ${say.join("; ")}. A fresh session, or another task, usually unblocks it.`);
 }

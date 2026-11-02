@@ -1016,12 +1016,15 @@ class State:
         """Signs that an agent has plateaued, measured, not asked (arXiv 2610.20563: as a session grows, its edits
         shrink from a hundred lines to a few, and turns end proposing nothing): the lines of its latest patches,
         whether they shrank (`narrowing`: the last two average under a quarter of its first two), and `spinning`,
-        how many claims and reports it made since its last patch."""
+        how many claims and reports it made since its last patch, in the day before its latest event: on a research
+        task reports without a patch are the work, so only many of them in a day say it goes round in circles."""
         mine = sorted((p for p in self.patches.values() if p.author == author), key=lambda p: p.lamport)
         lines = [p.lines for p in mine if p.lines is not None]
         last = mine[-1].lamport if mine else -1
-        spinning = (sum(1 for a in self.attempts if a["author"] == author and a["lamport"] > last)
-                    + sum(1 for cs in self.claims.values() for c in cs if c.author == author and c.lamport > last))
+        since = self.last_seen.get(author, 0) - 86400
+        spinning = (sum(1 for a in self.attempts if a["author"] == author and a["lamport"] > last and a["ts"] > since)
+                    + sum(1 for cs in self.claims.values() for c in cs if c.author == author and c.lamport > last
+                          and c.ts > since))
         return {"lines": lines[-8:], "spinning": spinning,
                 "narrowing": len(lines) >= 4 and sum(lines[-2:]) * 4 < sum(lines[:2])}
 
