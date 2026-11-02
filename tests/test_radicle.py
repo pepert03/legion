@@ -554,6 +554,32 @@ def test_where_no_sync_process_stays_a_command_fetches_waiting_now_and_then(netw
     assert fetched == [alice]
 
 
+def test_a_clone_far_behind_gets_the_events_first_and_a_slow_batch_is_halved(network, monkeypatch):
+    """Muse's clone, thousands of refs behind on a slow machine, fetched patches before peers, its first batch
+    outlasted the time limit on every round, and for four days no event reached it."""
+    alice, bob = network["z6MkAlice"], network["z6MkBob"]
+    boss = Identity.generate("boss")
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
+    git(alice, "commit", "-q", "--allow-empty", "-m", "x")
+    for n in range(6):
+        git(alice, "update-ref", f"refs/legion/patches/t-1/a-{n}", "HEAD")
+    coordgit.sync(alice, boss)
+    calls, real = [], radicle.rgit
+
+    def slow(repo, *args, **kw):  # a fetch of more than two refs at once runs out of time
+        specs = [a for a in args if a.startswith("+refs/")]
+        if args[0] == "fetch" and specs:
+            calls.append(specs)
+            if len(specs) > 2:
+                raise radicle.RadError("`git -C repo` timed out after 120s")
+        return real(repo, *args, **kw)
+    monkeypatch.setattr(radicle, "rgit", slow)
+    radicle.fetch_all(bob)
+    assert "refs/legion/peers/" in calls[0][0]                          # the events first
+    assert git(bob, "for-each-ref", "--count=1", "refs/legion/peers/")  # and they arrived
+    assert len(git(bob, "for-each-ref", "refs/legion/patches/").splitlines()) == 6  # halved until it went
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""

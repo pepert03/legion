@@ -844,7 +844,11 @@ def fetch_all(repo) -> list[str]:
         # minutes even when nothing was new.
         have = local_values(repo, "refs/legion/peers/", "refs/legion/patches/")
         broken = _unfetchable(repo)
-        specs = [f"+{src}:{dest}" for dest, src in sorted(wanted.items())
+        # The events first: every node's coord, then the patches. In Erdős #902 a clone thousands of refs behind
+        # (muse's, on a slow machine) fetched in name order, patches before peers, its first batch outlasted the
+        # fetch's time limit on every round, and for four days no event reached it.
+        specs = [f"+{src}:{dest}" for dest, src in sorted(wanted.items(), key=lambda kv: (
+                 not kv[0].startswith("refs/legion/peers/"), kv[0]))
                  if have.get(dest) != held[src] and f"{src} {held[src]}" not in broken]
         for batch in batches(specs) if specs else []:
             _fetch(repo, batch, held)
@@ -882,9 +886,9 @@ def _fetch(repo, specs: list[str], held: dict[str, str]) -> None:
             if "cannot lock ref" in str(e) and attempt < 2:  # another legion process fetching the same refs
                 time.sleep(1)
                 continue
-            if "timed out" in str(e):
+            if "timed out" in str(e) and len(specs) == 1:
                 raise
-            if len(specs) > 1:
+            if len(specs) > 1:  # a batch too big for the time limit, or one ref in it that fails: halves
                 _fetch(repo, specs[:len(specs) // 2], held)
                 _fetch(repo, specs[len(specs) // 2:], held)
             else:
