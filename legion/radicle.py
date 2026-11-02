@@ -726,6 +726,57 @@ def wait_published(repo, seconds: float) -> bool:
     return True
 
 
+# A node whose storage was rebuilt (a sandbox that comes back from an older copy, a reinstall) signs its namespace's
+# refs anew on top of what it has, not on top of what the network holds from it: the seeds, which keep the older
+# chain, take the new one for a fork and drop it, though they fetch it "successfully". In Erdős #902 nothing
+# instinct's machine `a` published reached anyone for a day and a half. So before it publishes, a node asks a public
+# seed (over git's HTTPS, which needs neither the node nor its connections) what it holds of this node's namespace,
+# and when its own chain doesn't descend from that, takes that one back as its starting point: the next signing goes
+# on top of it, and the seeds accept it. At most every HEAL_EVERY seconds.
+HEAL_SEEDS = ("rosa.radicle.network", "iris.radicle.network", "seed.radicle.at")
+HEAL_EVERY = 3600
+
+
+def heal_urls(repo) -> list[str]:
+    return [f"https://{host}/{rid(repo)[4:]}.git" for host in HEAL_SEEDS]
+
+
+def heal_sigrefs(repo, force: bool = False) -> str | None:
+    """Make this node's signed refs descend from what the network holds of them (see HEAL_SEEDS). What it did,
+    or None."""
+    if IS_WINDOWS and not native(repo):
+        return None  # a storage inside WSL: not reachable from here, and no sandbox resets it
+    last = float(_cfg(repo, "legion.healed") or 0)
+    if not force and time.time() - last < HEAL_EVERY:
+        return None
+    subprocess.run(["git", "config", "legion.healed", str(time.time())], cwd=repo, capture_output=True)
+    nid = _cfg(repo, "legion.nid") or node_id(repo)
+    store, ref = storage(repo), f"refs/namespaces/{nid}/refs/rad/sigrefs"
+    mine = subprocess.run(["git", "-C", store, "rev-parse", "-q", "--verify", ref], capture_output=True,
+                          text=True).stdout.strip()
+    for url in heal_urls(repo):
+        try:
+            p = subprocess.run(["git", "ls-remote", url, ref], capture_output=True, text=True, timeout=40)
+        except subprocess.TimeoutExpired:
+            continue
+        theirs = p.stdout.split()[0] if p.returncode == 0 and p.stdout.split() else ""
+        if not theirs:
+            continue
+        if theirs == mine or mine and subprocess.run(["git", "-C", store, "merge-base", "--is-ancestor", theirs, mine],
+                                                     capture_output=True).returncode == 0:
+            return None  # ours goes on from theirs: nothing to heal
+        temp = "refs/legion-heal/sigrefs"
+        got = subprocess.run(["git", "-C", store, "fetch", "-q", "--no-tags", url, f"+{ref}:{temp}"],
+                             capture_output=True, text=True, timeout=120)
+        if got.returncode:
+            continue
+        subprocess.run(["git", "-C", store, "update-ref", ref, theirs], capture_output=True)
+        subprocess.run(["git", "-C", store, "update-ref", "-d", temp], capture_output=True)
+        host = url.split("//", 1)[-1].split("/", 1)[0]
+        return f"this node's signed refs went on from {theirs[:8]}, what {host} holds of them"
+    return None
+
+
 def run_publish(repo) -> None:
     from .coordgit import publish_radicle
     from .identity import Identity
@@ -736,6 +787,13 @@ def run_publish(repo) -> None:
         return
     # A node the sandbox stopped can't announce, nor serve what it announces: pushed, the events stayed in its
     # storage. Only the network fetch started it, in a process of its own the sandbox killed too.
+    try:
+        healed = heal_sigrefs(repo)
+        if healed:
+            print(f"legion: {healed}: a storage rebuilt from an older copy had forked them, and the seeds dropped "
+                  "what it published", file=sys.stderr, flush=True)
+    except (RadError, OSError, subprocess.SubprocessError):
+        pass
     try:
         if not node_running(repo):
             ensure_node(repo)

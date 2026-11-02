@@ -613,6 +613,37 @@ def test_an_updated_daemon_starts_the_new_one_instead_of_waiting_for_a_command(t
     assert started == [1] and "starts the new one" in said[-1] and not (daemon.folder() / "beat").exists()
 
 
+def test_a_node_whose_storage_went_back_takes_up_the_networks_chain_of_its_signed_refs(tmp_path, monkeypatch):
+    """Instinct's sandbox `a` came back from an older copy of its storage and signed its refs on another branch:
+    the seeds fetched it "successfully" and kept the older chain, and nothing it published reached anyone."""
+    store, seed = tmp_path / "storage", tmp_path / "seed"
+    for r in (store, seed):
+        git(tmp_path, "init", "-q", "--bare", str(r))
+    ref = "refs/namespaces/z6MkA/refs/rad/sigrefs"
+
+    def chain(where, *messages):
+        work = tmp_path / ("w-" + where.name + messages[0])
+        git(tmp_path, "init", "-q", str(work))
+        for m in messages:
+            git(work, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "--allow-empty", "-m", m)
+        git(work, "push", "-q", "--force", str(where), f"HEAD:{ref}")
+        return git(work, "rev-parse", "HEAD")
+    network = chain(seed, "s1", "s2")      # what the seeds hold of this node
+    forked = chain(store, "r1")             # what the rebuilt storage signed instead
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    git(repo, "config", "legion.nid", "z6MkA")
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(radicle, "storage", lambda repo: str(store))
+    monkeypatch.setattr(radicle, "heal_urls", lambda repo: [str(seed)])
+    assert "went on from" in radicle.heal_sigrefs(repo)
+    assert git(store, "rev-parse", ref) == network != forked
+    assert radicle.heal_sigrefs(repo) is None                          # once an hour at most
+    assert radicle.heal_sigrefs(repo, force=True) is None              # and ours goes on from theirs now
+    assert not git(store, "for-each-ref", "refs/legion-heal/")
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""
