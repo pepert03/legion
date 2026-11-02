@@ -675,6 +675,8 @@ def test_a_storage_piling_up_packs_is_compacted(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     monkeypatch.setattr(radicle, "storage", lambda repo: str(store / ".git"))
     monkeypatch.setattr(radicle, "MAX_PACKS", 3)
+    assert radicle.compact_storage(tmp_path, merge=False) and packs() == 5  # where a command waits: the index only
+    assert (store / ".git" / "objects" / "pack" / "multi-pack-index").exists()
     assert radicle.compact_storage(tmp_path) and packs() < 5
     monkeypatch.setattr(radicle, "MAX_PACKS", 64)
     assert not radicle.compact_storage(tmp_path)                       # few enough: left alone

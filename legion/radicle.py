@@ -849,12 +849,13 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
 # 980 packs (1.24 GB, its storage four times jose's with the same in it), a fetch from it had to look through all
 # of them, and no seed finished one before giving up. After a network fetch, past MAX_PACKS, they're compacted
 # in steps that each stay done: one index over all the packs (lookups are quick at once, however many there are),
-# then batches of small packs merged into one, 40 MB at a time (300 MB outlasted a sandbox's command). A whole
-# repack of 1.2 GB outlasted it too, and cut off, it kept nothing.
+# then batches of small packs merged into one, 40 MB at a time. Where a command waits for it (a sandbox), only the
+# index: on `e` it took under a second and was enough for the seeds, while even 40 MB batches outlasted a
+# command, and a whole repack of 1.2 GB, cut off, kept nothing.
 MAX_PACKS = 64
 
 
-def compact_storage(repo, seconds: float = 100) -> bool:
+def compact_storage(repo, seconds: float = 100, merge: bool = True) -> bool:
     """Repack the node's storage if it holds more than MAX_PACKS packs. True if it did."""
     if IS_WINDOWS and not native(repo):
         return False  # inside WSL: its own git, and no sandbox piling packs up
@@ -862,8 +863,10 @@ def compact_storage(repo, seconds: float = 100) -> bool:
     if len(list((Path(store) / "objects" / "pack").glob("*.pack"))) <= MAX_PACKS:
         return False
     end = time.time() + seconds
-    for step in (["multi-pack-index", "write"], ["multi-pack-index", "repack", "--batch-size=40m"],
-                 ["multi-pack-index", "expire"]):
+    steps = [["multi-pack-index", "write"]]
+    if merge:
+        steps += [["multi-pack-index", "repack", "--batch-size=40m"], ["multi-pack-index", "expire"]]
+    for step in steps:
         try:
             if subprocess.run(["git", "-C", store, *step], capture_output=True,
                               timeout=max(1.0, end - time.time())).returncode:
@@ -883,7 +886,7 @@ def run_network_sync(repo, quick: bool = False) -> bool:
             time.sleep(5)  # it needs a moment to connect to the seeds
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True, quick=quick)
-        compact_storage(repo, 40 if quick else 300)
+        compact_storage(repo, 20 if quick else 300, merge=not quick)
     except RadError:
         ok = False
     finally:
