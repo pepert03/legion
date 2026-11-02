@@ -1014,6 +1014,20 @@ def test_with_sync_off_a_command_does_what_it_says_and_nothing_on_the_network(pr
     assert [i["ev"]["text"] for i in Ctx(sync=False).st.ideas_for(tids["a"])] == ["a route nobody tried"]
 
 
+def test_a_patch_whose_work_is_in_main_already_is_accepted_not_rejected_as_empty(project):
+    """In Erdős #902 two acceptances were dropped when late events moved main before them, but their merges were in
+    main: checked again, the patches "changed nothing", were rejected, and the tasks opened to be done again."""
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    st = Ctx(sync=False).st
+    p = st.patches_for(tids["a"])[0]
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-edit", p.commit)                     # in main, by a verdict that didn't count
+    make_project.add(make_project.people["boss"], "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    integrator.integrate_once(Ctx(), 60, log=lambda line: None)
+    assert verdicts(tids)["a"] == ["accepted"]
+
+
 def test_a_save_is_looked_at_once_not_on_every_command(project, monkeypatch):
     """The saves that couldn't be dropped were looked at again on every command: 25 s a command."""
     repo, tids, patch = project

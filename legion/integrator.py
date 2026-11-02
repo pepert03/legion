@@ -192,6 +192,11 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     # What the patch changes is what merging it changes in main: a branch built on a dependency's patch carries
     # that patch too, and once it's in main it isn't this patch's change.
     files = [f for f in git(repo, "diff", "--name-only", head, tree).splitlines() if f]
+    if not files and run(repo, "merge-base", "--is-ancestor", commit, head).returncode == 0:
+        # Its work is in main already: merged on an acceptance the state later dropped (events that arrived late
+        # moved main before it, in Erdős #902), so the task stayed open. Checked on main as it is, it's accepted
+        # with no merge of its own, instead of rejected as empty and done again by someone else.
+        return head, head
     if not files:
         return reject("it changes nothing", "empty")
     outside = [f for f in files if not S.in_zone(f, allowed)]

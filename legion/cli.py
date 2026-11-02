@@ -1920,8 +1920,12 @@ def cmd_submit(args):
     if not args.no_check:
         if git(repo, "status", "--porcelain", "--untracked-files=no"):
             raise Fail("you have uncommitted changes: commit before submitting", 5)
-        if not files:
+        in_main = git(repo, "rev-parse", "HEAD") == base  # HEAD is in main: its merge base with main is itself
+        if not files and not (in_main and not c.st.done(t.id)):
             raise Fail(f"your branch changes nothing compared to {main}", 5)
+        if not files:
+            print(f"legion: this work is in {main} already, but {t.key} isn't marked done: submitting it marks it, "
+                  "once it passes its check there.", file=sys.stderr)
         theirs = brought(repo, main, on)  # what those patches bring isn't this patch's change
         outside = [f for f in files if not S.in_zone(f, t.zone) and blob(repo, "HEAD", f) not in theirs.get(f, ())]
         if outside:
