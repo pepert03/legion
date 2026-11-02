@@ -53,6 +53,14 @@ def _sync(c) -> None:
             # minutes, and commands waited two minutes for it, past their tools' limit. Busy, the clone is
             # being synced already: the command reads what it has.
             wait = 120 if c.strict or not coordgit.is_radicle(c.repo) else LOCK_WAIT
+            if (coordgit.is_radicle(c.repo) and not getattr(c, "unpublished", None) and radicle.fetch_due(c.repo)
+                    and not (daemon.alive() and daemon.age() >= SETTLED)):  # no sync process stays: fetch, waiting
+                print("legion: fetching from the Radicle network (no sync process stays on this machine)",
+                      file=sys.stderr, flush=True)
+                try:
+                    radicle.fetch_inline(c.repo)
+                except radicle.RadError:
+                    pass
             with locks.held(daemon.repo_lock(c.repo), wait=wait) as got:
                 if got or wait > LOCK_WAIT:
                     c.unreachable = coordgit.sync(c.repo, c.ident, publish=False)

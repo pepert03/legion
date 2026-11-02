@@ -569,8 +569,9 @@ def namespaces(repo) -> list[str]:
     return sorted({prefix.split("/")[2] for prefix in publishers(repo).values()})
 
 
-def network_sync(repo, force: bool = False) -> bool:
-    """Ask the node to fetch the latest from the network; rate-limited, since it takes a few seconds."""
+def network_sync(repo, force: bool = False, quick: bool = False) -> bool:
+    """Ask the node to fetch the latest from the network; rate-limited, since it takes a few seconds. `quick`: one
+    try, for a command that waits for it (see fetch_inline)."""
     last = float(_cfg(repo, "legion.radsynced") or 0)
     every = float(os.environ.get("LEGION_RAD_SYNC_EVERY", NETWORK_SYNC_EVERY))
     if not force and time.time() - last < every:
@@ -580,9 +581,9 @@ def network_sync(repo, force: bool = False) -> bool:
     if seed:  # the project's own seed first: it has everything, and answers
         p = run("rad", "sync", "--fetch", rid(repo), "--seed", seed.split("@")[0], "--timeout", "30sec", repo=repo,
                 check=False, timeout=45)
-    if p is None or p.returncode:
-        p = run("rad", "sync", "--fetch", rid(repo), repo=repo, check=False, timeout=45)
-    if p.returncode and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
+    if p is None or p.returncode and not quick:
+        p = run("rad", "sync", "--fetch", rid(repo), "--timeout", "30sec", repo=repo, check=False, timeout=45)
+    if p.returncode and not quick and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
         p = run("rad", "sync", "--fetch", rid(repo), *seed_args(_cfg(repo, "legion.radhome")), repo=repo,
                 check=False, timeout=45)
     ok = p.returncode == 0
@@ -773,7 +774,7 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
         return subprocess.Popen(cmd, creationflags=flags, **kw)
 
 
-def run_network_sync(repo) -> bool:
+def run_network_sync(repo, quick: bool = False) -> bool:
     """What the background process does: make sure the node runs, and fetch from the network."""
     from . import tunnel
     started, ok = time.time(), False
@@ -782,12 +783,30 @@ def run_network_sync(repo) -> bool:
             ensure_node(repo)
             time.sleep(5)  # it needs a moment to connect to the seeds
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
-        ok = network_sync(repo, force=True)
+        ok = network_sync(repo, force=True, quick=quick)
     except RadError:
         ok = False
     finally:
         _write_netsync(repo, {"started": started, "ended": time.time(), "running": False, "ok": ok})
     return ok
+
+
+# Where no sync process lives (a sandbox kills what a command leaves running, the node included), the fetch kicked
+# in the background died with the command, and the node lived only seconds: in Erdős #902 instinct's clones got
+# nothing from the nodes they weren't connected to in those seconds for days, though they published. So there a
+# command fetches itself, waiting: at most every SANDBOX_FETCH_EVERY seconds, and only when it has nothing of its
+# own to publish (that goes first), so it stays within agents' tools' time limits.
+SANDBOX_FETCH_EVERY = 180
+
+
+def fetch_due(repo, every: float = SANDBOX_FETCH_EVERY) -> bool:
+    """No network fetch finished in the last `every` seconds."""
+    return time.time() - netsync_status(repo).get("ended", 0) >= every
+
+
+def fetch_inline(repo) -> bool:
+    """A network fetch this command waits for (see SANDBOX_FETCH_EVERY). True if it reached the network."""
+    return run_network_sync(repo, quick=True)
 
 
 MAX_ARGS = 20000  # characters of refspecs per fetch: Windows caps a command line at 32767

@@ -45,8 +45,11 @@ def network(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     monkeypatch.setattr(radicle, "run", run)
     monkeypatch.setattr(radicle, "storage", lambda repo: str(store))
-    monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False: True)
+    monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False, quick=False: True)
     monkeypatch.setattr(radicle, "kick_network_sync", lambda repo: True)
+    fetched = []
+    monkeypatch.setattr(radicle, "fetch_inline", lambda repo: fetched.append(repo) or True)
+    nodes["fetched"] = fetched
     monkeypatch.setattr(radicle, "publish", publish)
     return nodes
 
@@ -330,7 +333,7 @@ def test_a_command_starts_the_network_fetch_in_the_background_and_doesnt_wait(tm
     assert radicle.kick_network_sync(repo) and len(started) == 1 and started[0][-1] == "netsync"
     assert radicle.kick_network_sync(repo) and len(started) == 1        # one is running: no second one
     monkeypatch.setattr(radicle, "node_running", lambda repo=None, home=None: True)
-    monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False: False)
+    monkeypatch.setattr(radicle, "network_sync", lambda repo, force=False, quick=False: False)
     assert radicle.run_network_sync(repo) is False                     # what the background process does
     assert radicle.kick_network_sync(repo) is False and len(started) == 1  # it failed just now: say so
 
@@ -524,6 +527,32 @@ def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch)
     assert not old.exists() and new.exists() and gc.exists() and held.exists()
     os.utime(new, (0, 0))
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon
+
+def test_where_no_sync_process_stays_a_command_fetches_waiting_now_and_then(network, monkeypatch):
+    """Instinct's sandboxes kill what a command leaves running: the fetch kicked in the background died with each
+    command, and for days its clones got nothing from the nodes their node didn't meet in its seconds alive."""
+    from legion import ctx, daemon, identity, transport
+    alice, fetched = network["z6MkAlice"], network["fetched"]
+    boss = Identity.generate("boss")
+    identity.bind(alice, boss)
+    coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
+    monkeypatch.chdir(alice)
+    monkeypatch.setattr(daemon, "alive", lambda: True)
+    monkeypatch.setattr(daemon, "age", lambda: 30.0)                    # started anew by every command
+    monkeypatch.setattr(daemon, "serving", lambda repo: True)
+    c = ctx.Ctx()
+    assert fetched == [alice]
+    radicle._write_netsync(alice, {"ended": __import__("time").time(), "running": False})
+    c.sync()
+    assert fetched == [alice]                                           # one fetched lately: not again so soon
+    radicle._write_netsync(alice, {"ended": 0, "running": False})
+    c.unpublished = ["idea.proposed 1234"]
+    c.sync()
+    assert fetched == [alice]                                           # its own events go out first
+    monkeypatch.setattr(daemon, "age", lambda: transport.SETTLED + 1.0)  # a sync process that stays fetches
+    ctx.Ctx()
+    assert fetched == [alice]
+
 
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
