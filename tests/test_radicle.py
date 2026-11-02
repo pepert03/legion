@@ -580,6 +580,39 @@ def test_a_clone_far_behind_gets_the_events_first_and_a_slow_batch_is_halved(net
     assert len(git(bob, "for-each-ref", "refs/legion/patches/").splitlines()) == 6  # halved until it went
 
 
+def test_a_quick_fetch_asks_the_network_when_the_projects_seed_is_off(tmp_path, monkeypatch):
+    """The project's Umbrel seed was switched off, and every fetch a command waited for asked only it."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    git(repo, "config", "legion.seed", "z6MkUmbrel@100.1.2.3:8776")
+    asked = []
+
+    def run(*args, repo=None, check=True, timeout=60, **kw):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 1 if "z6MkUmbrel" in args else 0, "", "")
+    monkeypatch.setattr(radicle, "run", run)
+    assert radicle.network_sync(repo, force=True, quick=True)
+    assert [a[a.index("--timeout") + 1] for a in asked] == ["10sec", "30sec"]
+
+
+def test_an_updated_daemon_starts_the_new_one_instead_of_waiting_for_a_command(tmp_path, monkeypatch):
+    from legion import daemon
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    stamps = iter([1.0, 2.0])
+    monkeypatch.setattr(daemon, "_code_stamp", lambda: next(stamps))
+    monkeypatch.setattr(daemon, "_wait", lambda wake, seconds: None)
+    (daemon.folder() / "repos").mkdir(parents=True)
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    daemon.register(repo)
+    monkeypatch.setattr(daemon, "sync_one", lambda path, log: None)
+    started, said = [], []
+    monkeypatch.setattr(daemon, "start", lambda: started.append(1))
+    assert daemon.run(log=said.append) == 0
+    assert started == [1] and "starts the new one" in said[-1] and not (daemon.folder() / "beat").exists()
+
+
 def test_a_background_process_the_sandbox_killed_is_started_again_at_once(tmp_path, monkeypatch):
     """Sandboxes kill background processes and leave "running" behind: a publish was taken for under way ten
     minutes after it died, and the node that the network fetch restarts stayed stopped meanwhile."""

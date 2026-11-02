@@ -578,10 +578,12 @@ def network_sync(repo, force: bool = False, quick: bool = False) -> bool:
         return True
     seed = _cfg(repo, "legion.seed")
     p = None
-    if seed:  # the project's own seed first: it has everything, and answers
-        p = run("rad", "sync", "--fetch", rid(repo), "--seed", seed.split("@")[0], "--timeout", "30sec", repo=repo,
-                check=False, timeout=45)
-    if p is None or p.returncode and not quick:
+    if seed:  # the project's own seed first: it has everything, and answers (briefly when a command waits: an
+        # Umbrel switched off made every quick fetch fail, the others never asked)
+        wait = "10sec" if quick else "30sec"
+        p = run("rad", "sync", "--fetch", rid(repo), "--seed", seed.split("@")[0], "--timeout", wait, repo=repo,
+                check=False, timeout=25 if quick else 45)
+    if p is None or p.returncode:
         p = run("rad", "sync", "--fetch", rid(repo), "--timeout", "30sec", repo=repo, check=False, timeout=45)
     if p.returncode and not quick and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
         p = run("rad", "sync", "--fetch", rid(repo), *seed_args(_cfg(repo, "legion.radhome")), repo=repo,

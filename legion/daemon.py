@@ -247,7 +247,12 @@ def run(rounds: int | None = None, log=_log) -> int:
             log(f"{time.strftime('%H:%M:%S')} no clone in use: the daemon ends")
             break
         if _code_stamp() != stamp:
-            log(f"{time.strftime('%H:%M:%S')} legion was updated: the daemon ends, and the next command starts the new one")
+            # The new one starts at once: left to the next command, on a machine whose agents were all on other
+            # clones, jose's clone in Erdős #902 went two and a half hours without a sync after an update.
+            log(f"{time.strftime('%H:%M:%S')} legion was updated: the daemon starts the new one and ends")
+            me.close()  # its lock, for the new one
+            (d / "beat").unlink(missing_ok=True)
+            start()
             break
         _wait(d / "wake", EVERY)
     return 0
