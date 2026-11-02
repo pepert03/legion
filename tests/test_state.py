@@ -281,6 +281,20 @@ def test_paths_work_on_competitive_tasks_and_are_limited():
     assert "paths under way" in st.ignored[-1][1]
 
 
+def test_a_path_refused_by_a_rule_of_the_moment_stands_once_a_finalizer_accepts_it():
+    """A path proposed during an outage arrived late, landed where its task had three paths under way, and was
+    refused: so was its acceptance, the main it made, and every patch accepted on that main."""
+    log, tid = stuck_project(key="record", zone=["src/"], accept="true", mode="competitive", metric="python m.py")
+    for i in range(S.MAX_OPEN_PATHS + 1):
+        last = log.add(BEA, "path.proposed", task=tid, notes="another idea",
+                       children=[dict(CHILD, key=f"idea{i}", zone=[f"src/idea{i}.py"])])
+    assert "paths under way" in log.state().ignored[-1][1]
+    log.add(BOSS, "path.accepted", path=last["id"])
+    st = log.state()
+    assert st.sketches[last["id"]].verdict == "accepted" and len(st.paths_for(tid)) == S.MAX_OPEN_PATHS + 1
+    assert not any(x["id"] == last["id"] for x, _ in st.ignored)
+
+
 def test_ripe_ideas_and_questions_on_a_stuck_task_are_handed_out_to_become_paths():
     """Ideas the agents rated and questions several owners answered waited in their lists while nobody found a
     task free: on a stuck task, they're turned into subtasks."""

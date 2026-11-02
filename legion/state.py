@@ -379,6 +379,10 @@ class State:
         self.main_tip: str | None = None  # the main the integrator signed last
         self.events: list[dict] = []
         self.ignored: list[tuple[dict, str]] = []
+        # Paths refused only by a rule of the moment (the task wasn't stuck, or had MAX_OPEN_PATHS under way): an
+        # acceptance of one by a finalizer admits it after all (see _judge_sketch).
+        self.held_back: dict[str, dict] = {}
+        self._admitting = False
         self.max_lamport = 0
         self.votes: dict[tuple[str, str], set] = {}  # (add|remove, key) -> integrators who voted for it
         self.leases: list[Claim] = []                # claims on the integrator role, whole or per subtree
@@ -1591,11 +1595,21 @@ class State:
             # is stuck, and only a few at a time.
             if task.cancelled or task.mode == "exclusive" and self.done(task.id):
                 return "the task is already done"
+            # Rules of the moment: whether they hold depends on which events came before, and an event that
+            # arrives late, from a node that was cut off, lands earlier in the order. In Erdős #902 a path
+            # proposed during an outage arrived when its task had three paths under way at that point: refused,
+            # its acceptance (on a node that had seen it in time) was refused too, the main it made with it, and
+            # every patch accepted on that main after it. So a path they refuse is held back, and admitted if a
+            # finalizer accepts it.
+            soft = None
             if not self.stalled(task.id):
-                return (f"the task isn't stuck: paths open after {STALL_AFTER} failures since its last progress "
+                soft = (f"the task isn't stuck: paths open after {STALL_AFTER} failures since its last progress "
                         f"(it has {self.failures_since_progress(task.id)})")
-            if len(self.open_paths(task.id)) >= MAX_OPEN_PATHS:
-                return f"the task already has {MAX_OPEN_PATHS} paths under way"
+            elif len(self.open_paths(task.id)) >= MAX_OPEN_PATHS:
+                soft = f"the task already has {MAX_OPEN_PATHS} paths under way"
+            if soft and not self._admitting:
+                self.held_back[ev["id"]] = ev
+                return soft
             notes = ev.get("notes", "")
             if not isinstance(notes, str) or not notes.strip() or len(notes) > E.MAX_NOTES:
                 return f"a path needs notes (why this route, what failed before), at most {E.MAX_NOTES} characters"
@@ -1774,6 +1788,16 @@ class State:
 
     def _judge_sketch(self, ev: dict) -> str | None:
         k = self.sketches.get(ev.get("sketch") or ev.get("path"))
+        held = self.held_back.get(ev.get("path") or "")
+        if k is None and held is not None and ev["type"] == "path.accepted":
+            self._admitting = True  # see held_back: a finalizer accepted it, and that stands
+            try:
+                if self.apply(held) is None:
+                    self.held_back.pop(held["id"], None)
+                    self.ignored = [(x, why) for x, why in self.ignored if x is not held]
+            finally:
+                self._admitting = False
+            k = self.sketches.get(held["id"])
         if k is None:
             return "unknown sketch or path"
         if (k.kind == "path") != ev["type"].startswith("path."):
