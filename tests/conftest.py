@@ -6,7 +6,9 @@ def no_daemon(monkeypatch):
     """Commands sync by themselves in tests: no machine-wide sync process started behind their back, and the
     push they leave to a process of their own (radicle.kick_publish) runs at once, in this one, as the command's
     identity."""
-    from legion import coordgit, ctx
+    from legion import coordgit, ctx, radicle
     monkeypatch.setenv("LEGION_NO_DAEMON", "1")
+    # run_publish sets it for its process, which a test is too: it carried over to the tests after it.
+    monkeypatch.setattr(radicle, "ANNOUNCE_INLINE", False)
     monkeypatch.setattr(ctx.Ctx, "_publish",
                         lambda self, wait=False: coordgit.publish_radicle(self.repo, self.ident) or True)
