@@ -849,8 +849,8 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
 # 980 packs (1.24 GB, its storage four times jose's with the same in it), a fetch from it had to look through all
 # of them, and no seed finished one before giving up. After a network fetch, past MAX_PACKS, they're compacted
 # in steps that each stay done: one index over all the packs (lookups are quick at once, however many there are),
-# then batches of small packs merged into one. A whole repack of 1.2 GB outlasted the sandbox, and cut off, it
-# kept nothing.
+# then batches of small packs merged into one, 40 MB at a time (300 MB outlasted a sandbox's command). A whole
+# repack of 1.2 GB outlasted it too, and cut off, it kept nothing.
 MAX_PACKS = 64
 
 
@@ -862,7 +862,7 @@ def compact_storage(repo, seconds: float = 100) -> bool:
     if len(list((Path(store) / "objects" / "pack").glob("*.pack"))) <= MAX_PACKS:
         return False
     end = time.time() + seconds
-    for step in (["multi-pack-index", "write"], ["multi-pack-index", "repack", "--batch-size=300m"],
+    for step in (["multi-pack-index", "write"], ["multi-pack-index", "repack", "--batch-size=40m"],
                  ["multi-pack-index", "expire"]):
         try:
             if subprocess.run(["git", "-C", store, *step], capture_output=True,
