@@ -526,8 +526,12 @@ def seed_args(home: str | None) -> list[str]:
 
 
 def storage(repo) -> str:
+    project = rid(repo)
+    if not project:
+        # not a Radicle clone: on Linux the background fetch's storage upkeep took it for one and crashed
+        raise RadError("this clone isn't on Radicle: no storage")
     home = rad(repo, "path", timeout=30).splitlines()[-1].strip()
-    return f"{home}/storage/{rid(repo)[4:]}"
+    return f"{home}/storage/{project[4:]}"
 
 
 def _storage_refs(repo) -> list[str]:

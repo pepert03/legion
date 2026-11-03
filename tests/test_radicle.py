@@ -860,6 +860,9 @@ def test_a_sync_process_the_sandbox_killed_isnt_taken_for_alive_by_its_fresh_bea
     monkeypatch.setenv("LEGION_HOME", str(tmp_path))
     daemon.folder().mkdir(parents=True)
     (daemon.folder() / "beat").write_text(str(os.getpid()))
+    # running: not this test's own process, whose command line names legion only where its path does (on
+    # Linux, pid_alive reads it)
+    monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": True)
     assert daemon.alive()
     monkeypatch.setattr(radicle, "pid_alive", lambda pid, what="legion": False)       # killed a moment ago
     assert not daemon.alive()
