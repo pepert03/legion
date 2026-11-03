@@ -766,31 +766,206 @@ def nid_key(nid: str) -> bytes:
     return raw[2:]
 
 
-def signed_by(store, commit: str, nid: str) -> bool:
-    """Whether a commit of signed refs carries nid's signature of its list of refs, as Radicle writes them: the
-    tree holds the list in `refs` and the 64 bytes of the signature in `signature`."""
+def _sig_ok(key: bytes, refs: bytes, sig: bytes) -> bool:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    blob = lambda name: subprocess.run(["git", "-C", str(store), "cat-file", "blob", f"{commit}:{name}"],
-                                       capture_output=True)
-    refs, sig = blob("refs"), blob("signature")
-    if refs.returncode or sig.returncode:
-        return False
     try:
-        Ed25519PublicKey.from_public_bytes(nid_key(nid)).verify(sig.stdout, refs.stdout)
+        Ed25519PublicKey.from_public_bytes(key).verify(sig, refs)
         return True
     except (InvalidSignature, ValueError):
         return False
 
 
-def heal_sigrefs(repo, force: bool = False) -> str | None:
-    """Make this node's signed refs descend from what the network holds of them (see HEAL_SEEDS). What it did,
-    or None. LEGION_HEAL=off turns it off, forced or not.
+def signed_by(store, commit: str, nid: str) -> bool:
+    """Whether a commit of signed refs carries nid's signature of its list of refs, as Radicle writes them: the
+    tree holds the list in `refs` and the 64 bytes of the signature in `signature`."""
+    blob = lambda name: subprocess.run(["git", "-C", str(store), "cat-file", "blob", f"{commit}:{name}"],
+                                       capture_output=True)
+    refs, sig = blob("refs"), blob("signature")
+    try:
+        return not refs.returncode and not sig.returncode and _sig_ok(nid_key(nid), refs.stdout, sig.stdout)
+    except ValueError:
+        return False
 
-    Only a chain the node's own key signed is taken up, and only if the ref still holds what it held when the
-    seeds were asked: another process that signed meanwhile wins. What it held is kept in the clone, under
-    refs/legion-backup/, before the ref moves."""
-    if os.environ.get("LEGION_HEAL", "").lower() in ("off", "0", "no"):
+
+def chain_signed_by(store, tip: str, base: str, nid: str) -> bool:
+    """Whether every commit of signed refs from tip back to base (not included; all of them without one)
+    carries nid's signature, not only the tip."""
+    try:
+        key = nid_key(nid)
+    except ValueError:
+        return False
+    listed = subprocess.run(["git", "-C", str(store), "rev-list", tip, *(["--not", base] if base else [])],
+                            capture_output=True, text=True)
+    commits = listed.stdout.split()
+    if listed.returncode or not commits:
+        return not listed.returncode
+    query = "".join(f"{c}:refs\n{c}:signature\n" for c in commits).encode()
+    out = subprocess.run(["git", "-C", str(store), "cat-file", "--batch"], input=query, capture_output=True).stdout
+    blobs, i = [], 0
+    while i < len(out):
+        end = out.index(b"\n", i)
+        head = out[i:end].split()
+        if len(head) != 3 or head[1] != b"blob":
+            return False  # missing, or not a blob: not a commit of signed refs
+        size = int(head[2])
+        blobs.append(out[end + 1:end + 1 + size])
+        i = end + 1 + size + 1
+    return len(blobs) == 2 * len(commits) and all(_sig_ok(key, blobs[j], blobs[j + 1])
+                                                  for j in range(0, len(blobs), 2))
+
+
+def _git(where, *args, **kw):
+    return subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True, **kw)
+
+
+def _descends(store, a: str, b: str) -> bool | None:
+    """Whether b is a or goes on from it; None when git can't say (an object missing, an error)."""
+    if a == b:
+        return True
+    return {0: True, 1: False}.get(_git(store, "merge-base", "--is-ancestor", a, b).returncode)
+
+
+HEAL_CASES = {
+    "error": "couldn't be asked",
+    "none": "holds nothing of this node",
+    "same": "holds what this node holds",
+    "behind": "holds an earlier point of this node's chain: nothing to heal",
+    "absent": "holds a tip this storage doesn't have: this node's chain doesn't go through it",
+    "ahead": "holds a later point of this node's chain",
+    "forked": "holds another branch of this node's chain",
+    "unknown": "git couldn't compare them",
+}
+
+
+def sigrefs_status(repo, fetch: bool = False) -> dict:
+    """This node's signed refs here and at each seed of HEAL_SEEDS, and how they compare (HEAL_CASES). Only
+    reads, unless fetch: then the seeds' tips are fetched into refs/legion-heal/ of the storage to compare them,
+    and absent turns into ahead or forked (the caller removes those refs)."""
+    nid = _cfg(repo, "legion.nid") or node_id(repo)
+    store, ref = storage(repo), f"refs/namespaces/{nid}/refs/rad/sigrefs"
+    mine = _git(store, "rev-parse", "-q", "--verify", ref).stdout.strip()
+    seeds = []
+    for n, url in enumerate(heal_urls(repo)):
+        host = url.split("//", 1)[-1].split("/", 1)[0]
+        try:
+            p = _git(store, "ls-remote", url, ref, timeout=40)
+        except subprocess.TimeoutExpired:
+            p = None
+        if p is None or p.returncode:
+            seeds.append({"seed": host, "url": url, "tip": "", "case": "error"})
+            continue
+        tip = p.stdout.split()[0] if p.stdout.split() else ""
+        if fetch and tip:
+            try:
+                _git(store, "fetch", "-q", "--no-tags", url, f"+{ref}:refs/legion-heal/{n}", timeout=120)
+            except subprocess.TimeoutExpired:
+                pass
+        if not tip:
+            case = "none"
+        elif tip == mine:
+            case = "same"
+        elif _git(store, "cat-file", "-e", tip + "^{commit}").returncode:
+            case = "absent"
+        else:
+            back = _descends(store, tip, mine) if mine else False
+            fore = _descends(store, mine, tip) if mine else True
+            case = "unknown" if back is None or fore is None else \
+                "behind" if back else "ahead" if fore else "forked"
+        seeds.append({"seed": host, "url": url, "tip": tip, "case": case})
+    return {"nid": nid, "store": store, "ref": ref, "mine": mine,
+            "signed": bool(mine) and signed_by(store, mine, nid), "seeds": seeds}
+
+
+def status_text(st: dict) -> str:
+    lines = [f"this node ({st['nid']}): {st['mine'][:8] or 'no signed refs'}"
+             + ("" if not st["mine"] else ", signed by its key" if st["signed"] else ", NOT signed by its key")]
+    for s in st["seeds"]:
+        lines.append(f"  {s['seed']}: {s['tip'][:8] or '-'} {s['case']} ({HEAL_CASES[s['case']]})")
+    return "\n".join(lines)
+
+
+def heal(repo) -> tuple[bool, str]:
+    """Take up the network's chain of this node's signed refs where this storage's forked from it (see
+    HEAL_SEEDS). Only when the seeds agree: one of them holds a tip every other seed's goes on to; only a chain
+    whose every new commit this node's key signed; and only if the ref still holds what it held when the seeds
+    were asked: another process that signed meanwhile wins. What it held is kept in the clone, under
+    refs/legion-backup/, and unheal() puts it back. Whether it moved the ref, and why (not)."""
+    st = sigrefs_status(repo, fetch=True)
+    store, ref, mine = st["store"], st["ref"], st["mine"]
+    try:
+        cases = {s["case"] for s in st["seeds"]}
+        tips = {s["tip"] for s in st["seeds"] if s["tip"]}
+        if not tips:
+            return False, "no seed holds anything of this node"
+        if "unknown" in cases or "absent" in cases:
+            return False, "a seed's chain couldn't be fetched or compared: left as it is"
+        best = [t for t in tips if all(_descends(store, u, t) for u in tips)]
+        if len(best) != 1:
+            return False, "the seeds hold different branches of this node's chain: left as it is"
+        best = best[0]
+        if mine and _descends(store, best, mine):
+            return False, "this node's chain goes on from what the seeds hold: nothing to heal"
+        if not chain_signed_by(store, best, mine, st["nid"]):
+            return False, f"the seeds' chain up to {best[:8]} isn't all signed by this node's key: left as it is"
+        kept = ""
+        if mine:
+            kept = f"refs/legion-backup/sigrefs-{int(time.time())}-{mine[:12]}"
+            if _git(repo, "fetch", "-q", "--no-tags", store, f"+{mine}:{kept}").returncode and \
+                    _git(repo, "fetch", "-q", "--no-tags", store, f"+{ref}:{kept}").returncode:
+                return False, "nowhere to keep what the ref holds: left as it is"
+            if _git(repo, "rev-parse", "-q", "--verify", kept).stdout.strip() != mine:
+                return False, "the ref moved while it was being kept: left as it is"
+        # moved only from what it held: a publish that signed meanwhile keeps its own
+        if _git(store, "update-ref", ref, best, mine or "0" * 40).returncode:
+            return False, "the ref moved meanwhile (a publish signed): left as it is"
+        _git(repo, "config", "legion.healed-to", best)
+        _git(repo, "config", "legion.healed-backup", kept)
+        host = next(s["seed"] for s in st["seeds"] if s["tip"] == best)
+        return True, (f"this node's signed refs went on from {best[:8]}, what {host} holds of them"
+                      + (f"; what they held ({mine[:8]}) is kept in {kept}" if kept else ""))
+    finally:
+        for r in _git(store, "for-each-ref", "--format=%(refname)", "refs/legion-heal/").stdout.split():
+            _git(store, "update-ref", "-d", r)
+
+
+def unheal(repo) -> tuple[bool, str]:
+    """Put back what this node's signed refs held before the last heal, if they still hold what it left."""
+    to, kept = _cfg(repo, "legion.healed-to"), _cfg(repo, "legion.healed-backup")
+    if not to:
+        return False, "no heal to undo here"
+    if not kept:
+        return False, "there were no signed refs before the heal: nothing to put back"
+    back = _git(repo, "rev-parse", "-q", "--verify", kept).stdout.strip()
+    if not back:
+        return False, f"the copy {kept} isn't in this clone any more"
+    nid = _cfg(repo, "legion.nid") or node_id(repo)
+    store, ref = storage(repo), f"refs/namespaces/{nid}/refs/rad/sigrefs"
+    now = _git(store, "rev-parse", "-q", "--verify", ref).stdout.strip()
+    if now != to:
+        return False, (f"the signed refs went on since the heal ({now[:8]}, not {to[:8]}): something signed on "
+                       "top of them, left as they are")
+    temp = "refs/legion-heal/undo"
+    try:
+        if _git(store, "fetch", "-q", "--no-tags", os.path.abspath(repo), f"+{kept}:{temp}").returncode:
+            return False, "couldn't bring the copy back into the storage"
+        if _git(store, "update-ref", ref, back, to).returncode:
+            return False, "the ref moved meanwhile (a publish signed): left as it is"
+    finally:
+        _git(store, "update-ref", "-d", temp)
+    _git(repo, "config", "--unset", "legion.healed-to")
+    _git(repo, "config", "--unset", "legion.healed-backup")
+    return True, f"this node's signed refs are back at {back[:8]}, what they held before the heal"
+
+
+def heal_off() -> bool:
+    return os.environ.get("LEGION_HEAL", "").lower() in ("off", "0", "no")
+
+
+def heal_sigrefs(repo, force: bool = False) -> str | None:
+    """heal(), at most once an hour unless forced: what it did, or None. LEGION_HEAL=off turns it off, forced
+    or not."""
+    if heal_off():
         return None
     if IS_WINDOWS and not native(repo):
         return None  # a storage inside WSL: not reachable from here, and no sandbox resets it
@@ -798,46 +973,8 @@ def heal_sigrefs(repo, force: bool = False) -> str | None:
     if not force and time.time() - last < HEAL_EVERY:
         return None
     subprocess.run(["git", "config", "legion.healed", str(time.time())], cwd=repo, capture_output=True)
-    nid = _cfg(repo, "legion.nid") or node_id(repo)
-    store, ref = storage(repo), f"refs/namespaces/{nid}/refs/rad/sigrefs"
-    mine = subprocess.run(["git", "-C", store, "rev-parse", "-q", "--verify", ref], capture_output=True,
-                          text=True).stdout.strip()
-    for url in heal_urls(repo):
-        try:
-            p = subprocess.run(["git", "ls-remote", url, ref], capture_output=True, text=True, timeout=40)
-        except subprocess.TimeoutExpired:
-            continue
-        theirs = p.stdout.split()[0] if p.returncode == 0 and p.stdout.split() else ""
-        if not theirs:
-            continue
-        if theirs == mine or mine and subprocess.run(["git", "-C", store, "merge-base", "--is-ancestor", theirs, mine],
-                                                     capture_output=True).returncode == 0:
-            return None  # ours goes on from theirs: nothing to heal
-        temp = "refs/legion-heal/sigrefs"
-        got = subprocess.run(["git", "-C", store, "fetch", "-q", "--no-tags", url, f"+{ref}:{temp}"],
-                             capture_output=True, text=True, timeout=120)
-        if got.returncode:
-            continue
-        try:
-            if not signed_by(store, theirs, nid):
-                continue  # not this node's: a seed that serves someone else's chain under its name
-            if mine:
-                kept = f"refs/legion-backup/sigrefs-{int(time.time())}-{mine[:12]}"
-                if subprocess.run(["git", "-C", str(repo), "fetch", "-q", "--no-tags", store, f"+{mine}:{kept}"],
-                                  capture_output=True).returncode and \
-                        subprocess.run(["git", "-C", str(repo), "fetch", "-q", "--no-tags", store, f"+{ref}:{kept}"],
-                                       capture_output=True).returncode:
-                    return None  # nowhere to keep what it held: left as it is
-            # moved only from what it held: a publish that signed meanwhile keeps its own
-            moved = subprocess.run(["git", "-C", store, "update-ref", ref, theirs, mine or "0" * 40],
-                                   capture_output=True)
-            if moved.returncode:
-                return None
-        finally:
-            subprocess.run(["git", "-C", store, "update-ref", "-d", temp], capture_output=True)
-        host = url.split("//", 1)[-1].split("/", 1)[0]
-        return f"this node's signed refs went on from {theirs[:8]}, what {host} holds of them"
-    return None
+    did, said = heal(repo)
+    return said if did else None
 
 
 def run_publish(repo) -> None:

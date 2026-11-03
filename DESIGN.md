@@ -664,6 +664,13 @@ at all. And **text streams to compose**: `legion events` prints every event as a
 ones), and the commands that only record events answer with `--json` too, so a viewer, a plateau detector or a
 diversity measure can be a program of its own.
 
+A node whose storage came back from an older copy signs its refs on a branch of its own, and the seeds keep the
+older chain: what it publishes reaches no one. `legion-net heal --check` compares the node's signed refs with
+each seed's, only reading. A heal takes up the network's chain only when the seeds agree (one holds a tip every
+other seed's goes on to), when the node's key signed every new commit of it, and only if the ref still holds
+what it held: a publish that signed meanwhile wins. What it held is kept in the clone, `heal --undo` puts it
+back, and `LEGION_HEAL=off` turns healing off.
+
 ## 9. Example event
 
 `coord/events/000142-9b1e4c.json`:

@@ -251,6 +251,23 @@ def cmd_netsync(args):
     return 0 if radicle.run_network_sync(repo_root()) else 1
 
 
+def cmd_heal(args):
+    """This node's signed refs against the seeds': --check only reads; without it, heal now (radicle.heal);
+    --undo puts back what the last heal replaced."""
+    from . import radicle
+    repo = repo_root()
+    if radicle.IS_WINDOWS and not radicle.native(repo):
+        raise Fail("this node's storage is inside WSL: run it there")
+    if args.check:
+        print(radicle.status_text(radicle.sigrefs_status(repo)))
+        return 0
+    if radicle.heal_off():
+        raise Fail("LEGION_HEAL=off: healing is turned off on this machine")
+    did, said = radicle.unheal(repo) if args.undo else radicle.heal(repo)
+    print(said)
+    return 0 if did else 1
+
+
 def cmd_daemon(args):
     """This machine's sync process (see daemon.py): commands start it; --status says how it's doing."""
     from . import daemon
@@ -302,6 +319,11 @@ def add_parsers(sub) -> None:
     s.add_argument("--announce", action="store_true")  # or the announcement of what this node published
     s.add_argument("--publish", action="store_true")  # or the push of a command with no sync process to do it
     s.set_defaults(func=cmd_netsync)
+
+    s = sub.add_parser("heal", help="this node's signed refs against what the seeds hold of them")
+    s.add_argument("--check", action="store_true", help="only compare them, changing nothing")
+    s.add_argument("--undo", action="store_true", help="put back what the last heal replaced")
+    s.set_defaults(func=cmd_heal)
 
     s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")
     s.add_argument("--status", action="store_true", help="whether it runs, which clones it syncs, its latest log")
