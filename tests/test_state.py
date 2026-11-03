@@ -293,6 +293,8 @@ def test_a_path_refused_by_a_rule_of_the_moment_stands_once_a_finalizer_accepts_
     st = log.state()
     assert st.sketches[last["id"]].verdict == "accepted" and len(st.paths_for(tid)) == S.MAX_OPEN_PATHS + 1
     assert not any(x["id"] == last["id"] for x, _ in st.ignored)
+    again = S.build(st.events, trusted=True)  # what the viewer does: it rebuilds from the valid events
+    assert again.sketches[last["id"]].verdict == "accepted"
 
 
 def test_ripe_ideas_and_questions_on_a_stuck_task_are_handed_out_to_become_paths():

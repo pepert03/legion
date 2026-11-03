@@ -1799,6 +1799,8 @@ class State:
                 if self.apply(held) is None:
                     self.held_back.pop(held["id"], None)
                     self.ignored = [(x, why) for x, why in self.ignored if x is not held]
+                    # Valid now: among the events, or whatever rebuilds from them (the viewer does) loses it again.
+                    self.events.append(held)
             finally:
                 self._admitting = False
             k = self.sketches.get(held["id"])
