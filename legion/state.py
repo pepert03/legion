@@ -260,6 +260,7 @@ class Patch:
 
 
 SIMILAR = 0.7  # the share of words in common that makes two ideas the same route (see similar_idea)
+SPINNING = 20  # claims and reports in a day with no patch: an agent going round in circles (see plateau)
 
 
 def words(text: str) -> set[str]:
@@ -1034,16 +1035,23 @@ class State:
         shrink from a hundred lines to a few, and turns end proposing nothing): the lines of its latest patches,
         whether they shrank (`narrowing`: the last two average under a quarter of its first two), and `spinning`,
         how many claims and reports it made since its last patch, in the day before its latest event: on a research
-        task reports without a patch are the work, so only many of them in a day say it goes round in circles."""
+        task reports without a patch are the work, so only many of them in a day say it goes round in circles.
+        `tasks`: the ones those claims and reports were on, the most often first. `flagged`: narrowing, or spinning
+        SPINNING times or more."""
         mine = sorted((p for p in self.patches.values() if p.author == author), key=lambda p: p.lamport)
         lines = [p.lines for p in mine if p.lines is not None]
         last = mine[-1].lamport if mine else -1
         since = self.last_seen.get(author, 0) - 86400
-        spinning = (sum(1 for a in self.attempts if a["author"] == author and a["lamport"] > last and a["ts"] > since)
-                    + sum(1 for cs in self.claims.values() for c in cs if c.author == author and c.lamport > last
-                          and c.ts > since))
-        return {"lines": lines[-8:], "spinning": spinning,
-                "narrowing": len(lines) >= 4 and sum(lines[-2:]) * 4 < sum(lines[:2])}
+        on = [a.get("task") for a in self.attempts if a["author"] == author and a["lamport"] > last and a["ts"] > since]
+        on += [tid for tid, cs in self.claims.items() for c in cs if c.author == author and c.lamport > last
+               and c.ts > since]
+        times = {}
+        for tid in on:
+            if tid in self.tasks:
+                times[tid] = times.get(tid, 0) + 1
+        narrowing = len(lines) >= 4 and sum(lines[-2:]) * 4 < sum(lines[:2])
+        return {"lines": lines[-8:], "spinning": len(on), "narrowing": narrowing,
+                "tasks": sorted(times, key=lambda t: (-times[t], t)), "flagged": narrowing or len(on) >= SPINNING}
 
     def round_start(self, tid: str) -> int:
         return self.round_starts(tid)[-1]

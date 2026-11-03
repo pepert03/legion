@@ -582,6 +582,9 @@ def cmd_claim(args):
             raise Fail(f"task {t.key} is not available ({status})", 3)
     else:
         held = c.st.held_by(c.me, now)
+        # An agent going round in circles (S.State.plateau) is handed other tasks than the ones it circled first.
+        plateau = c.st.plateau(c.me)
+        circled = set(plateau["tasks"]) if plateau["flagged"] else set()
         if held:
             t = held[0]
         else:
@@ -591,7 +594,7 @@ def cmd_claim(args):
                 # hour isn't handed back to it at all (see COOLDOWN).
                 cool = c.st.cooling(c.me, now)
                 fresh = lambda ts: sorted((t for t in ts if t.id not in cool),  # noqa: E731
-                                          key=lambda t: c.st.attempts_by(t.id, c.me) > 0)
+                                          key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
                 return (fresh(c.st.claimable(now)), fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
                         or fresh(c.st.competitive_for(c.me)))
             free, helped = options()
@@ -649,7 +652,7 @@ def cmd_claim(args):
             else:
                 # Deterministic spread: each agent prefers a different order, so they collide less; tasks this
                 # agent already tried since they last advanced go last.
-                t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0,
+                t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0 or t.id in circled,
                                              hashlib.sha256((c.me + t.id).encode()).hexdigest()))
     clean = c.st.stalled(t.id) and c.st.clean_view(c.me)  # the fresh view of a stuck task (S.FRESH_VIEWS)
     if not c.holder_is_me(t.id):
@@ -721,7 +724,7 @@ def cmd_claim(args):
             how = (f"Round {n} on this task: after many failures, the notes, reports "
                    "and ideas of earlier rounds are set aside on purpose (`log` keeps them). Start from what's proved "
                    "in main, the saved work and the state of the art, and take a route of your own.\n" + how)
-        how = verify_first(c) + how
+        how = verify_first(c) + plateau_text(c.st, c.me) + how
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
@@ -732,6 +735,29 @@ def cmd_claim(args):
     out(args, {"won": False, "task": task_dict(c.st, t, time.time())},
         f"{h.name if h else 'Another agent'} claimed {t.key} first. Try again with `claim`.")
     return 3
+
+
+def plateau_text(st: S.State, me: str) -> str:
+    """What an agent is told when what it published says it has plateaued (S.State.plateau): long sessions narrow,
+    an agent making ever smaller changes or going round the same tasks with nothing to show (arXiv 2610.20563),
+    and a fresh session, another task or a bold route is what unblocks it. Empty when it hasn't."""
+    p = st.plateau(me)
+    if not p["flagged"]:
+        return ""
+    why = []
+    if p["spinning"] >= S.SPINNING:
+        on = ", ".join(st.tasks[t].key for t in p["tasks"][:3])
+        why.append(f"{p['spinning']} claims and reports in the last day and no patch"
+                   + (f" (mostly on {on})" if on else ""))
+    if p["narrowing"]:
+        why.append(f"your edits are shrinking ({' -> '.join(map(str, p['lines']))} lines changed)")
+    fresh = ("End this session now: `legion run` starts a fresh one, with a clean context."
+             if os.environ.get("LEGION_RUN") else
+             "If you can, end this session and start a fresh one (a clean context starts from main, not from what "
+             "you tried).")
+    return (f"You may have plateaued: {'; and '.join(why)}. That is how a long session goes round in circles. "
+            f"{fresh} If you can't, take another task (`claim` now hands you the ones you circled last), or a route "
+            "unlike the ones you tried, bigger rather than smaller, and say which in a note.\n")
 
 
 def failed_routes(st: S.State, t: S.Task) -> str:
@@ -2245,6 +2271,9 @@ def cmd_context(args):
     lines += ["", "## Tasks", status_table(st, now)]
     held = st.held_by(c.me, now)
     lines += ["", "## Your claims", ", ".join(f"{t.id} ({t.key})" for t in held) if held else "(none)"]
+    stuck_me = plateau_text(st, c.me)
+    if stuck_me:
+        lines += ["", "## You may have plateaued (measured from what you published)", stuck_me.strip()]
     mine = S.owner(c.ident.name)
     to_vote = [pid for pid, prop in st.proposals.items() if prop["status"] == "open" and mine not in prop["votes"]]
     if to_vote and st.trusted(c.me):

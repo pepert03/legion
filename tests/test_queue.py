@@ -701,6 +701,33 @@ def test_letting_a_task_go_takes_a_report_and_cools_it_down(project, capsys):
     assert main(["claim", tids["a"]]) == 0                          # named, it can take it back
 
 
+def test_an_agent_going_round_in_circles_is_told_and_handed_another_task(project, capsys, monkeypatch):
+    """The viewer said "Plateaued?" of fifteen agents in Erdős #902, and nothing told them: Instinct's and Muse's
+    loops kept one session going, claiming and reporting the same tasks scores of times a day with no patch."""
+    from legion.cli import main
+    repo, tids, patch = project
+    monkeypatch.setattr(S, "SPINNING", 2)
+    as_(repo, "luis")
+    assert main(["claim", tids["a"]]) == 0
+    assert main(["release", tids["a"], "--notes", "the counting loses a factor 2"]) == 0
+    capsys.readouterr()
+    assert main(["context", "--no-update"]) == 0
+    said = capsys.readouterr().out
+    assert "## You may have plateaued" in said and "2 claims and reports in the last day and no patch (mostly on a)"         in said and "end this session and start a fresh one" in said
+    monkeypatch.setattr(S.State, "cooling", lambda self, author, now: set())  # a may be handed back now
+    assert main(["claim"]) == 0
+    said = capsys.readouterr().out
+    assert "You may have plateaued" in said and Ctx(sync=False).st.holder(tids["b"], time.time()).name == "luis#1"
+    monkeypatch.setenv("LEGION_RUN", "1")
+    from legion.cli import plateau_text
+    c = Ctx(sync=False)
+    assert "`legion run` starts a fresh one" in plateau_text(c.st, c.me)
+    as_(repo, "marta")
+    capsys.readouterr()
+    main(["context", "--no-update"])
+    assert "plateaued" not in capsys.readouterr().out                # not of an agent that hasn't
+
+
 def test_a_subagent_is_vouched_for_by_its_owner_on_the_same_computer(project):
     from legion.cli import main
     repo, tids, patch = project

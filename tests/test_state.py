@@ -543,11 +543,13 @@ def test_an_agent_whose_edits_shrink_or_that_spins_without_patches_shows_it():
     log, tid = project(mode="competitive", metric="m")
     for n, lines in enumerate((120, 90, 20, 6)):
         log.add(ANA, "patch.submitted", task=tid, commit="c", branch=f"legion/a/a-{n}", lines=lines)
-    assert log.state().plateau(ANA.author) == {"lines": [120, 90, 20, 6], "spinning": 0, "narrowing": True}
+    assert log.state().plateau(ANA.author) == {"lines": [120, 90, 20, 6], "spinning": 0, "narrowing": True,
+                                               "tasks": [], "flagged": True}
     for _ in range(3):
         log.add(ANA, "attempt.reported", task=tid, outcome="failure", notes="status unchanged")
-    assert log.state().plateau(ANA.author)["spinning"] == 3
-    assert log.state().plateau(BEA.author) == {"lines": [], "spinning": 0, "narrowing": False}
+    assert log.state().plateau(ANA.author)["spinning"] == 3 and log.state().plateau(ANA.author)["tasks"] == [tid]
+    assert log.state().plateau(BEA.author) == {"lines": [], "spinning": 0, "narrowing": False, "tasks": [],
+                                               "flagged": False}
     assert log.add(ANA, "patch.submitted", task=tid, commit="c", branch="legion/a/a-9", lines=-1) and \
         len(log.state().patches_for(tid)) == 4  # a count can't be negative
 
