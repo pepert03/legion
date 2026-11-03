@@ -752,9 +752,46 @@ def heal_urls(repo) -> list[str]:
     return [f"https://{host}/{rid(repo)[4:]}.git" for host in HEAL_SEEDS]
 
 
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def nid_key(nid: str) -> bytes:
+    """The ed25519 public key a node id names: z, then base58 of the multicodec ed01 and the 32 bytes."""
+    n = 0
+    for ch in nid[1:]:
+        n = n * 58 + B58.index(ch)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    if not nid.startswith("z") or len(raw) != 34 or raw[:2] != b"\xed\x01":
+        raise ValueError(f"not an ed25519 node id: {nid}")
+    return raw[2:]
+
+
+def signed_by(store, commit: str, nid: str) -> bool:
+    """Whether a commit of signed refs carries nid's signature of its list of refs, as Radicle writes them: the
+    tree holds the list in `refs` and the 64 bytes of the signature in `signature`."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    blob = lambda name: subprocess.run(["git", "-C", str(store), "cat-file", "blob", f"{commit}:{name}"],
+                                       capture_output=True)
+    refs, sig = blob("refs"), blob("signature")
+    if refs.returncode or sig.returncode:
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(nid_key(nid)).verify(sig.stdout, refs.stdout)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
 def heal_sigrefs(repo, force: bool = False) -> str | None:
     """Make this node's signed refs descend from what the network holds of them (see HEAL_SEEDS). What it did,
-    or None."""
+    or None. LEGION_HEAL=off turns it off, forced or not.
+
+    Only a chain the node's own key signed is taken up, and only if the ref still holds what it held when the
+    seeds were asked: another process that signed meanwhile wins. What it held is kept in the clone, under
+    refs/legion-backup/, before the ref moves."""
+    if os.environ.get("LEGION_HEAL", "").lower() in ("off", "0", "no"):
+        return None
     if IS_WINDOWS and not native(repo):
         return None  # a storage inside WSL: not reachable from here, and no sandbox resets it
     last = float(_cfg(repo, "legion.healed") or 0)
@@ -781,8 +818,23 @@ def heal_sigrefs(repo, force: bool = False) -> str | None:
                              capture_output=True, text=True, timeout=120)
         if got.returncode:
             continue
-        subprocess.run(["git", "-C", store, "update-ref", ref, theirs], capture_output=True)
-        subprocess.run(["git", "-C", store, "update-ref", "-d", temp], capture_output=True)
+        try:
+            if not signed_by(store, theirs, nid):
+                continue  # not this node's: a seed that serves someone else's chain under its name
+            if mine:
+                kept = f"refs/legion-backup/sigrefs-{int(time.time())}-{mine[:12]}"
+                if subprocess.run(["git", "-C", str(repo), "fetch", "-q", "--no-tags", store, f"+{mine}:{kept}"],
+                                  capture_output=True).returncode and \
+                        subprocess.run(["git", "-C", str(repo), "fetch", "-q", "--no-tags", store, f"+{ref}:{kept}"],
+                                       capture_output=True).returncode:
+                    return None  # nowhere to keep what it held: left as it is
+            # moved only from what it held: a publish that signed meanwhile keeps its own
+            moved = subprocess.run(["git", "-C", store, "update-ref", ref, theirs, mine or "0" * 40],
+                                   capture_output=True)
+            if moved.returncode:
+                return None
+        finally:
+            subprocess.run(["git", "-C", store, "update-ref", "-d", temp], capture_output=True)
         host = url.split("//", 1)[-1].split("/", 1)[0]
         return f"this node's signed refs went on from {theirs[:8]}, what {host} holds of them"
     return None

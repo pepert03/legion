@@ -616,29 +616,66 @@ def test_an_updated_daemon_starts_the_new_one_instead_of_waiting_for_a_command(t
 def test_a_node_whose_storage_went_back_takes_up_the_networks_chain_of_its_signed_refs(tmp_path, monkeypatch):
     """Instinct's sandbox `a` came back from an older copy of its storage and signed its refs on another branch:
     the seeds fetched it "successfully" and kept the older chain, and nothing it published reached anyone."""
-    store, seed = tmp_path / "storage", tmp_path / "seed"
-    for r in (store, seed):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    store, seed, other = tmp_path / "storage", tmp_path / "seed", tmp_path / "other"
+    for r in (store, seed, other):
         git(tmp_path, "init", "-q", "--bare", str(r))
-    ref = "refs/namespaces/z6MkA/refs/rad/sigrefs"
+    keys = [Ed25519PrivateKey.generate() for _ in range(2)]
 
-    def chain(where, *messages):
+    def nid_of(key):
+        n = int.from_bytes(b"\xed\x01" + key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw), "big")
+        out = ""
+        while n:
+            n, d = divmod(n, 58)
+            out = radicle.B58[d] + out
+        return "z" + out
+    nid = nid_of(keys[0])
+    assert radicle.nid_key(nid) == keys[0].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ref = f"refs/namespaces/{nid}/refs/rad/sigrefs"
+
+    def chain(where, *messages, key=keys[0]):
+        """Signed refs as Radicle writes them: the list in `refs`, its signature in `signature`."""
         work = tmp_path / ("w-" + where.name + messages[0])
         git(tmp_path, "init", "-q", str(work))
         for m in messages:
-            git(work, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "--allow-empty", "-m", m)
+            listed = f"{'0' * 40} refs/heads/{m}\n".encode()
+            (work / "refs").write_bytes(listed)
+            (work / "signature").write_bytes(key.sign(listed))
+            git(work, "add", "refs", "signature")
+            git(work, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "-m", m)
         git(work, "push", "-q", "--force", str(where), f"HEAD:{ref}")
         return git(work, "rev-parse", "HEAD")
     network = chain(seed, "s1", "s2")      # what the seeds hold of this node
     forked = chain(store, "r1")             # what the rebuilt storage signed instead
+    chain(other, "x1", key=keys[1])         # a seed serving someone else's chain under this node's name
     repo = tmp_path / "r"
     git(tmp_path, "init", "-q", str(repo))
     radicle.enable(repo, "rad:zTest")
-    git(repo, "config", "legion.nid", "z6MkA")
+    git(repo, "config", "legion.nid", nid)
     monkeypatch.setattr(radicle, "IS_WINDOWS", False)
     monkeypatch.setattr(radicle, "storage", lambda repo: str(store))
+    monkeypatch.setattr(radicle, "heal_urls", lambda repo: [str(other)])
+    assert radicle.heal_sigrefs(repo, force=True) is None               # not signed by this node: left alone
+    assert git(store, "rev-parse", ref) == forked
+    monkeypatch.setenv("LEGION_HEAL", "off")
     monkeypatch.setattr(radicle, "heal_urls", lambda repo: [str(seed)])
-    assert "went on from" in radicle.heal_sigrefs(repo)
-    assert git(store, "rev-parse", ref) == network != forked
+    assert radicle.heal_sigrefs(repo, force=True) is None               # turned off
+    monkeypatch.delenv("LEGION_HEAL")
+    git(tmp_path, "init", "-q", "--bare", str(tmp_path / "late"))
+    signed, moved_meanwhile = radicle.signed_by, chain(tmp_path / "late", "l1")
+
+    def a_publish_signs_meanwhile(store_, commit, nid_):
+        git(store, "fetch", "-q", str(tmp_path / ("w-late" + "l1")), f"+HEAD:{ref}")
+        return signed(store_, commit, nid_)
+    monkeypatch.setattr(radicle, "signed_by", a_publish_signs_meanwhile)
+    assert radicle.heal_sigrefs(repo, force=True) is None               # the publish keeps its own
+    assert git(store, "rev-parse", ref) == moved_meanwhile
+    monkeypatch.setattr(radicle, "signed_by", signed)
+    assert "went on from" in radicle.heal_sigrefs(repo, force=True)
+    assert git(store, "rev-parse", ref) == network
+    kept = git(repo, "for-each-ref", "--format=%(objectname)", "refs/legion-backup/")
+    assert moved_meanwhile in kept.split()                              # what it held, kept in the clone
     assert radicle.heal_sigrefs(repo) is None                          # once an hour at most
     assert radicle.heal_sigrefs(repo, force=True) is None              # and ours goes on from theirs now
     assert not git(store, "for-each-ref", "refs/legion-heal/")
