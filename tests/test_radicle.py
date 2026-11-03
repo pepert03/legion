@@ -660,7 +660,7 @@ def test_where_the_node_lives_as_long_as_the_command_its_events_go_out_first_and
         "own" if all(s.startswith("+refs/legion/pub/") for s in specs) else "rest"))
     monkeypatch.setattr(radicle, "announce_waiting", lambda repo: done.append("announced") or True)
     radicle.publish(repo, "me")
-    assert done[:2] == ["own", "announced"] and set(done[2:]) == {"rest"}
+    assert done[:2] == ["own", "announced"] and set(done[2:-1]) == {"rest"} and done[-1] == "announced"
 
 
 def test_a_storage_piling_up_packs_is_compacted(tmp_path, monkeypatch):
@@ -770,8 +770,12 @@ def test_the_push_a_command_waits_for_announces_too(tmp_path, monkeypatch):
     assert "no-sync" in pushed[-1] and kicked == [1]                    # a sync process stays: it announces apart
     monkeypatch.setattr(radicle, "ANNOUNCE_INLINE", True)
     git(repo, "config", "--unset", "legion.published")
+    announced = []
+    monkeypatch.setattr(radicle, "announce_waiting", lambda repo: announced.append(1) or True)
     radicle.publish(repo, "b")
-    assert "no-sync" not in pushed[-1] and kicked == [1]                # the push announces, nothing apart
+    # pushed without the helper's announcement, which waited with no bound of its own (it never came back on
+    # muse's machine), then announced with one; nothing in a process apart
+    assert "no-sync" in pushed[-1] and announced == [1] and kicked == [1]
 
 def test_prefer_edits_the_config_of_the_clones_own_node(tmp_path, monkeypatch):
     """A native node beside WSL's, with its own home: prefer looked for ~/.radicle/config.json, which it hadn't."""

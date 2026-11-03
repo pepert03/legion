@@ -1150,7 +1150,10 @@ def publish(repo, who: str) -> None:
         # and it waits until a seed has fetched them: instinct's b and e (400 patches to push, storages of 0.5 and
         # 1.7 GB) were cut off before any seed fetched what they had pushed, and for days their events reached
         # nobody. The seeds pass them on among themselves.
-        _push(repo, own, strict=True, sync=True)
+        # Pushed without the helper's own announcement, which waits for the seeds with no bound of its own: on
+        # muse's machine it never came back, the publish died at its time limit, and nothing went out for hours.
+        # The announcement that follows has one.
+        _push(repo, own, strict=True)
         announce_waiting(repo)
         own = []
     try:
@@ -1161,7 +1164,7 @@ def publish(repo, who: str) -> None:
         if len(rest) > BIG_PUBLISH:
             raise RadError("too much for one push")
         try:
-            _push(repo, own + rest + main, strict=True, sync=ANNOUNCE_INLINE)
+            _push(repo, own + rest + main, strict=True)
         except RadError as e:
             if not only_main_refused(e):  # the node has a newer main: the rest went through
                 raise
@@ -1173,13 +1176,15 @@ def publish(repo, who: str) -> None:
         # Then its own coord first and alone: whatever happens to the patches, its events go out. Then the
         # patches it gossips, in batches split in two on failure: one patch whose objects this clone lacks
         # ("missing necessary objects") made every push fail, and with them every event of this node.
-        _push(repo, own, strict=True, sync=ANNOUNCE_INLINE)
+        _push(repo, own, strict=True)
         for i in range(0, len(rest), 200):  # keeps the command line short with many patches
             _push(repo, rest[i:i + 200], strict=False)
         publish_main(repo)
     subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
     if not ANNOUNCE_INLINE:
         kick_announce(repo)
+    elif rest or main:
+        announce_waiting(repo)  # the patches and main too, as far as a bounded wait goes
 
 
 def _push(repo, specs: list[str], strict: bool, sync: bool = False) -> None:
