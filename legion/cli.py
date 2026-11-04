@@ -565,8 +565,38 @@ def cmd_status(args):
     out(args, data, "\n".join(lines))
 
 
+CLAIM_MARK = "legion-claim.json"  # in the clone's git dir: how claim last ended, which `run` reads (see cmd_run)
+
+
+def claim_mark(repo) -> Path:
+    from . import daemon
+    return daemon.repo_lock(repo).with_name(CLAIM_MARK)
+
+
+def note_claim(repo, code: int) -> None:
+    try:
+        claim_mark(repo).write_text(json.dumps({"code": code, "ts": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def last_claim(repo, since: float) -> int | None:
+    """How the last claim in this clone ended, if it ran since `since`."""
+    try:
+        mark = json.loads(claim_mark(repo).read_text(encoding="utf-8"))
+        return int(mark["code"]) if float(mark["ts"]) >= since else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def cmd_claim(args):
     c = Ctx()
+    code = claim(c, args)
+    note_claim(c.repo, code)
+    return code
+
+
+def claim(c: Ctx, args) -> int:
     now = time.time()
     if c.st.newcomer(c.me):  # everyone starts at the hub: what's known about the problem, and who's on what
         out(args, {"won": False, "task": None, "hub": True}, HUB_FIRST)
@@ -604,7 +634,7 @@ def cmd_claim(args):
                 return work
             deadline = now + (args.wait or 0) * 60
             while not free and not helped and not c.st.exclusive_done() and time.time() < deadline:
-                time.sleep(min(30, max(1, deadline - time.time())))  # someone may release, or a dependency land
+                time.sleep(min(15, max(1, deadline - time.time())))  # someone may release, or a dependency land
                 c.sync()
                 now = time.time()
                 free, helped = options()
@@ -2528,6 +2558,28 @@ def run_agent(argv: list[str]) -> int:
     return subprocess.run(argv, env=dict(os.environ, LEGION_RUN="1")).returncode
 
 
+def work_waiting(c: Ctx, now: float) -> bool:
+    """Whether claim would hand this agent something now: a task free, one to join, prepare or compete on, or
+    a question to settle."""
+    st, cool = c.st, c.st.cooling(c.me, now)
+    tasks = [t for ts in (st.claimable(now), st.joinable(c.me, now), st.preparable(now), st.competitive_for(c.me))
+             for t in ts]
+    return any(t.id not in cool for t in tasks) or st.question_for(c.me, c.ident.name, now) is not None
+
+
+def wait_for_work(c: Ctx, pause: float) -> None:
+    """Between an agent's sessions, when its claim found nothing open: look every `pause` seconds, syncing, until
+    there is something, or RUN_MAX_WAIT has passed. The waiting happens here, where it costs no tokens and no
+    tool cuts it off, not in the agent's session: an agent that stopped at once over nothing to do was taken for
+    failing, waited longer each time, half an hour in the end, and was stopped after three such runs."""
+    end = time.time() + RUN_MAX_WAIT
+    while time.time() < end:
+        time.sleep(min(pause, max(1, end - time.time())))
+        c.sync()
+        if c.st.exclusive_done() or work_waiting(c, time.time()):
+            return
+
+
 def cmd_run(args):
     """Keep an agent at work: run its command, and run it again each time it stops, until the project is done
     for it (what claim's exit code 4 says). In Erdős #902 agents stopped between batches, when a session or a
@@ -2556,6 +2608,15 @@ def cmd_run(args):
         runs, took = runs + 1, time.time() - started
         if args.max_runs and runs >= args.max_runs:
             return 0
+        if last_claim(c.repo, started) == 5:  # nothing was open for it: the project's doing, not the agent's
+            print(f"legion run: the agent stopped after {took / 60:.1f} min: nothing was open for it. It runs "
+                  f"again as soon as something is (looking every {args.pause:.0f} s, syncing; "
+                  f"{RUN_MAX_WAIT // 60} min at most).", flush=True)
+            try:
+                wait_for_work(c, args.pause)
+            except KeyboardInterrupt:
+                return 130
+            continue
         empty = 0 if Ctx(sync=False).st.last_seen.get(c.me) != seen else empty + 1
         if empty >= RUN_EMPTY:
             print(f"legion run: the agent ran {empty} times in a row without recording anything (no claim, report "
@@ -2692,8 +2753,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("task", nargs="?")
     s.add_argument("--ttl", type=int, default=int(os.environ.get("LEGION_TTL", str(CLAIM_TTL))),
                    help="seconds until it expires without a heartbeat (default 45 min, or LEGION_TTL)")
-    s.add_argument("--wait", type=float, nargs="?", const=8, default=0, metavar="MINUTES",
-                   help="if nothing is open, wait for a task to free up (default 8 min) before exiting with 5")
+    s.add_argument("--wait", type=float, nargs="?", const=1.5, default=0, metavar="MINUTES",
+                   help="if nothing is open, wait for a task to free up before exiting with 5 (default 90 s: "
+                        "within what agents' tools allow a command; under `legion run`, run waits the rest)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_claim)
 

@@ -1306,3 +1306,26 @@ def test_an_agent_renamed_into_its_owner_isnt_handed_its_own_old_ideas_to_judge(
     assert st.owner_now(mine) == "pepe" and st.pair_to_compare("pepe#3") is None
     log.add(Identity.generate("pepe#3"), "idea.compared", task=tid, better=other["id"], worse=mine["id"], why="x")
     assert log.state().ignored[-1][1] == "nobody rates their own ideas"
+
+
+def test_in_the_open_mode_the_quorum_is_capped_at_the_trusted_owners_there_are():
+    """With one founder, or one person's agents, no patch could gather two trusted owners other than its author:
+    none was ever accepted, and so nobody ever became trusted. The quorum is the trusted owners there are."""
+    log, tid = open_project()                                          # trusted: BOSS, ANA and BEA
+    log.add(BOSS, "project.policy", quorum=9)
+    st = log.state()
+    assert st.trusted_owners() == {"boss", "ana", "bea"}
+    assert st.quorum_for("cel") == 3 and st.quorum_for("ana#2") == 2
+    p = log.add(CEL, "patch.submitted", task=tid, commit="c", branch="legion/t/c-1")
+    vs = [log.add(who, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+          for who in (ANA, BOSS)]
+    log.add(BEA, "patch.accepted", patch=p["id"], merge_commit="m1", verified_by=[v["id"] for v in vs], tree=TREE_B,
+            base=log.state().main_tip)
+    assert log.state().ignored[-1][1] == "it needs 3 trusted owners behind it"
+    vs.append(log.add(BEA, "patch.verified", task=tid, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass"))
+    log.add(BEA, "patch.accepted", patch=p["id"], merge_commit="m1", verified_by=[v["id"] for v in vs], tree=TREE_B,
+            base=log.state().main_tip)
+    st = log.state()
+    assert st.patches[p["id"]].verdict == "accepted" and st.main_tip == "m1"
+    log.add(BOSS, "project.policy", mode="integrator")
+    assert log.state().quorum_for("cel") == 9                          # with an integrator, the policy's as it is

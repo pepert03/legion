@@ -1081,3 +1081,45 @@ def test_checks_read_utf8_files_the_way_tests_written_on_linux_expect(tmp_path):
                                        encoding="utf-8")
     code, out = integrator.run_cmd("python check.py", tmp_path, 60, slot=False)
     assert code == 0, out
+
+
+def test_open_mode_the_quorum_is_the_trusted_owners_there_are(project):
+    """A project of one founder, or of one person's agents, could never gather two trusted owners behind a
+    patch: nothing was ever accepted, and nobody became trusted. The quorum is capped at the owners there are."""
+    repo, tids, patch = project
+    c = as_(repo, "boss")
+    c.emit("project.policy", mode="open", quorum=9)                   # trusted owners: boss, luis and marta
+    c.sync()
+    patch("a", "ok\n")
+    assert Ctx(sync=False).st.quorum_for("ana#1") == 3
+    for who in ("luis", "marta"):
+        assert integrator.verify_one(as_(repo, who), 60)[1] == "pass"
+    assert integrator.finalize(as_(repo, "boss"), [].append) == 0      # two of the three: not yet
+    assert integrator.verify_one(as_(repo, "boss"), 60)[1] == "pass"
+    assert integrator.finalize(as_(repo, "boss"), [].append) == 1
+    assert verdicts(tids)["a"] == ["accepted"]
+
+
+def test_run_waits_for_work_between_sessions_that_found_nothing_open(project, monkeypatch, capsys):
+    """An agent whose claim found nothing open stopped at once, and run took it for failing: it waited longer
+    each time, half an hour in the end, and stopped it after three such runs. run itself waits now, syncing,
+    until something is open, and starts the agent then: the waiting costs no tokens there."""
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    ran, slept = [], []
+
+    def agent(argv):
+        ran.append(argv)
+        cli.note_claim(repo, 5 if len(ran) == 1 else 0)               # the first session: nothing open
+        return 0
+
+    def sleep(s):                                                      # while run waits, a task appears
+        slept.append(s)
+        make_project.add(make_project.people["boss"], "task.created", key="c", title="c", zone=["c.txt"],
+                         accept="python check.py c")
+    monkeypatch.setattr(cli, "run_agent", agent)
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    assert cli.main(["run", "--max-runs", "2", "--pause", "7", "--", "my-agent"]) == 0
+    assert len(ran) == 2 and slept == [7]                              # one look, and the task was there
+    assert "nothing was open" in capsys.readouterr().out

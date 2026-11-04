@@ -520,7 +520,7 @@ def quorum(c: Ctx, job: Job, now: float, outcome: str = "pass") -> list[dict] | 
                 and matches(c.repo, v, job.tree)):
             people.setdefault(person, v)
     chosen = list(people.values())
-    return chosen if len(chosen) >= max(1, pol["quorum"]) else None
+    return chosen if len(chosen) >= c.st.quorum_for(job.patch.name) else None
 
 
 def verified_result(job: Job, vs: list[dict]) -> tuple:
@@ -802,12 +802,12 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
         else:
             skip("not ready here yet (its commit or main hasn't reached this clone)" if planned is None
                  else "the integrator will reject it anyway")
-    ok, need = trusted_verifiers(c.st, now), c.st.policy["quorum"]
+    ok = trusted_verifiers(c.st, now)
     me = trust.owner_of(c.ident.name)
     checking = checks_under_way(c.st, now, c.me)
     order = [j for i in range(depth) for s in stacks.values() if i < len(s["jobs"]) for j in [s["jobs"][i]]]
     for job in order:
-        vs = c.st.verifications.get(job.patch.id, [])
+        vs, need = c.st.verifications.get(job.patch.id, []), c.st.quorum_for(job.patch.name)
         if job.patch.author == c.me:
             skip("yours")
             continue
@@ -822,14 +822,14 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
             continue
         have = {trust.owner_of(v["name"]) for v in vs if v["outcome"] == "pass" and v["author"] in ok
                 and (v["base_tree"], v["tree"]) == (job.base_tree, job.tree)}
-        if me in have or len(have) >= max(1, need):  # each owner counts once: a second check of yours adds nothing
+        if me in have or len(have) >= need:  # each owner counts once: a second check of yours adds nothing
             skip("verified enough already" if me not in have else "already verified by another agent of your owner")
             continue
         under_way = checking.get(job.patch.id, set()) - have
         if me in under_way:
             skip("another agent of your owner is checking it right now")
             continue
-        if len(have | under_way) >= max(1, need):  # those checks will be enough: don't build it once more
+        if len(have | under_way) >= need:  # those checks will be enough: don't build it once more
             skip("being checked by enough agents right now")
             continue
         return sign(c, job, timeout)
@@ -854,7 +854,7 @@ def to_accept(st: S.State, me: str, now: float) -> list[S.Patch]:
     checks them again). Only for a trusted agent, and never its own patches."""
     if st.policy["mode"] != "open" or not st.trusted(me):
         return []
-    ok, need, out = trusted_verifiers(st, now), max(1, st.policy["quorum"]), []
+    ok, out = trusted_verifiers(st, now), []
     for p in queue_order(st):
         if p.author == me or st.doomed(p):
             continue
@@ -862,7 +862,7 @@ def to_accept(st: S.State, me: str, now: float) -> list[S.Patch]:
         for v in st.verifications.get(p.id, []):
             if v["outcome"] == "pass" and v["author"] in ok and trust.owner_of(v["name"]) != trust.owner_of(p.name):
                 passes.setdefault(trust.owner_of(v["name"]), v["ts"])
-        if len(passes) >= need and now - max(passes.values()) > ACCEPT_AFTER:
+        if len(passes) >= st.quorum_for(p.name) and now - max(passes.values()) > ACCEPT_AFTER:
             out.append(p)
     return out
 
@@ -873,7 +873,7 @@ def waiting_for(st: S.State, me: str, name: str, now: float) -> list[S.Patch]:
     Work never waits for them, but nothing is finished until they are checked."""
     if st.policy["mode"] != "open" or not st.trusted(me):
         return []
-    mine, need = trust.owner_of(name), max(1, st.policy["quorum"])
+    mine = trust.owner_of(name)
     ok, checking = trusted_verifiers(st, now), checks_under_way(st, now, me)
     out = []
     for p in queue_order(st):
@@ -881,7 +881,7 @@ def waiting_for(st: S.State, me: str, name: str, now: float) -> list[S.Patch]:
             continue
         have = {trust.owner_of(v["name"]) for v in st.verifications.get(p.id, [])
                 if v["outcome"] == "pass" and v["author"] in ok}
-        if mine not in have and len(have | checking.get(p.id, set())) < need:
+        if mine not in have and len(have | checking.get(p.id, set())) < st.quorum_for(p.name):
             out.append(p)
     return out
 

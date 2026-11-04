@@ -443,6 +443,26 @@ class State:
                 and owner(self.names.get(author, "")) == owner(self.names.get(parent, "?"))
                 and self.trusted(parent, depth + 1))
 
+    def trusted_owners(self) -> set[str]:
+        """The owners whose verifications and verdicts count, from what this state knows. Every integrator counts,
+        named or not yet: a founder named in project.init who hasn't published anything is still one owner (by its
+        key, when no name says whose it is), or the quorum would drop while it's quiet."""
+        named = {owner(name) for author, name in self.names.items() if self.trusted(author)}
+        for key in self.integrators:
+            name = self.names.get(key) or self.integrator_names.get(key)
+            named.add(owner(name) if name else key)
+        return named
+
+    def quorum_for(self, name: str) -> int:
+        """Passes by how many trusted owners other than this patch's own let it in: the policy's quorum, or, in
+        the open mode, every one there is when they are fewer, and never under one. Without the cap a project
+        with one founder, or one person's agents, could never gather two owners behind any patch, so none was
+        ever accepted and nobody ever became trusted. Every node works it out from the same events."""
+        need = max(1, self.policy["quorum"])
+        if self.policy["mode"] != "open":
+            return need
+        return max(1, min(need, len(self.trusted_owners() - {owner(name)})))
+
     def challengeable(self, p, now: float) -> bool:
         """An accepted patch can still be audited, and reverted, in the open mode's window."""
         return (self.policy["mode"] == "open" and p.verdict == "accepted"
@@ -457,7 +477,10 @@ class State:
         if any(v["outcome"] != outcome or not self.trusted(v["author"]) or owner(v["name"]) == owner(p.name)
                or (tree is not None and v["tree"] != tree) for v in chosen):
             return f"verified_by must be {outcome}es by trusted agents other than the patch's own"
-        need = max(1, self.policy["quorum"]) if outcome == "pass" or tree is None else 2
+        if outcome == "pass" or tree is None:
+            need = self.quorum_for(p.name)
+        else:  # a revert: two trusted owners, or every one there is besides the author
+            need = max(1, min(2, len(self.trusted_owners() - {owner(p.name)})))
         if len({owner(v["name"]) for v in chosen}) < need:
             return f"it needs {need} trusted owners behind it"
         return None
