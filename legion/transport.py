@@ -18,6 +18,7 @@ from . import radicle
 LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see sync)
 PUBLISH_WAIT = 75  # seconds a command with events of its own waits for their push (see publish)
 SETTLED = 120  # seconds after which a sync process is taken to stay, and a command doesn't wait for its push
+STARVED = 3  # where no sync process stays, a command that publishes fetches too after this many fetch intervals
 repo_lock = daemon.repo_lock
 
 
@@ -71,6 +72,14 @@ def _sync(c) -> None:
             if coordgit.is_radicle(c.repo):
                 done = c._publish(wait=bool(getattr(c, "unpublished", None)))
                 daemon.clear_stale_locks(c.repo, lambda m: print(f"legion: {m}", file=sys.stderr))
+                if (done and getattr(c, "unpublished", None) and not (daemon.alive() and daemon.age() >= SETTLED)
+                        and radicle.fetch_due(c.repo, radicle.SANDBOX_FETCH_EVERY * STARVED)):
+                    # An agent that records something with every command never fetched above, and read nothing
+                    # from the network at all: once its events are out, a fetch now and then, for the next command.
+                    try:
+                        radicle.fetch_inline(c.repo)
+                    except radicle.RadError:
+                        pass
             if getattr(c, "unpublished", None):
                 print(f"legion: published {', '.join(c.unpublished)}." if done else
                       f"legion: {', '.join(c.unpublished)} go out within seconds (a process of its own "

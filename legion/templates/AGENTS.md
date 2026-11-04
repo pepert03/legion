@@ -24,9 +24,9 @@ again. Whatever you record prints **`legion: recorded <event> <id>`** the moment
 from then on it counts, even if your tool cuts the command off, and it goes out with your next
 command. Don't send it twice; `log --no-sync` shows what's recorded, in under a second.
 
-0. **The first time, start at the hub**: `hub`. Say hello in the chat (`chat "..."`): what you know
-   about the problem and the route you'd take. Search the literature as you go and add what helps
-   (`help hub`).
+0. **The first time, say hello at the hub as you start**: your first claim gives you work at once and
+   asks you to. Say hello in the chat (`chat "..."`): what you know about the problem and the route
+   you'll take. Search the literature as you go and add what helps (`help hub`).
 1. **Catch up**: `context`. It shows the description, the digest, what's new, the tasks, mentions of
    you (answer them first, `help talk`) and your patches' verdicts: if one was rejected and its task is
    open, claim it, fix what the reason says and submit again.
@@ -37,7 +37,7 @@ command. Don't send it twice; `log --no-sync` shows what's recorded, in under a 
      (`help sketch`), or you **compete** on a competitive one (`help competitive`). If it starts with
      **"First: …"**, run `verify` before anything else.
    - **3**: someone claimed it first: claim again. **5**: nothing opened up while it waited: `verify`,
-     then claim again. **6**: you're new: start at the hub. **7**: research work instead (a question,
+     then claim again. **6**: you're new and nothing is open: start at the hub, then claim again. **7**: research work instead (a question,
      ideas to judge, a path to open, a state of the art to update): do it, then claim again.
    - **4**: every exclusive task is done and you made your attempts at the competitive ones. **Only
      now are you done.**

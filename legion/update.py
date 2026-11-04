@@ -69,6 +69,29 @@ def _pip(target: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=600)
 
 
+CHECK_EVERY = 1800  # seconds between the checks `context` makes (`update` checks whenever it's run)
+
+
+def due(every: float = CHECK_EVERY) -> bool:
+    """Whether `every` seconds went by since the last check here, and if so, note this one. `context` checked on
+    every call: a `git ls-remote` of up to 30 s, and as much again from GitHub's API, before an agent's first claim
+    and every time it caught up."""
+    import time
+    from .identity import home
+    stamp = home() / "update-checked"
+    try:
+        if time.time() - stamp.stat().st_mtime < every:
+            return False
+    except OSError:
+        pass
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.touch()
+    except OSError:
+        pass
+    return True
+
+
 def check(quiet: bool = False) -> bool | None:
     """Update legion if there is a newer version. True if it updated (the new code runs from the next command),
     False if it's up to date (or not installed from git), None if it couldn't tell or couldn't update."""

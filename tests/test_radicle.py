@@ -430,6 +430,7 @@ def test_one_process_per_machine_syncs_every_clone_so_commands_dont(network, tmp
     from legion import daemon, identity
     monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("LEGION_NO_DAEMON")
+    monkeypatch.setattr(daemon, "ASIDE", False)  # each push done before the next round, to read what it sent
     alice, bob = network["z6MkAlice"], network["z6MkBob"]
     boss, ana = Identity.generate("boss"), Identity.generate("ana")
     identity.bind(alice, boss)
@@ -545,13 +546,20 @@ def test_where_no_sync_process_stays_a_command_fetches_waiting_now_and_then(netw
     radicle._write_netsync(alice, {"ended": __import__("time").time(), "running": False})
     c.sync()
     assert fetched == [alice]                                           # one fetched lately: not again so soon
-    radicle._write_netsync(alice, {"ended": 0, "running": False})
+    t = __import__("time").time()
+    radicle._write_netsync(alice, {"ended": t - radicle.SANDBOX_FETCH_EVERY - 1, "running": False})
     c.unpublished = ["idea.proposed 1234"]
     c.sync()
     assert fetched == [alice]                                           # its own events go out first
+    radicle._write_netsync(alice, {"ended": t - radicle.SANDBOX_FETCH_EVERY * transport.STARVED - 1,
+                                   "running": False})
+    c.unpublished = ["idea.proposed 1235"]
+    c.sync()                                     # one that records something every time still reads now and then
+    assert fetched == [alice, alice]
+    radicle._write_netsync(alice, {"ended": 0, "running": False})
     monkeypatch.setattr(daemon, "age", lambda: transport.SETTLED + 1.0)  # a sync process that stays fetches
     ctx.Ctx()
-    assert fetched == [alice]
+    assert fetched == [alice, alice]
 
 
 def test_a_clone_far_behind_gets_the_events_first_and_a_slow_batch_is_halved(network, monkeypatch):
@@ -896,3 +904,55 @@ def test_prefer_edits_the_config_of_the_clones_own_node(tmp_path, monkeypatch):
     monkeypatch.setattr(radicle, "_edit_config", lambda home, change: homes.append(home))
     radicle.prefer_seed(repo, "z6MkSeed1234@100.1.2.3:8776", restart=False)
     assert homes == ["C:/Users/x/.radicle-jose"]
+
+
+def test_pushes_to_one_node_wait_in_line_whatever_home_they_come_from(tmp_path, monkeypatch):
+    """Four agents with homes of their own on one machine each had a sync process pushing to the one node: the
+    pushes refused each other and timed out. Now they go one at a time."""
+    import threading
+    repos = []
+    for name in ("a", "b"):
+        r = tmp_path / name
+        git(tmp_path, "init", "-q", str(r))
+        radicle.enable(r, "rad:zTest")
+        repos.append(r)
+    assert radicle.push_lock(repos[0]) == radicle.push_lock(repos[1])
+    inside, most = [0], [0]
+
+    def push(repo, *args, **kw):
+        inside[0] += 1
+        most[0] = max(most[0], inside[0])
+        threading.Event().wait(0.3)
+        inside[0] -= 1
+    monkeypatch.setattr(radicle, "rgit", push)
+    ts = [threading.Thread(target=radicle._push, args=(r, ["+refs/x:refs/x"], True)) for r in repos * 2]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert most == [1]
+
+
+def test_a_push_that_hangs_doesnt_hold_up_the_daemons_next_rounds(tmp_path, monkeypatch):
+    """In line, a push that hung for ten minutes held up the copy of what the network brought: now it runs aside,
+    the rounds go on, and that clone isn't pushed twice at once."""
+    import threading
+    from legion import daemon, identity
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    daemon.register(repo)
+    monkeypatch.setattr(daemon, "_wait", lambda wake, seconds: None)
+    monkeypatch.setattr(daemon, "clear_stale_locks", lambda repo, log: [])
+    monkeypatch.setattr(identity.Identity, "load", classmethod(lambda cls, path=None, repo=None: object()))
+    monkeypatch.setattr(coordgit, "is_radicle", lambda repo: True)
+    synced, pushed, release = [], [], threading.Event()
+    monkeypatch.setattr(coordgit, "sync", lambda repo, ident, publish=True: synced.append(1))
+    monkeypatch.setattr(coordgit, "publish_radicle", lambda repo, ident: (pushed.append(1), release.wait(30)))
+    monkeypatch.setattr(daemon, "FINISH", 0)
+    try:
+        assert daemon.run(rounds=4, log=lambda m: None) == 0
+        assert len(synced) == 4 and pushed == [1]
+    finally:
+        release.set()
+        daemon.finish_publishing(30)

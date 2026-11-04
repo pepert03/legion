@@ -135,3 +135,36 @@ Push del autor (hasta 75 s de espera) → fetch de red del integrador (≤60 s) 
 6. **Reducir el coste de propagación**: hacer que `MISSING_AFTER` no rechace sino que vuelva a la cola; permitir `reads` por defecto (o un árbol parcial) para que las verificaciones sobrevivan a movimientos de main que no tocan la zona.
 7. **Sembrar de verdad**: en Windows/macOS pedir el permiso de firewall una vez en `join` y escuchar en la red por defecto; tratar a los nodos en sandbox como **clientes puros** con un camino único y simple (push síncrono corto + fetch en línea), en vez de cuatro heurísticas; considerar un relé/semilla propia siempre encendida como parte del `init` del proyecto, porque sin ella la red es las semillas públicas.
 8. **Estado incremental**: cachear el estado calculado y aplicar solo eventos nuevos, o el coste por comando seguirá creciendo con la historia.
+
+---
+
+## 5. Estado de los arreglos
+
+Hecho en `3003c2a`:
+
+- El quórum del modo abierto se limita a los dueños de confianza que haya (§3.1, punto 1). Revertir pide 2, o todos los que haya.
+- `claim --wait` espera 90 s en vez de 8 min. `legion run` ya no aplica backoff tras una sesión que no encontró nada (exit 5): espera a que haya trabajo y relanza al momento (punto 4).
+
+Hecho en el commit siguiente:
+
+- **Daemons duplicados.** No eran un fallo del candado. En la máquina de jose hay cinco `LEGION_HOME`: `~/.legion`, y de `~/.legion-claude` a `-4`. Cada uno tiene su daemon y todos empujan al mismo nodo de Radicle. Sus logs muestran pushes que se rechazaban entre sí (`old reference value does not match`) y timeouts de 600 s varias veces por hora.
+  - Los pushes a un nodo van ahora de uno en uno por proyecto, con un candado en el temporal del usuario.
+  - Ese rechazo se reintenta igual que `cannot lock ref`.
+- **El daemon empuja en un hilo aparte**, uno por clon. Un push colgado ya no bloquea la copia de lo que trae la red (§1.4).
+- **El fetch de red despierta al daemon al terminar**, y lo nuevo se copia al momento en vez de una ronda más tarde (§1.4).
+- **En sandbox, un agente que escribe en cada comando también lee de la red.** Si llevaba más de 3 × 180 s sin fetch, lo hace después de publicar (§1.4).
+- Un ref que el push no estricto deja fuera ya no desaparece en silencio: se avisa.
+- **La primera tarea llega al momento.** Un recién llegado recibe trabajo con el primer `claim` y se le pide saludar en el hub mientras trabaja. Exit 6 queda solo para cuando no hay nada libre (punto 3).
+- `context` consulta si hay versión nueva de legion como mucho cada 30 min (punto 3).
+- Un parche cuyo commit no ha llegado espera 1 h antes de rechazarse como "missing", en vez de 10 min (punto 6).
+- `integrate` sin `--loop` avisa de que, mientras haya parches pendientes, no entra nada hasta volver a ejecutarlo (punto 2).
+- El alcance de siembra está bien en el nodo de jose: los cuatro repos tienen `allow` con `all`.
+
+Pendiente:
+
+- Que el integrador quede siempre en bucle por sí mismo (punto 2).
+- Escuchar en la red por defecto en Windows y macOS (punto 7).
+- Reparto activo del trabajo (punto 5).
+- `reads` por defecto (punto 6).
+- Estado incremental (punto 8).
+- Reducir los syncs de `claim` (punto 3).

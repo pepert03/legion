@@ -1095,6 +1095,12 @@ def run_network_sync(repo, quick: bool = False) -> bool:
             time.sleep(5)  # it needs a moment to connect to the seeds
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True, quick=quick)
+        if ok and not quick:
+            # What it brought is in the node's storage: the sync process copies it now, not at its next round,
+            # which had copied what the storage held before this fetch began, one round late.
+            from . import daemon
+            if daemon.enabled():
+                daemon.wake()
         compact_storage(repo, 20 if quick else 300, merge=not quick)
         if not quick:
             gc_storage(repo)
@@ -1386,12 +1392,14 @@ def _push(repo, specs: list[str], strict: bool, sync: bool = False) -> None:
     until what fails is one ref, which is left out (another node re-offers it)."""
     if not specs:
         return
+    from .locks import held
     for attempt in range(3):
         try:
-            rgit(repo, "push", "-q", *([] if sync else ["-o", "no-sync"]), "rad", *specs, timeout=PUSH_TIMEOUT)
+            with held(push_lock(repo), wait=PUSH_LOCK_WAIT):
+                rgit(repo, "push", "-q", *([] if sync else ["-o", "no-sync"]), "rad", *specs, timeout=PUSH_TIMEOUT)
             return
         except RadError as e:
-            if "cannot lock ref" in str(e) and attempt < 2:  # another clone pushing to the same node right now
+            if any(s in str(e) for s in RACED) and attempt < 2:  # another clone pushed to the same node meanwhile
                 time.sleep(2)
                 continue
             if strict or "timed out" in str(e):
@@ -1399,7 +1407,25 @@ def _push(repo, specs: list[str], strict: bool, sync: bool = False) -> None:
             if len(specs) > 1:
                 _push(repo, specs[:len(specs) // 2], strict)
                 _push(repo, specs[len(specs) // 2:], strict)
+            else:
+                print(f"legion: left {specs[0]} out of this push, which the node refused; another node re-offers "
+                      "it", file=sys.stderr)
             return
+
+
+# What a push says when another one, from another clone sharing this node, moved its refs meanwhile.
+RACED = ("cannot lock ref", "old reference value does not match")
+PUSH_LOCK_WAIT = 180  # seconds a push waits for another to the same node before going anyway (as before the lock)
+
+
+def push_lock(repo) -> Path:
+    """One push at a time to a node per project, whichever clone and LEGION_HOME it comes from. Agents with homes
+    of their own (~/.legion-claude, -2, -3, -4 on jose's machine) each had a sync process, all pushing to the one
+    node: their pushes refused each other ("old reference value does not match") and timed out after ten minutes
+    over and over, and each time that clone's events waited. In line they wait seconds for each other instead."""
+    import hashlib
+    key = hashlib.sha1((rid(repo) or str(Path(repo).resolve())).encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"legion-push-{key}.lock"
 
 
 def published_mark(repo) -> str:

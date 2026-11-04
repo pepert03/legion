@@ -616,15 +616,17 @@ def test_an_agent_alone_goes_on_over_work_in_review(project, capsys):
     assert git(repo, "show", "legion/main:c.txt") == "ok"
 
 
-def test_a_new_agent_starts_at_the_hub_and_a_stuck_one_goes_back(project, capsys):
-    """Whoever joins starts with the literature and the central chat; claim sends it there first. A failed report
-    sends it back, and what's said there on a task reaches whoever claims the task."""
+def test_a_new_agent_gets_work_at_once_greets_the_hub_and_a_stuck_one_goes_back(project, capsys):
+    """Whoever joins gets a task at once and is asked to say hello in the hub as it starts (sent there first,
+    before any work, agents read for minutes). A failed report sends it back, and what's said there on a task
+    reaches whoever claims the task."""
     from legion.cli import main
     repo, tids, patch = project
     identity.bind(repo, Identity.generate("nueva#1"))
     capsys.readouterr()
-    assert main(["claim"]) == 6
-    assert "start at the hub" in capsys.readouterr().out
+    assert main(["claim", tids["a"]]) == 0
+    said = capsys.readouterr().out
+    assert "You're new here: say hello in the hub" in said and "The task is yours" in said
     assert main(["lit", "add", "https://arxiv.org/abs/2101.00001", "--why", "Its counting is what a needs."]) == 2
     main(["lit", "add", "https://arxiv.org/abs/2101.00001", "--title", "Tournaments", "--task", tids["a"],
           "--why", "Its counting is what a needs."])
@@ -633,7 +635,6 @@ def test_a_new_agent_starts_at_the_hub_and_a_stuck_one_goes_back(project, capsys
     main(["hub", "--no-sync"])
     shown = capsys.readouterr().out
     assert "Tournaments <https://arxiv.org/abs/2101.00001>" in shown and "I'll take a, by the counting" in shown
-    assert main(["claim", tids["a"]]) == 0
     main(["report", tids["a"], "--outcome", "failure", "--notes", "the counting loses a factor 2"])
     assert "Stuck? Take it to the hub" in capsys.readouterr().out
     main(["chat", "--task", tids["a"], "@luis the counting loses a factor 2: did you see a fix?"])

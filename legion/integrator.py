@@ -315,7 +315,8 @@ FIXED_ENV = dict(os.environ, GIT_AUTHOR_NAME="legion", GIT_AUTHOR_EMAIL="legion@
                  GIT_AUTHOR_DATE="2000-01-01T00:00:00Z", GIT_COMMITTER_NAME="legion",
                  GIT_COMMITTER_EMAIL="legion@legion.local", GIT_COMMITTER_DATE="2000-01-01T00:00:00Z")
 TIMED_OUT: dict[str, int] = {}  # patch -> checks of it that ran out of time, in this process
-MISSING_AFTER = 600  # seconds a patch's commit may take to arrive before it's rejected as missing
+MISSING_AFTER = 3600  # seconds a patch's commit may take to arrive before it's rejected as missing: at 600 a slow
+# network (minutes between machines, hours for a node only the public seeds reach) turned into rejections
 REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
 
 

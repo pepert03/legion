@@ -14,6 +14,7 @@ off: every command syncs by itself, as before."""
 import hashlib
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from .locks import held, lock_file
 EVERY = float(os.environ.get("LEGION_DAEMON_EVERY", 10))  # seconds between syncs of each clone
 FRESH = 60  # a daemon whose last beat is older than this is taken as gone
 IDLE = 6 * 3600  # a clone unused this long is dropped; with none left, the daemon ends
+ASIDE = True  # pushes in a thread of their own (see publish_aside); off, in line
+FINISH = 120  # seconds an ending daemon gives the pushes under way
 
 
 def folder() -> Path:
@@ -122,12 +125,44 @@ def sync_one(repo: str, log=print) -> bool:
         # for the whole push too (20 s, and minutes for a first one), past the time agents' tools allow them.
         with held(repo_lock(repo)):
             coordgit.sync(repo, ident, publish=False)
-        coordgit.publish_radicle(repo, ident)
+        publish_aside(repo, ident, log)
         clear_stale_locks(repo, log)
         return True
     except Exception as e:  # noqa: BLE001 (one clone's trouble mustn't stop the others')
         log(f"{time.strftime('%H:%M:%S')} {repo}: {str(e).strip()[-300:]}")
         return False
+
+
+_publishing: dict[str, threading.Thread] = {}
+
+
+def publish_aside(repo: str, ident, log=print) -> None:
+    """Push this clone's refs in a thread of their own, one at a time per clone. In line, a push that hung (ten
+    minutes before it timed out, three times an hour on jose's machine) held up the copy of what the network
+    brought, for that clone and every other: the agents read nothing new for ten minutes. A clone whose push is
+    still going is offered again at the next round after it ends."""
+    if not ASIDE:
+        coordgit.publish_radicle(repo, ident)
+        return
+    running = _publishing.get(repo)
+    if running is not None and running.is_alive():
+        return
+
+    def push():
+        try:
+            coordgit.publish_radicle(repo, ident)
+        except Exception as e:  # noqa: BLE001
+            log(f"{time.strftime('%H:%M:%S')} {repo}: {str(e).strip()[-300:]}")
+    t = threading.Thread(target=push, name=f"publish {repo}", daemon=True)
+    _publishing[repo] = t
+    t.start()
+
+
+def finish_publishing(seconds: float) -> None:
+    """Let the pushes under way end, up to `seconds` in all, before the process does."""
+    end = time.time() + seconds
+    for t in list(_publishing.values()):
+        t.join(max(0.0, end - time.time()))
 
 
 STALE_LOCK = 120  # seconds after which a lock no process holds open is a leftover, looked for this often (git
@@ -255,6 +290,7 @@ def run(rounds: int | None = None, log=_log) -> int:
             start()
             break
         _wait(d / "wake", EVERY)
+    finish_publishing(FINISH)
     return 0
 
 

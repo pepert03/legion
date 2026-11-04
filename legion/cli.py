@@ -598,9 +598,10 @@ def cmd_claim(args):
 
 def claim(c: Ctx, args) -> int:
     now = time.time()
-    if c.st.newcomer(c.me):  # everyone starts at the hub: what's known about the problem, and who's on what
-        out(args, {"won": False, "task": None, "hub": True}, HUB_FIRST)
-        return 6
+    # A newcomer gets work at once, and says hello in the hub as its first step on it: sent to the hub before it
+    # had anything (exit 6), an agent spent minutes and four syncs reading before its first claim. With nothing
+    # open, the hub is where it starts.
+    greet = c.st.newcomer(c.me)
     join = False
     if args.task:
         t = c.task(args.task)
@@ -652,6 +653,9 @@ def claim(c: Ctx, args) -> int:
                 t = helped[0]  # nothing open: don't wait, help with the hardest task, or prepare a blocked one
                 join = c.st.holder(t.id, now) is not None
             elif not free:
+                if greet and not c.st.exclusive_done():
+                    out(args, {"won": False, "task": None, "hub": True}, HUB_FIRST)
+                    return 6
                 if c.st.exclusive_done():
                     out(args, {"won": False, "task": None, "done": True},
                         "Every exclusive task is done, and you have made your attempts at the competitive ones: "
@@ -755,6 +759,8 @@ def claim(c: Ctx, args) -> int:
                    "and ideas of earlier rounds are set aside on purpose (`log` keeps them). Start from what's proved "
                    "in main, the saved work and the state of the art, and take a route of your own.\n" + how)
         how = verify_first(c) + plateau_text(c.st, c.me) + how
+        if greet:
+            how = NEW_HERE + how
         out(args, {"won": True, "task": d, "joined": others, "ahead": d["status"] == "blocked"},
             f"{how}The task is yours:\n{task_text(d)}\n\nThe claim expires in {args.ttl // 60} min; renew it with "
             f"`python -m legion heartbeat {t.id}`.")
@@ -1446,6 +1452,11 @@ HUB_FIRST = (
     "away: you get work at once. Review the literature as you go: search for papers, surveys, books, code and "
     "known results, and add each one that helps with `python -m legion lit add <url> --title \"...\" --why \"what "
     "it gives us\"` (`--task <task-id>` if it's for one task).")
+NEW_HERE = (
+    "You're new here: say hello in the hub's chat as you start, in one message: what you know about the problem "
+    "and which route you'll take on this task (`python -m legion chat \"...\"`). The hub (`python -m legion hub`) "
+    "has the literature the agents found so far: add what helps as you go (`python -m legion lit add <url> --title "
+    "\"...\" --why \"what it gives us\"`).\n")
 STUCK = (
     "Stuck? Take it to the hub. Say there what blocks you (`python -m legion chat --task {tid} \"...\"`), and look "
     "for it in the literature: someone may have done that step already, in a paper or in another task (`python -m "
@@ -2274,7 +2285,7 @@ def cmd_delegate(args):
 
 
 def cmd_context(args):
-    if not args.no_update:
+    if not args.no_update and update.due():
         update.check()  # agents run this first whenever they (re)connect: a good moment to pick up fixes
     c = Ctx()
     announce(c)
@@ -2525,6 +2536,11 @@ def cmd_integrate(args):
             if args.until_done and c.st.exclusive_done() and not pending:
                 print("Every exclusive task is accepted.")
                 return 0
+            if not args.loop and pending:
+                # Only the integrator accepts, rejects and creates tasks: run once, nothing more goes in until it
+                # runs again, and agents' patches waited for a verdict that nobody was there to give.
+                log("Patches are still waiting: nothing is integrated until this runs again. Keep it running with "
+                    "`python -m legion integrate --loop 30` on a machine that stays on.")
             if not args.loop or time.time() > deadline:
                 return 0
             time.sleep(args.loop)
