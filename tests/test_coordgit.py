@@ -97,3 +97,32 @@ def test_a_tampered_event_is_checked_again_and_dropped(tmp_path):
     st = coordgit.state(r)
     assert not st.tasks
     assert [why for _, why in st.ignored] == ["the id does not match the content"]
+
+
+def test_the_state_is_kept_between_commands_and_extended_with_what_is_new(tmp_path):
+    """Every command rebuilt the state from every event, and a project's commands grew slower with its history.
+    Kept per coord commit, it's extended with the new events when they come after the last it applied, and
+    rebuilt whole otherwise: either way the same as building it from scratch."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    boss, ana = Identity.generate("boss"), Identity.generate("ana")
+
+    def same(st):
+        full = S.build(coordgit.read_events(repo))
+        return ([e["id"] for e in st.events], [e["id"] for e, _ in st.ignored], sorted(st.tasks)) == \
+            ([e["id"] for e in full.events], [e["id"] for e, _ in full.ignored], sorted(full.tasks))
+    coordgit.append(repo, boss, E.create(boss, "project.init", 1, project="p"))
+    coordgit.append(repo, boss, E.create(boss, "task.created", 2, key="a", title="A", zone=["a"], accept="true"))
+    first = coordgit.state(repo)
+    assert same(first) and coordgit._state_file(repo).exists()
+    first.tasks.clear()                                                   # a caller's copy is its own
+    assert len(coordgit.state(repo).tasks) == 1
+    coordgit.append(repo, ana, E.create(ana, "task.claimed", 3, task=S.task_id(coordgit.read_events(repo)[1]),
+                                        ttl=600))
+    coordgit._STATE.clear()                                               # another process: from the file
+    assert same(coordgit.state(repo))
+    coordgit.append(repo, boss, E.create(boss, "task.created", 2, key="b", title="B", zone=["b"], accept="true"))
+    assert same(coordgit.state(repo)) and len(coordgit.state(repo).tasks) == 2  # ordered among the old ones
+    ev = E.create(boss, "task.created", 9, key="c", title="C", zone=["c"], accept="true")
+    trial = coordgit.state(repo, extra=[ev])
+    assert len(trial.tasks) == 3 and len(coordgit.state(repo).tasks) == 2    # a trial leaves the kept one

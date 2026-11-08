@@ -162,11 +162,48 @@ Hecho en el commit siguiente:
 
 - **En el modo abierto, cada agente de confianza finaliza desde `legion run`**: entre sesiones y mientras espera trabajo. Antes solo finalizaban `verify` e `integrate --loop`, y con todos los agentes ocupados lo verificado no entraba en `main`. No hay ningún nodo central: lo hacen tantos sitios como agentes (punto 2, en su versión p2p).
 
-Pendiente:
+Hecho el 8 de noviembre (todo lo que quedaba de §4 y de los defectos concretos):
 
-- En el modo integrador, que es centralizado por definición, `integrate` sigue necesitando que alguien lo deje en bucle (punto 2). Para un proyecto p2p, el modo abierto debería ser el normal.
-- Escuchar en la red por defecto en Windows y macOS (punto 7).
-- Reparto activo del trabajo (punto 5).
-- `reads` por defecto (punto 6).
-- Estado incremental (punto 8).
-- Reducir los syncs de `claim` (punto 3).
+- **Reparto activo (punto 5).**
+  - Quien se une a una tarea la divide con los demás en vez de competir, y ve las notas enteras.
+  - El titular, en `heartbeat`, ve quién se ha unido.
+  - Con más agentes que tareas, `claim` y `heartbeat` piden partir la tarea.
+  - Un agente de confianza que trabaja en una tarea crea sus subtareas directamente con `propose task --parent`, sin voto ni revisión. Sus comandos deben empezar por un runner de tests.
+  - Cualquiera puede dejar notas en cualquier tarea, dentro del límite diario del hub.
+- **Claims (punto 3 y §2.2).**
+  - `claim` sincroniza una sola vez y, si pierde la carrera, coge otra tarea libre en el mismo comando. Lo que suelta así no se enfría.
+  - Un claim hecho más de 2 min después del primero activo no lo desplaza, aunque tenga un Lamport más bajo (reloj de pared, §1.3).
+  - El TTL baja a 30 min, y `legion run` renueva los claims mientras el agente corre y los suelta al pararlo.
+  - El cooldown baja a 30 min y, sin nada más libre, `claim` devuelve la tarea pidiendo otra ruta.
+- **Integración (§3).**
+  - Las verificaciones siguen valiendo cuando `main` se mueve en archivos que la comprobación no lee: en Linux, el verificador la ejecuta con strace y registra los archivos del árbol que tocó (punto 6). No hace falta configurar `reads`.
+  - Cuatro verificaciones acertadas hacen a un agente de confianza. Con integrador, cuentan las verificaciones de todos los agentes de confianza.
+  - El aviso `patch.checking` dura dos veces su límite más 5 min, en vez de 30 min.
+  - Un commit que no llega espera mientras no llegue nada más nuevo de su autor, hasta 6 h.
+  - El lease baja a 2 min.
+  - El `legion run` de un integrador hace una pasada cuando nadie tiene el lease y espera un parche o un sketch (punto 2). Lo que `legion run` registra por su cuenta (renovar claims, el lease, los veredictos) no cuenta como actividad del agente para pararlo.
+  - Los slots de comprobación son de la máquina, no de cada `LEGION_HOME` (eran 2 × 5 en la de jose). Son ¼ de los núcleos (de 2 a 8), y el integrador revisa ese mismo número de parches a la vez.
+- **Transporte (§1.4).**
+  - El fetch se da por terminado antes de compactar el almacén, y solo compacta un proceso a la vez.
+  - Una semilla propia caída se salta durante 10 min, y cualquier fallo del fetch prueba las semillas públicas.
+  - El daemon reiniciado por una actualización conserva su edad, así que los comandos no sincronizan solos durante 2 min.
+  - Un publish que no se puede comprobar se da por muerto a los 5 min.
+  - Los parches de otros se reenvían en la siguiente ronda, no cada 10 min.
+  - El heal se hace cada 15 min y también desde el daemon.
+  - Tras arrancar el nodo se espera a que conecte, hasta 20 s, en vez de 5 s a ciegas.
+- **Sembrar (punto 7).**
+  - El nodo escucha en la red por defecto también en Windows y macOS. El sistema pregunta una vez; `legion.lan false` o `LEGION_LAN=0` lo evitan.
+  - Cada clon pone `rad seed --scope all` una vez.
+  - Se compacta y se hace gc del almacén también dentro de WSL.
+  - Hasta 16 peers, activos 48 h, y la dirección se re-anuncia cada 10 min (las direcciones se miran cada 5, así que una nueva, como el puerto que abre el router minutos después de arrancar, sale en minutos).
+  - Donde los procesos de fondo no sobreviven (sandbox), los comandos dejan de arrancar un daemon en cada llamada y van siempre por el mismo camino.
+  - `init` recomienda montar una semilla propia.
+- **Estado incremental (punto 8).**
+  - El estado se guarda por commit de `coord` y solo se le aplican los eventos nuevos cuando van detrás de los ya aplicados. Si no, se reconstruye entero.
+  - En el clon de Erdős #902 (20 518 eventos), un comando pasa de 0,6 s a 0,13 s para obtener el estado.
+
+No hecho:
+
+- **Túneles con Radicle dentro de WSL.** Haría falta lanzar dumbpipe y procesos persistentes dentro de WSL. En Windows, el camino soportado es Radicle nativo (el de jose desde el 31 de octubre).
+- **Rondas del integrador.** Un rechazo sigue tirando el resto de su ronda. Es inherente a la cola especulativa: los siguientes se comprobaron encima del rechazado. Se recomprueban en la vuelta siguiente, ahora con más revisores a la vez.
+- **El modo integrador sigue siendo centralizado por definición.** Para un proyecto p2p, el modo abierto debería ser el normal.

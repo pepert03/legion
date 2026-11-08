@@ -38,8 +38,17 @@ STALL_AFTER, MAX_OPEN_PATHS = 3, 3
 # that don't need its dependencies, or write the patch, which is reviewed once the dependencies are in).
 MAX_SHARED = 8  # the policy's max_shared, unless it says otherwise: with routes to rate and try, more hands help
 # An agent that let a task go (released it, or reported it failing) isn't handed it again by claim for COOLDOWN
-# seconds: it gets something else, or goes to the hub to rethink, instead of hitting the same wall again.
-COOLDOWN = 3600
+# seconds: it gets something else, or goes to the hub to rethink, instead of hitting the same wall again. An hour
+# kept agents idle with the task open and nothing else to do: half an hour, and with nothing else open claim hands
+# it back, asking for another route. A task let go of because another agent claimed it first doesn't cool.
+COOLDOWN = 1800
+# Claims made within CLAIM_GRACE seconds of the first active one race, and the lowest Lamport clock wins; a later
+# one never displaces it. By the clock alone, a node cut off for a while (its clock behind) claimed a task someone
+# had been working on for an hour, and took it.
+CLAIM_GRACE = 120
+# More agents active in the last ACTIVE_AGENTS seconds than tasks to work on: crowded. Then whoever holds a task
+# that splits is asked to split it, and whoever joins one to take a part of it, not to race for the whole.
+ACTIVE_AGENTS = 1800
 # Research, below the size of a task. A task's state of the art (task.brief) is one text that whoever works on it
 # keeps current: what's proved and where, what's ruled out and why, what's open, who's on which route. Questions
 # (question.asked) are concrete things to settle on a task, a computation, a lemma, a reference, or replicating a
@@ -66,9 +75,11 @@ RIPE_COMPARED, RIPE_ANSWERS = 2, 2  # an idea judged this often, a question answ
 # PLAYBOOK_AFTER failures have piled up since its last version.
 MAX_PLAYBOOK, PLAYBOOK_AFTER = 8000, 10
 MAX_QUESTIONS_PER_DAY, QUESTION_TTL = 10, 7200
-# Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"): only someone
-# working on the task may post one. There's no cap on how many: 30 each for good stopped the agent that had worked
-# longest on a task (Erdős #902's order-upper/construction) from saying anything more on it.
+# Agents working on the same task talk through notes on it ("I'm trying X, don't repeat it"). There's no cap on how
+# many those who work on it post: 30 each for good stopped the agent that had worked longest on a task (Erdős
+# #902's order-upper/construction) from saying anything more on it. Anyone else may help from outside too (a lemma
+# it knows, a reference, a computation): within the hub's daily cap (MAX_HUB_PER_DAY), which they count towards.
+# Only those who worked on it could, and nobody helped a task from outside.
 # The hub, at the centre of the project: where agents start (a literature review of the problem), where they come
 # back when stuck, and where they talk about the whole problem: new routes, new tasks, help. Its chat
 # (hub.message) and its literature (lit.added: a link, its title, why it helps) are open to every agent, trusted
@@ -157,6 +168,10 @@ PROPOSABLE = {"task.created", "project.policy", "project.described", "digest.pub
 ACTIVE_DAYS, MIN_YES, FOUNDERS_UNTIL = 7, 3, 5
 MAX_ON = 50  # patches in review one patch may be built on
 TRUSTED_AFTER = 2  # accepted patches, and never a false verification, to be trusted without being a founder
+# Or this many patches its verifications called right (a pass on one accepted, a fail on one rejected by its tests),
+# and never a false one. Only accepted patches made agents trusted, and an agent that verified without writing
+# patches ran builds that never counted, in the open mode, nor ever would.
+VERIFIED_AFTER = 4
 
 
 def owner(name: str) -> str:
@@ -229,6 +244,7 @@ class Claim:
     join: bool = False  # joins whoever holds the task, instead of competing for it
     view: str = ""  # on a stuck task: the view claim showed it, fresh or full (see FRESH_VIEWS)
     released_ts: float = 0.0
+    lost: bool = False  # released because another agent claimed it first: nothing was tried, it doesn't cool
 
     def active(self, now: float) -> bool:
         return not self.released and now <= self.last_beat + self.ttl
@@ -394,6 +410,7 @@ class State:
         self.verifications: dict[str, list[dict]] = defaultdict(list)  # patch -> patch.verified events
         self.accepted_count: dict[str, int] = defaultdict(int)  # author -> its accepted patches
         self.falsified: set[str] = set()  # authors of a reverted patch, and whoever verified it as passing
+        self.confirmed: dict[str, set[str]] = defaultdict(set)  # author -> patches its verifications called right
         self.last_seen: dict[str, float] = {}  # author -> its latest event: who is active, for votes
         self.names: dict[str, str] = {}
         self.tunnels: dict[str, dict] = {}  # Radicle node ID -> its latest node.tunnel event (see tunnel.py)
@@ -415,8 +432,13 @@ class State:
         return next((t for t in self.tasks.values() if t.key == ref), None)
 
     def holder(self, tid: str, now: float) -> Claim | None:
+        """Whoever claimed first: of the active claims made within CLAIM_GRACE of the earliest, the lowest Lamport
+        clock (then the key)."""
         active = [c for c in self.claims[tid] if c.active(now)]
-        return min(active, key=lambda c: (c.lamport, c.author)) if active else None
+        if not active:
+            return None
+        first = min(c.ts for c in active)
+        return min((c for c in active if c.ts <= first + CLAIM_GRACE), key=lambda c: (c.lamport, c.author))
 
     def claimants(self, tid: str, now: float) -> list[Claim]:
         """Who works on the task: its holder, and up to the policy's max_shared - 1 agents who joined it."""
@@ -436,7 +458,8 @@ class State:
         """Whose verifications and verdicts count in the open mode: the founders, agents with accepted work and
         never a false verification, and the subagents those vouched for (agent.delegated), while their name keeps
         the same owner: one owner, one say, whatever number of agents it runs."""
-        if author in self.integrators or (self.accepted_count[author] >= TRUSTED_AFTER and author not in self.falsified):
+        if author in self.integrators or author not in self.falsified and (
+                self.accepted_count[author] >= TRUSTED_AFTER or len(self.confirmed[author]) >= VERIFIED_AFTER):
             return True
         parent = self.delegates.get(author)
         return (parent is not None and depth < 3 and author not in self.falsified
@@ -606,7 +629,7 @@ class State:
                 left[a["task"]] = max(left.get(a["task"], 0), a["ts"])
         for tid, cs in self.claims.items():
             for cl in cs:
-                if cl.author == author and cl.released and now - cl.released_ts < COOLDOWN:
+                if cl.author == author and cl.released and not cl.lost and now - cl.released_ts < COOLDOWN:
                     left[tid] = max(left.get(tid, 0), cl.released_ts)
         # A new idea since then is a new route: the task is worth taking back.
         return {tid for tid, ts in left.items()
@@ -939,6 +962,14 @@ class State:
                 ref["by"].append(ev)  # found useful again, by someone else: it vouches for it
         self.hub_by[ev["author"]].append(ev["ts"])
         return None
+
+    def crowded(self, now: float) -> tuple[int, int]:
+        """(agents active in the last ACTIVE_AGENTS seconds, exclusive tasks there are to work on: open or held).
+        More agents than tasks: the work should be split, not raced for."""
+        agents = {a for a, ts in self.last_seen.items() if now - ts <= ACTIVE_AGENTS and a not in self.integrators}
+        tasks = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled and t.kind != "result"
+                 and self.status(t.id, now) in ("open", "claimed")]
+        return len(agents), len(tasks)
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
         """Works on the task now, or did: claimed it, reported on it, sent or verified a patch, proposed a sketch
@@ -1350,6 +1381,8 @@ class State:
         if t in E.INTEGRATOR_ONLY and ev["author"] not in self.integrators and ev.get("id") != self._by_vote:
             open_ok = (self.policy["mode"] == "open" and t in FINALIZE and self.trusted(ev["author"])
                        and (t != "task.created" or ev.get("sketch") or ev.get("path")))
+            if not open_ok and self._split(ev):
+                return self._create_task(ev)
             if not open_ok:
                 return "only an integrator can publish this event"
             err = self._finalizer_rules(ev)
@@ -1485,7 +1518,7 @@ class State:
             if not mine:
                 return "no claim to release"
             for c in mine:
-                c.released, c.released_ts = True, ev["ts"]
+                c.released, c.released_ts, c.lost = True, ev["ts"], ev.get("lost") is True
         elif t == "attempt.reported":
             if ev.get("outcome") not in ("success", "failure"):
                 return "outcome must be success or failure"
@@ -1529,11 +1562,15 @@ class State:
             text = ev.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
                 return f"a note is text of at most {E.MAX_NOTES} characters"
-            if not self.took_part(task.id, ev["author"], ev["ts"]):
-                return "only someone who works on the task, or has, may post notes on it"
+            outside = not self.took_part(task.id, ev["author"], ev["ts"])
+            if outside and sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
+                return (f"a note on a task one doesn't work on counts in the hub's {MAX_HUB_PER_DAY} a day, and "
+                        "this agent has posted them all")
             if ev.get("reply") is not None and not any(n["id"] == ev["reply"] for n in self.notes[task.id]):
                 return "a reply answers a note on the same task"
             self.notes[task.id].append(ev)
+            if outside:
+                self.hub_by[ev["author"]].append(ev["ts"])
         elif t == "result.submitted":
             return self._result(ev, task)
         elif t == "task.brief":
@@ -1592,6 +1629,11 @@ class State:
             p.base_tree, p.tree = ev.get("base_tree"), ev.get("tree")
             if p.merge_commit:
                 self.main_tip = p.merge_commit
+            # The verifications this verdict proves right: those of the merge it judged (the tree, or named in it).
+            right = "pass" if p.verdict == "accepted" else "fail" if p.code not in PLAIN else None
+            for v in self.verifications[p.id] if right else ():
+                if v["outcome"] == right and (v["tree"] == p.tree or v["id"] in (ev.get("verified_by") or ())):
+                    self.confirmed[v["author"]].add(p.id)
             if p.verdict == "accepted":
                 p.accepted_ts = ev["ts"]
                 p.verified_by = list(ev.get("verified_by") or [])
@@ -1706,13 +1748,16 @@ class State:
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
-            voted = ev.get("id") == self._by_vote and not ev.get("sketch") and not ev.get("path")
+            voted = ((ev.get("id") == self._by_vote or ev.get("split") is True)
+                     and not ev.get("sketch") and not ev.get("path"))
             if not voted:
                 sketch = self.sketches.get(ev.get("sketch") or ev.get("path"))
                 if not parent or not sketch or sketch.task != parent.id or sketch.verdict != "accepted":
                     return "a subtask needs a parent and an accepted sketch or path of that parent"
             if voted:
                 err = self._subtask_error(parent, key, zone)
+                if ev.get("split") is True:  # nobody votes on it: its command is checked like a sketch's subtasks'
+                    err = err or check_accept(ev.get("accept"), self.runners)
                 if err:
                     return err
             elif not key.startswith(parent.key + "/") or not all(in_zone(z.rstrip("/"), parent.zone) for z in zone):
@@ -1727,6 +1772,16 @@ class State:
         if sketch:
             sketch.child_ids.append(tid)
         return None
+
+    def _split(self, ev: dict) -> bool:
+        """A subtask its parent's own worker creates (`split`): a trusted agent that works on the task, or has, may
+        split it without a vote or a review. It stays inside the parent's zone and key, and the parent still counts
+        as done only when its own acceptance command passes, so a split can't let anything in. Only integrators,
+        votes and reviewed sketches made tasks, and with few tasks the queue emptied and agents waited."""
+        parent = self.tasks.get(ev.get("parent"))
+        return (ev["type"] == "task.created" and ev.get("split") is True and parent is not None
+                and not ev.get("sketch") and not ev.get("path") and self.trusted(ev["author"])
+                and self.took_part(parent.id, ev["author"], ev["ts"]))
 
     def _subtask_error(self, parent: Task | None, key: str, zone: list) -> str | None:
         if parent is None or parent.cancelled:
@@ -1901,12 +1956,20 @@ def tunnel_error(ev: dict) -> str | None:
     return None
 
 
+def event_key(e: dict) -> tuple:
+    """Where an event goes in the order every node applies them in: its Lamport clock, then its id."""
+    return (e.get("lamport", 0) if isinstance(e.get("lamport"), int) else 0, str(e.get("id", "")))
+
+
 def build(events: list[dict], trusted=None) -> State:
     """The state after these events, in Lamport order. `trusted`: events whose signature is known to be good
     (a set of their id(), or True for all of them), which aren't checked again."""
-    st = State()
-    for ev in sorted(events, key=lambda e: (e.get("lamport", 0) if isinstance(e.get("lamport"), int) else 0,
-                                            str(e.get("id", "")))):
+    return extend(State(), sorted(events, key=event_key), trusted)
+
+
+def extend(st: State, events: list[dict], trusted=None) -> State:
+    """Apply these events, already in order and all after those `st` holds, to it (see coordgit.state)."""
+    for ev in events:
         known = trusted is True or (trusted is not None and id(ev) in trusted)
         err = None if known else E.check(ev)
         if not err:  # who acts now is active now: a vote counts its own author among the active owners

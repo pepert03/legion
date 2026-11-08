@@ -67,8 +67,14 @@ def broken(output: str) -> bool:
 
 # At most LEGION_CHECKS checks (acceptance commands, a result's check) run at once on one machine, among all its
 # agents; the others wait for a slot (0: no limit). The slots are locked files, freed when their process ends,
-# however it ends.
-CHECKS = 2
+# however it ends. They lived under each LEGION_HOME, so a machine with agents in five homes ran ten builds at once,
+# not two; they are the machine's now (LEGION_SLOTS moves them). Two were few for a machine of many cores: a
+# quarter of its cores, between 2 and 8.
+CHECKS = max(2, min(8, (os.cpu_count() or 8) // 4))
+
+
+def slots_folder() -> Path:
+    return Path(os.environ.get("LEGION_SLOTS") or Path(tempfile.gettempdir()) / "legion-check-slots")
 
 
 from .locks import lock_file, unlock_file  # noqa: E402,F401 (kept here for older callers)
@@ -77,10 +83,9 @@ from .locks import lock_file, unlock_file  # noqa: E402,F401 (kept here for olde
 @contextmanager
 def check_slot():
     """One of this machine's check slots, waited for if they're all taken (renewing the claim meanwhile)."""
-    from .identity import home
     limit, held = int(os.environ.get("LEGION_CHECKS", CHECKS)), None
     if limit > 0:
-        folder = home() / "check-slots"
+        folder = slots_folder()
         folder.mkdir(parents=True, exist_ok=True)
         said, last = False, time.time()
         while held is None:
@@ -116,13 +121,18 @@ def check_slot():
 CHECK_ENV = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
 
 
-def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True) -> tuple[int | None, str]:
-    """Run a check's command; with `slot`, in one of the machine's check slots (see LEGION_CHECKS)."""
+def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True, trace: Path | None = None) -> tuple[int | None, str]:
+    """Run a check's command; with `slot`, in one of the machine's check slots (see LEGION_CHECKS); with `trace`,
+    under strace, which writes the files it touched there (see traced_reads)."""
     if slot:
         with check_slot():
-            return run_cmd(cmd, cwd, timeout, slot=False)
+            return run_cmd(cmd, cwd, timeout, slot=False, trace=trace)
     # Tasks say `python ...`, but a machine may only have python3, or a venv: use the Python running legion.
     cmd = PYTHON.sub(lambda _: f'"{sys.executable}"', portable(cmd.strip()), count=1)
+    if trace is not None:
+        import shlex
+        cmd = (f"strace -f -qq -y -s 4096 -e trace=%file -o {shlex.quote(str(trace))} "
+               f"sh -c {shlex.quote(cmd)}")
     p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          encoding="utf-8", errors="replace", env=CHECK_ENV)
     deadline = time.time() + timeout
@@ -145,8 +155,8 @@ def run_cmd(cmd: str, cwd, timeout: int, slot: bool = True) -> tuple[int | None,
                     pass
 
 
-def measure(cmd: str, cwd, timeout: int) -> tuple[float | None, str]:
-    code, out = run_cmd(cmd, cwd, timeout)
+def measure(cmd: str, cwd, timeout: int, trace: Path | None = None) -> tuple[float | None, str]:
+    code, out = run_cmd(cmd, cwd, timeout, trace=trace)
     nums = NUM.findall(out) if code == 0 else []
     return (float(nums[-1]) if nums else None), out
 
@@ -315,9 +325,13 @@ FIXED_ENV = dict(os.environ, GIT_AUTHOR_NAME="legion", GIT_AUTHOR_EMAIL="legion@
                  GIT_AUTHOR_DATE="2000-01-01T00:00:00Z", GIT_COMMITTER_NAME="legion",
                  GIT_COMMITTER_EMAIL="legion@legion.local", GIT_COMMITTER_DATE="2000-01-01T00:00:00Z")
 TIMED_OUT: dict[str, int] = {}  # patch -> checks of it that ran out of time, in this process
-MISSING_AFTER = 3600  # seconds a patch's commit may take to arrive before it's rejected as missing: at 600 a slow
-# network (minutes between machines, hours for a node only the public seeds reach) turned into rejections
-REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", "2"))  # patches checked at once
+# A patch's commit that hasn't arrived: rejected as missing once MISSING_AFTER went by and its author's later
+# events arrived (its node reaches this one, the commit didn't come with them: it's lost), or after MISSING_MAX
+# whatever came. Rejected after ten minutes whatever came, a slow network (minutes between machines, hours for a
+# node only the public seeds reach) turned into rejections.
+MISSING_AFTER, MISSING_MAX = 600, 6 * 3600
+MISSING_HEARD = 300  # an event of its author's this much newer than the patch says its node reaches this one
+REVIEWERS = int(os.environ.get("LEGION_REVIEWERS", CHECKS))  # patches checked at once: as many as there are slots
 
 
 def common_dir(repo) -> Path:
@@ -388,7 +402,8 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
     prepared = prepare_merge(c, p.commit, p.branch, task.zone, f"legion: {task.key} ({p.name}, patch {p.id[:8]})",
                              onto=onto)
     missing = isinstance(prepared, tuple) and prepared[0] == "rejected" and prepared[1].get("code") == "missing"
-    if missing and time.time() - p.ts < MISSING_AFTER:
+    age, heard = time.time() - p.ts, st.last_seen.get(p.author, 0) > p.ts + MISSING_HEARD
+    if missing and (age < MISSING_AFTER or not heard and age < MISSING_MAX):
         return None  # not here yet (a slow network), or another integrator judged it and dropped its branch
     if prepared is None or isinstance(prepared, tuple) and prepared[0] == "rejected":
         return prepared
@@ -401,20 +416,25 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
     return Job(p, task, merged, head, bool(task.metric and st.best(task.id) is None), *trees)
 
 
-def check(repo, job: Job, name: str, timeout: int) -> tuple:
+def check(repo, job: Job, name: str, timeout: int, trace: Path | None = None) -> tuple:
     """Run the task's commands on the merged patch: (exit code, output, metric, metric output, baseline).
-    Only commands, no events: it runs in a reviewer thread."""
+    Only commands, no events: it runs in a reviewer thread. With `trace` (a folder), what they touch is traced
+    there (see traced_reads)."""
     scratch = []
+    traced = (lambda n: trace / f"{n}.trace") if trace is not None else (lambda n: None)  # noqa: E731
     try:
         baseline = None
         if job.baseline:
             baseline, _ = measure(job.task.metric, place(repo, job.head, name, scratch), timeout)
         wt = write_contract(place(repo, job.merged, name, scratch), job.task)
-        code, out = run_cmd(job.accept, wt, timeout)
+        if trace is not None:
+            (trace / "root").write_text(str(Path(wt).resolve()), encoding="utf-8")
+        code, out = run_cmd(job.accept, wt, timeout, trace=traced("accept"))
         if code == 0 and job.task.holdout:  # the check kept apart from the metric (S.Task.holdout)
-            code, out = run_cmd(job.task.holdout, wt, timeout)
+            code, out = run_cmd(job.task.holdout, wt, timeout, trace=traced("holdout"))
             out = HOLDOUT + out if code else out
-        value, mout = measure(job.task.metric, wt, timeout) if code == 0 and job.task.metric else (None, "")
+        value, mout = (measure(job.task.metric, wt, timeout, trace=traced("metric"))
+                       if code == 0 and job.task.metric else (None, ""))
         return code, out, value, mout, baseline
     finally:
         for tmp in scratch:
@@ -461,20 +481,38 @@ def _decide(c: Ctx, job: Job, result: tuple) -> tuple[str, dict]:
 
 
 def blobs(repo, tree: str, paths: list[str]) -> dict:
-    """The blob of each of these paths in a tree (None where it doesn't exist)."""
+    """The object each of these paths is in a tree: a file's blob, a folder's tree (a check that lists a folder
+    reads what's in it), None where it doesn't exist."""
+    paths = [p for p in paths if "\n" not in p]
+    if not paths:
+        return {}
+    out = subprocess.run(["git", "cat-file", "--batch-check"], cwd=repo, capture_output=True, encoding="utf-8",
+                         errors="replace", input="".join(f"{tree}:{p}\n" for p in paths)).stdout.splitlines()
     found = {}
-    for i in range(0, len(paths), 200):
-        out = git(repo, "ls-tree", "-r", "--full-tree", tree, "--", *paths[i:i + 200])
-        for line in out.splitlines():
-            meta, _, path = line.partition("\t")
-            found[path] = meta.split()[2]
+    for p, line in zip(paths, out):
+        words = line.split()
+        found[p] = words[0] if len(words) == 3 and words[1] in ("blob", "tree") else None
     return {p: found.get(p) for p in paths}
 
 
-def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
+MAX_READS = 5000  # files a verification may list (S.State: reads)
+
+
+def reads_of(c: Ctx, job: "Job", folder: Path, traced: Path | None = None) -> dict | list:
     """What the task's check reads, as the blob of each file in the merged tree: the project's `reads` command
-    says which files. ["*"] (all of them) without one, or if it can't tell."""
+    says which files, or else what the check was traced touching (`traced`, see traced_reads). ["*"] (all of
+    them) without either, or if it can't tell."""
     cmd = c.st.policy.get("reads")
+    if not cmd and traced is not None:
+        paths = traced_reads(traced)
+        if paths is None:
+            return ["*"]
+        tree = blobs(c.repo, job.tree, sorted(paths | {x.rpartition("/")[0] for x in paths if "/" in x}))
+        # What a check touched that main can't change is no use: build outputs, caches, the contract. Kept: what
+        # the tree has, and what it could have, a file probed in one of its folders (an import's candidates).
+        kept = {x: tree.get(x) for x in paths
+                if tree.get(x) or "/" not in x or tree.get(x.rpartition("/")[0])}
+        return kept if 0 < len(kept) <= MAX_READS else ["*"]
     if not cmd:
         return ["*"]
     code, out = run_cmd(f'{cmd} "{job.accept}"', write_contract(folder, job.task), 300, slot=False)
@@ -482,6 +520,78 @@ def reads_of(c: Ctx, job: "Job", folder: Path) -> dict | list:
     if code != 0 or not paths or "*" in paths:
         return ["*"]
     return blobs(c.repo, job.tree, paths)
+
+
+# What a check reads, traced. With no `reads` command in the policy, a verification held only for the very tree it
+# checked: every time main moved, whatever it moved, every verification in the queue lapsed and was built again
+# (with N patches waiting, N times the quorum of builds for each one that went in). Where strace works (Linux, the
+# agents' sandboxes among them), a verifier runs the check under it and lists the files of the tree it touched:
+# opened, probed, listed, run. The verification then holds on any tree where those are the same.
+_TRACE: bool | None = None
+TRACED = re.compile(r'^\d+\s+(\w+)\((.*)$')
+QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"(\.\.\.)?')
+NO_PATH = {"getcwd"}
+
+
+def can_trace() -> bool:
+    """strace runs here and may trace (a container may forbid it). LEGION_TRACE_READS=0 turns it off."""
+    global _TRACE
+    if _TRACE is None:
+        _TRACE = False
+        if (sys.platform.startswith("linux") and shutil.which("strace")
+                and os.environ.get("LEGION_TRACE_READS", "1").lower() not in ("0", "off", "no")):
+            try:
+                _TRACE = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", os.devnull, "true"],
+                                        capture_output=True, timeout=30).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return _TRACE
+
+
+def traced_reads(folder: Path) -> set[str] | None:
+    """The paths inside the checked folder that the traced commands touched, relative to it; None if a trace
+    can't say (a path relative to a folder it can't place, a string cut short, a command that changed folder)."""
+    import codecs
+    import posixpath
+    try:
+        root = (folder / "root").read_text(encoding="utf-8").strip().rstrip("/")
+    except OSError:
+        return None
+    found, moved = set(), False
+    for trace in sorted(folder.glob("*.trace")):
+        for line in trace.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
+            m = TRACED.match(line)
+            if not m or m.group(1) in NO_PATH:
+                continue
+            call, args = m.groups()
+            if call in ("chdir", "fchdir") and "= 0" in args:
+                moved = True  # where a relative path then points depends on which process did it
+            q = QUOTED.search(args)
+            if not q:
+                continue
+            if q.group(2):  # cut short: the whole path isn't there
+                return None
+            path = codecs.escape_decode(q.group(1).encode("utf-8", "surrogateescape"))[0].decode(
+                "utf-8", "surrogateescape")
+            if not path:
+                continue
+            if not path.startswith("/"):
+                before = args[:q.start()].rstrip(", ")
+                # The folder it's relative to, as -y shows it: a descriptor's (3</w/src>), or the process's own
+                # (AT_FDCWD</w>, in newer strace), which holds after a chdir too.
+                fd = re.match(r"^(?:\d+|AT_FDCWD)<(.*)>$", before)
+                if fd:
+                    path = fd.group(1).rstrip("/") + "/" + path
+                elif before in ("", "AT_FDCWD") and not moved:
+                    path = root + "/" + path
+                else:
+                    return None
+            path = posixpath.normpath(path)
+            if path.startswith(root + "/"):
+                rel = path[len(root) + 1:]
+                if not rel.startswith(".git/") and rel != ".git":
+                    found.add(rel)
+    return found
 
 
 def matches(repo, v: dict, tree: str) -> bool:
@@ -498,8 +608,11 @@ def trusted_verifiers(st: S.State, now: float) -> set[str]:
     if st.policy["mode"] == "open":
         return {e["author"] for e in st.events if st.trusted(e["author"])}
     by_agent, _ = trust.compute(st, now)
+    # And whom the state trusts (accepted work, or verifications proved right, and no false one): at a project's
+    # start nobody had the evidence and score, and the integrator built every patch itself.
     return set(st.integrators) | {a for a, t in by_agent.items()
-                                  if t.evidence >= 2 and t.score >= st.policy["verifier_trust"]}
+                                  if t.evidence >= 2 and t.score >= st.policy["verifier_trust"]} \
+        | {a for a in st.last_seen if st.trusted(a)}
 
 
 def quorum(c: Ctx, job: Job, now: float, outcome: str = "pass") -> list[dict] | None:
@@ -539,13 +652,13 @@ def review(c: Ctx, p: S.Patch, timeout: int) -> tuple[str, dict] | None:
     return decide(c, job, check(c.repo, job, "0", timeout))
 
 
-def announce_checks(c: Ctx, jobs: list[Job]) -> None:
+def announce_checks(c: Ctx, jobs: list[Job], timeout: float = 0) -> None:
     """Say which patches are being checked, and by whom, before the checks start (patch.checking): the viewer
     puts the checker on the task's node meanwhile, and the task's history records it. Telling is not worth
     holding a check back for, so a failure here is ignored."""
     try:
         for job in jobs:
-            c.emit("patch.checking", task=job.task.id, patch=job.patch.id)
+            c.emit("patch.checking", task=job.task.id, patch=job.patch.id, timeout=int(timeout or CHECK_TIMEOUT))
         if jobs:
             c.sync()
     except (Fail, coordgit.GitError):
@@ -557,7 +670,7 @@ def check_all(c: Ctx, jobs: list[Job], timeout: int, ready: dict | None = None) 
     raised gives back its exception. `ready` holds the results already known (from verifications)."""
     ready = ready or {}
 
-    announce_checks(c, [j for j in jobs if j.patch.id not in ready])
+    announce_checks(c, [j for j in jobs if j.patch.id not in ready], timeout)
 
     def one(i, job):
         if job.patch.id in ready:
@@ -843,6 +956,16 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
 
 
 CHECKING_SECONDS = 1800  # a check announced longer ago than this, with no result, is taken as abandoned
+CHECK_TIMEOUT = 600  # what a check announces it may take (the check's own limit, see `timeout`)
+
+
+def abandoned_after(ev: dict) -> float:
+    """How long a check announced by this event holds the others off: its limit twice (it's tried again once) and
+    five minutes, at most CHECKING_SECONDS. A verifier cut off by its tool held a patch half an hour."""
+    limit = ev.get("timeout")
+    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or limit <= 0:
+        return CHECKING_SECONDS
+    return min(CHECKING_SECONDS, 2 * limit + 300)
 WAITED = 1800  # a patch waiting this long for checks is checked before anyone takes new work
 # Checked enough this long ago and still not accepted: its acceptance lost a race on main (an event ordered before
 # it moved main first), or whoever checked it stopped before finalizing. Whoever comes next accepts it.
@@ -900,7 +1023,7 @@ def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
         k = (ev.get("patch"), ev["author"])
         if k in seen:
             started.pop(k, None)
-        elif now - ev["ts"] < CHECKING_SECONDS:
+        elif now - ev["ts"] < abandoned_after(ev):
             started[k] = trust.owner_of(ev["name"])
         seen.add(k)
     for pid, vs in st.verifications.items():
@@ -915,8 +1038,17 @@ def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
 
 def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
     """Check the job and sign the verdict it leads to, with what the check read."""
-    announce_checks(c, [job])
-    result = check(c.repo, job, "verify", timeout)
+    announce_checks(c, [job], timeout)
+    traced = Path(tempfile.mkdtemp(prefix="legion-trace-")) if not c.st.policy.get("reads") and can_trace() else None
+    try:
+        return _sign(c, job, timeout, traced)
+    finally:
+        if traced is not None:
+            shutil.rmtree(traced, ignore_errors=True)
+
+
+def _sign(c: Ctx, job: Job, timeout: int, traced: Path | None) -> tuple[Job, str]:
+    result = check(c.repo, job, "verify", timeout, trace=traced)
     if result[0] is None:  # out of time: that says nothing about the patch, so nothing is signed
         return job, "timed out"
     if result[0] != 0 and broken(result[1]):  # a crash, a missing tool: nothing to sign either
@@ -930,7 +1062,7 @@ def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
         return job, "done"  # another patch closed the task meanwhile: nothing to say about this one
     scratch = []
     try:
-        reads = reads_of(c, job, place(c.repo, job.merged, "verify", scratch))
+        reads = reads_of(c, job, place(c.repo, job.merged, "verify", scratch), traced)
     finally:
         for tmp in scratch:
             remove_tree(tmp)

@@ -97,6 +97,7 @@ def test_the_short_ticket_is_read_from_dumbpipes_output(tmp_path):
 def node(tmp_path, monkeypatch):
     """A clone of a project on Radicle whose node and dumbpipe are fakes that record what was asked of them."""
     monkeypatch.setenv("LEGION_HOME", str(tmp_path / "legion-home"))
+    monkeypatch.delenv("LEGION_LAN", raising=False)  # a fake node: where auto has it listen is what's tested
     home = tmp_path / "radhome"
     (home / "node").mkdir(parents=True)
     (home / "config.json").write_text(json.dumps({"node": {"listen": [], "connect": []}, "preferredSeeds": []}))
@@ -527,7 +528,7 @@ def test_auto_connects_to_the_most_active_announced_nodes_first(node):
     repo = node["repo"]
     now = time.time()
     nodes = []
-    for i in range(10):
+    for i in range(tunnel.PEERS + 2):
         ident = Identity.generate(f"a{i}")
         nid = f"z6Mk{i:02d}" + "x" * 42
         coordgit.append(node["repo"], ident, peer_ev(ident, 2 + i, nid=nid, ticket=None,
@@ -643,8 +644,9 @@ def on_windows(monkeypatch):
     monkeypatch.setattr(radicle, "native", lambda repo=None: True)
 
 
-def test_on_windows_auto_listens_on_this_machine_only_unless_told(node, monkeypatch):
-    """A program listening on the network makes Windows ask the person; one who said no was asked again by a test."""
+def test_on_windows_auto_listens_on_the_network_too_unless_told_not_to(node, monkeypatch):
+    """There it listened on this machine only, since Windows asks the person once a program listens on the
+    network: nearly every node there was a client that served nobody. Now the system asks, once."""
     repo, home, rec = node["repo"], node["home"], node["rec"]
     on_windows(monkeypatch)
     settled(home)
@@ -653,6 +655,7 @@ def test_on_windows_auto_listens_on_this_machine_only_unless_told(node, monkeypa
     other = Identity.generate("other")
     coordgit.append(repo, other, peer_ev(other, 2, lan=[LAN_PEER]))
     rec["answer"].add(LAN_PEER["addr"])
+    git(repo, "config", "legion.lan", "false")
     tunnel.keep(repo, strict=True)
     assert config(home)["node"]["listen"] == ["127.0.0.1:8776"]  # for its tunnel only
     ev = coordgit.state(repo).tunnels[ME]
@@ -661,11 +664,13 @@ def test_on_windows_auto_listens_on_this_machine_only_unless_told(node, monkeypa
     assert rec["connects"] == [f"{PEER}@192.168.1.20:8776"]  # going out is no listening: it still does
     assert any("listens on this machine only" in line for line in tunnel.status(repo))
 
-    git(repo, "config", "legion.lan", "true")
+    git(repo, "config", "--unset", "legion.lan")
     clock[0] += tunnel.ANNOUNCE_EVERY
     tunnel.keep(repo)
     assert config(home)["node"]["listen"] == ["0.0.0.0:8776"]
     assert coordgit.state(repo).tunnels[ME]["lan"] == [{"addr": "192.168.1.10:8776", "net": "192.168.1.0/24"}]
+    monkeypatch.setenv("LEGION_LAN", "0")  # what the tests of everything else say: their nodes ask nobody
+    assert not tunnel.lan_allowed(repo)
 
 
 def test_connected_to_a_node_others_reach_directly_auto_needs_no_tunnels(node, monkeypatch):

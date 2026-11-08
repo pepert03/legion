@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -317,6 +318,10 @@ def cmd_init(args):
     print(f"Project {name} started. Integrator: {ident.name} ({ident.short}).")
     print("Review AGENTS.md and CLAUDE.md, commit, and publish that main with `python -m legion main publish`.")
     print("Then create tasks with `task add` or `task import`.")
+    if coordgit.is_radicle(repo_root()):
+        print("Over Radicle, the nodes reach each other through the public seeds unless the project has a node "
+              "that stays on: on a machine that's always on and reachable, `legion-net radicle seed HOST:PORT` "
+              "makes its node the project's seed, and every node fetches from it first.")
 
 
 AGENT_PROMPT = "Read AGENTS.md and follow its protocol until it says you are done."
@@ -589,20 +594,28 @@ def last_claim(repo, since: float) -> int | None:
         return None
 
 
+CLAIM_TRIES = 3  # claims in one command: one lost to another agent is followed at once by another free task
+
+
 def cmd_claim(args):
     c = Ctx()
-    code = claim(c, args)
+    for tries in range(CLAIM_TRIES, 0, -1):
+        # A race lost (exit 3) sent the agent round again: a whole turn of its own, its context and four syncs,
+        # for another free task it could have been handed here.
+        code = claim(c, args, last=tries == 1 or bool(args.task))
+        if code != 3 or args.task:
+            break
     note_claim(c.repo, code)
     return code
 
 
-def claim(c: Ctx, args) -> int:
+def claim(c: Ctx, args, last: bool = True) -> int:
     now = time.time()
     # A newcomer gets work at once, and says hello in the hub as its first step on it: sent to the hub before it
     # had anything (exit 6), an agent spent minutes and four syncs reading before its first claim. With nothing
     # open, the hub is where it starts.
     greet = c.st.newcomer(c.me)
-    join = False
+    join, back = False, None
     if args.task:
         t = c.task(args.task)
         if t.mode != "exclusive":
@@ -663,26 +676,24 @@ def claim(c: Ctx, args) -> int:
                     return 4
                 waiting = [t for t in c.st.tasks.values()
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled and t.kind != "result"]
-                cool = [c.st.tasks[x].key for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"]
+                cool = sorted((x for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"),
+                              key=lambda x: c.st.tasks[x].key)
                 if cool:
-                    out(args, {"won": False, "task": None, "done": False, "cooling": cool},
-                        verify_first(c) + "What's open for you is what you let go of in the last hour "
-                        f"({', '.join(cool)}): don't hit the same wall again. Go to the hub (`python -m legion hub`): say what stopped you, "
-                        "look for that step in the literature, plan a new route with the others. Verify patches "
-                        "(`python -m legion verify`), and publish what you proved as a result. Then claim again; "
-                        f"`claim <task-id>` takes a task back sooner if you have a new idea for it.")
-                    return 5
-                if all(c.st.in_review(t.id) is not None for t in waiting):
+                    # Nothing else is open: rather than wait (an hour, and agents sat idle with the task open),
+                    # it takes back what it let go of, by another route.
+                    t, back = c.st.tasks[cool[0]], cool[0]
+                elif all(c.st.in_review(t.id) is not None for t in waiting):
                     out(args, {"won": False, "task": None, "done": False, "in_review": True},
                         verify_first(c) + "Every exclusive task left is written and in review: there's nothing "
                         "more to write until a verdict sends one back. Verify others' patches (`python -m legion "
                         "verify`), or improve the competitive tasks.")
                     return 5
-                out(args, {"won": False, "task": None, "done": False},
-                    verify_first(c) + f"Nothing is open right now, but these are unfinished: "
-                    f"{', '.join(t.key for t in waiting)} (claimed, in review or blocked). Run `python -m legion "
-                    "claim --wait` again.")
-                return 5
+                else:
+                    out(args, {"won": False, "task": None, "done": False},
+                        verify_first(c) + f"Nothing is open right now, but these are unfinished: "
+                        f"{', '.join(t.key for t in waiting)} (claimed, in review or blocked). Run `python -m legion "
+                        "claim --wait` again.")
+                    return 5
             else:
                 # Deterministic spread: each agent prefers a different order, so they collide less; tasks this
                 # agent already tried since they last advanced go last.
@@ -693,17 +704,19 @@ def claim(c: Ctx, args) -> int:
         c.emit("task.claimed", task=t.id, ttl=args.ttl, **({"join": True} if join else {}),
                **({"view": "fresh" if clean else "full"} if c.st.stalled(t.id) else {}))
         c.sync()
-        time.sleep(float(os.environ.get("LEGION_CLAIM_SETTLE", "1.0")))
-        c.sync()
+        # One sync: a second after a pause only put the race off (claims made in the same seconds still crossed),
+        # and cost a whole sync more on every claim. A claim that lost finds out on its next command.
+        settle = float(os.environ.get("LEGION_CLAIM_SETTLE", "0"))
+        if settle:
+            time.sleep(settle)
+            c.sync()
     if c.holder_is_me(t.id):
         d = task_dict(c.st, t, time.time())
         others = [n for n in d["working"] if n != c.ident.name]
         if others:
-            how = (f"You join {', '.join(others)} on this task: it's the hardest one under way. Try your own "
-                   "route (read their reports first with `python -m legion log`); the first patch accepted wins. "
-                   f"Say which route you take with `python -m legion note {t.id} \"...\"`.\n")
+            how = JOINED.format(who=", ".join(others), tid=t.id)
             if c.st.notes.get(t.id) and not clean:
-                how += "Their latest notes:\n" + "\n".join(notes_text(c.st, t.id, 4, 300)) + "\n"
+                how += "Their latest notes, whole:\n" + "\n".join(notes_text(c.st, t.id, JOIN_NOTES)) + "\n"
         elif d["status"] == "blocked":
             how = (f"This task is blocked by {', '.join(d['deps'])}: prepare it. Split it with `sketch` into "
                    "subtasks that don't need them (others can take those right away), or write the patch: it's "
@@ -714,8 +727,8 @@ def claim(c: Ctx, args) -> int:
             how += failed_routes(c.st, t)
         elif not others and c.st.notes.get(t.id):  # the conversation of those who were on it before you
             how += ("The agents who were on it before left notes: read them all (`python -m legion note "
-                    f"{t.id}`), build on them, and answer the ones you can (`--reply <id>`). The latest:\n"
-                    + "\n".join(notes_text(c.st, t.id, 4, 300)) + "\n")
+                    f"{t.id}`), build on them, and answer the ones you can (`--reply <id>`). The latest, whole:\n"
+                    + "\n".join(notes_text(c.st, t.id, JOIN_NOTES)) + "\n")
         if [w for w in c.st.saves(t.id) if w["author"] != c.me]:
             how += ("Work in progress on this task is saved: don't start from zero. Build on the one that's "
                     f"furthest along with `start --from <id>` (all of them, whole: `python -m legion note {t.id}`):\n"
@@ -758,6 +771,16 @@ def claim(c: Ctx, args) -> int:
             how = (f"Round {n} on this task: after many failures, the notes, reports "
                    "and ideas of earlier rounds are set aside on purpose (`log` keeps them). Start from what's proved "
                    "in main, the saved work and the state of the art, and take a route of your own.\n" + how)
+        if not others and d["status"] != "blocked":
+            how += split_text(c.st, t, c.me, time.time())
+        if back:
+            gone = max((cl.released_ts for cl in c.st.claims.get(t.id, ()) if cl.author == c.me and cl.released),
+                       default=0)
+            how = (f"Nothing else is open, so this is the task you let go of"
+                   + (f" {max(1, (time.time() - gone) / 60):.0f} min ago" if gone else " lately")
+                   + ": don't take the route that stopped you. Read what you and the others wrote (`python -m "
+                   f"legion note {t.id}`, `python -m legion log`), and take an idea nobody tried (`python -m legion "
+                   "idea`), another approach, or split it (`python -m legion help sketch`).\n" + how)
         how = verify_first(c) + plateau_text(c.st, c.me) + how
         if greet:
             how = NEW_HERE + how
@@ -766,7 +789,9 @@ def claim(c: Ctx, args) -> int:
             f"`python -m legion heartbeat {t.id}`.")
         return 0
     h = c.st.holder(t.id, time.time())
-    c.emit("task.released", task=t.id)
+    c.emit("task.released", task=t.id, lost=True)  # nothing was tried on it: it doesn't cool (S.COOLDOWN)
+    if not last:
+        return 3  # the next claim of this command publishes the release with its own
     c.sync()
     out(args, {"won": False, "task": task_dict(c.st, t, time.time())},
         f"{h.name if h else 'Another agent'} claimed {t.key} first. Try again with `claim`.")
@@ -863,8 +888,12 @@ def verify_first(c: Ctx) -> str:
 
 
 # A claim lasts this long without a sign of life: an agent that stops (a session ends, a machine sleeps) frees its
-# task within the hour instead of holding it for two. Working on the task renews it (keep_claim).
-CLAIM_TTL = 2700
+# task within half an hour instead of holding it for 45 minutes. Working on the task renews it (keep_claim), and so
+# does `legion run` while the agent's process runs (RUN_BEAT).
+CLAIM_TTL = 1800
+RUN_BEAT = 600  # seconds between the renewals `legion run` makes of its agent's claims while the agent runs
+# The integration lease: an integrator that stops without releasing it held it five minutes, and nobody integrated.
+LEASE = int(os.environ.get("LEGION_LEASE", "120"))
 
 
 def keep_claim(c: Ctx, t: S.Task) -> None:
@@ -895,6 +924,12 @@ def cmd_heartbeat(args):
     until = f" until {time.strftime('%H:%M', time.localtime(cl.last_beat + cl.ttl))}" if cl else ""
     print(f"Claim on {t.key} renewed{until}: renew it again within {(cl.ttl if cl else CLAIM_TTL) // 60} "
           "minutes, or do something on the task (start, note, save, report, submit).")
+    now = time.time()
+    joined = [x.name for x in c.st.claimants(t.id, now) if x.author != c.me]
+    if joined:  # nothing told a holder that others had joined it, and each went its own way on the whole task
+        print(f"Working on it with you: {', '.join(joined)}. Agree in notes who takes which part (`python -m legion "
+              f"note {t.id}`), and save often so they build on what you have.")
+    print(split_text(c.st, t, c.me, now), end="")
 
 
 def cmd_start(args):
@@ -1286,6 +1321,7 @@ def cmd_propose(args):
         if parent:
             payload["parent"] = parent.id
         args.key = key
+        split = parent is not None and c.st.trusted(c.me) and c.st.took_part(parent.id, c.me, time.time())
         if args.contract:
             payload["contract"] = {}
             for f in args.contract:
@@ -1302,6 +1338,16 @@ def cmd_propose(args):
                 raise Fail("a competitive task needs --metric")
             payload.update(metric=args.metric, goal=args.goal)
         kind = "task.created"
+        if split:  # its own worker splitting it, trusted: no vote, no review (S.State._split)
+            c.emit("task.created", **payload, split=True)
+            c.sync()
+            made = c.st.find_task(key)
+            if made is None:
+                raise Fail(f"the subtask wasn't created: {c.st.ignored[-1][1] if c.st.ignored else 'unknown'}")
+            print(f"Created {key}, a subtask of {parent.key} (id {made.id}): open now, for anyone to claim. You work "
+                  f"on {parent.key} and are trusted, so it needs no vote; {parent.key} is still done only when its "
+                  "own acceptance command passes.")
+            return 0
     elif args.what == "policy":
         payload = {k: v for k, v in (("quorum", args.quorum), ("audit", args.audit), ("reads", args.reads),
                                      ("window", int(args.window * 3600) if args.window is not None else None),
@@ -1452,6 +1498,29 @@ HUB_FIRST = (
     "away: you get work at once. Review the literature as you go: search for papers, surveys, books, code and "
     "known results, and add each one that helps with `python -m legion lit add <url> --title \"...\" --why \"what "
     "it gives us\"` (`--task <task-id>` if it's for one task).")
+JOINED = (
+    "You join {who} on this task: split the work with them, don't race them for the whole of it. Read their notes "
+    "and reports first (`python -m legion note {tid}`, `python -m legion log`): they say who is on which part. Take "
+    "a part nobody has (a lemma, a case, a module, a check), say which in a note (`python -m legion note {tid} "
+    "\"I take ...\"`), and save what you have often (`python -m legion save`), so the others build on it. If the "
+    "task splits into parts that stand on their own, make them subtasks, each claimed and reviewed on its own "
+    "(`python -m legion help sketch`).\n")
+JOIN_NOTES = 6  # notes claim shows whole: 300 characters of 4 cut off who was on which part
+
+
+def split_text(st: S.State, t: S.Task, me: str, now: float) -> str:
+    """When there are more agents than tasks to work on: ask whoever holds one to split it, so the others get parts
+    of it instead of joining it to race. Empty otherwise, or when it was split already."""
+    agents, tasks = st.crowded(now)
+    if agents <= tasks or any(x.parent == t.id for x in st.tasks.values()):
+        return ""
+    how = (f"`python -m legion propose task --parent {t.id} --key {t.key}/<part> --title \"...\" --zone <files> "
+           "--accept \"...\"` makes each part a task at once (you're trusted, and you work on it)"
+           if st.trusted(me) and st.took_part(t.id, me, now) else "`python -m legion sketch` proposes the split (`python -m legion help sketch`)")
+    return (f"{agents} agents are at work and only {tasks} tasks are open or held: as soon as you see this task's "
+            f"parts, split it so the others take them instead of waiting or racing you for the whole. {how}.\n")
+
+
 NEW_HERE = (
     "You're new here: say hello in the hub's chat as you start, in one message: what you know about the problem "
     "and which route you'll take on this task (`python -m legion chat \"...\"`). The hub (`python -m legion hub`) "
@@ -2574,6 +2643,42 @@ def run_agent(argv: list[str]) -> int:
     return subprocess.run(argv, env=dict(os.environ, LEGION_RUN="1")).returncode
 
 
+def renew_while(stop, own: list[int]) -> None:
+    """While the agent's process runs, renew its claims every RUN_BEAT seconds: alive, it keeps its tasks however
+    long it goes without a legion command of its own (a long build, a long proof); stopped, they lapse within
+    CLAIM_TTL. Each round's trouble waits for the next. `own` counts the renewals: they're not the agent's doing."""
+    while not stop.wait(RUN_BEAT):
+        try:
+            c = Ctx(sync=False)
+            held = c.st.held_by(c.me, time.time())
+            for t in held:
+                c.emit("task.heartbeat", task=t.id)
+                own[0] += 1
+            if held:
+                c.sync()
+        except Exception as e:  # noqa: BLE001 (the agent goes on either way)
+            print(f"legion run: couldn't renew the agent's claims ({str(e).strip()[-200:]})", file=sys.stderr)
+
+
+def release_held(why: str) -> None:
+    """Let go of the tasks this agent holds, saying why: stopped for good, it would have held them CLAIM_TTL."""
+    try:
+        c = Ctx(sync=False)
+        held = c.st.held_by(c.me, time.time())
+        for t in held:
+            c.emit("task.released", task=t.id, notes=why)
+        if held:
+            c.sync()
+            print(f"legion run: released {', '.join(t.key for t in held)} ({why})", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"legion run: couldn't release the agent's tasks ({str(e).strip()[-200:]})", file=sys.stderr)
+
+
+def recorded_by(c: Ctx) -> int:
+    """How many events this agent has recorded: a run that recorded none did nothing (see cmd_run)."""
+    return sum(1 for ev in c.st.events if ev["author"] == c.me)
+
+
 def work_waiting(c: Ctx, now: float) -> bool:
     """Whether claim would hand this agent something now: a task free, one to join, prepare or compete on, or
     a question to settle."""
@@ -2588,14 +2693,40 @@ def finalize_here(c: Ctx) -> int:
     merges only, no build). Only `verify` and `integrate --loop` did it, and while every agent was busy on a task
     nobody ran them, and verified patches waited out of main. Now `legion run` does it too, between an agent's
     sessions and while it waits for work: as many places as agents, none of them central. What went in, or 0."""
-    if c.st.policy["mode"] != "open" or not c.st.trusted(c.me):
+    log = lambda m: print(f"legion run: {m}", flush=True)  # noqa: E731
+    if c.st.policy["mode"] != "open":
+        # With an integrator: one of them integrates, and when none holds the lease and something waits for one,
+        # an integrator's own `legion run` takes it for one pass. An integrate --loop in a terminal of its own was
+        # the only way, and with nobody running one, nothing went in.
+        if c.me not in c.st.integrators:
+            return 0
+        strict, c.strict = c.strict, True
+        try:
+            need_git_merge_tree()
+            c.sync()
+            waiting = integrator.queue_order(c.st) or any(k.verdict is None for k in c.st.sketches.values())
+            if not waiting or c.st.leader(time.time()) is not None:
+                return 0  # no lease taken for nothing: two events in everyone's log after each session
+            leading, _ = integrator.hold_lease(c, LEASE)
+            if not leading:
+                return 0
+            try:
+                return integrator.integrate_once(c, integrator.CHECK_TIMEOUT, log=log)
+            finally:
+                integrator.release_lease(c)
+        except (coordgit.GitError, Fail) as e:
+            log(f"couldn't integrate this time ({str(e).strip()[-200:]})")
+            return 0
+        finally:
+            c.strict = strict
+    if not c.st.trusted(c.me):
         return 0
     try:
         need_git_merge_tree()
         c.sync()
-        return integrator.finalize(c, lambda m: print(f"legion run: {m}", flush=True))
+        return integrator.finalize(c, log)
     except (coordgit.GitError, Fail) as e:
-        print(f"legion run: couldn't finalize this time ({str(e).strip()[-200:]})", flush=True)
+        log(f"couldn't finalize this time ({str(e).strip()[-200:]})")
         return 0
 
 
@@ -2629,16 +2760,27 @@ def cmd_run(args):
         if c.st.exclusive_done() and not c.st.competitive_for(c.me):
             print("legion run: every exclusive task is done and the competitive ones have had your attempts: done.")
             return 0
-        seen = c.st.last_seen.get(c.me)
+        before = recorded_by(c)
         print(f"legion run: {time.strftime('%H:%M:%S')} starting the agent (run {runs + 1})", flush=True)
         started = time.time()
+        stop, own = threading.Event(), [0]
+        renewer = threading.Thread(target=renew_while, args=(stop, own), daemon=True)
+        renewer.start()
         try:
             code = run_agent([exe, *cmd[1:]])
         except FileNotFoundError:
             raise Fail(f"couldn't run {cmd[0]}: is it installed, and on the PATH?", 2)
         except KeyboardInterrupt:
+            stop.set()
+            release_held("legion run was stopped")
             return 130
+        finally:
+            stop.set()
+        renewer.join(RUN_QUICK)
         runs, took = runs + 1, time.time() - started
+        # What the agent recorded itself, not legion run: its renewals of the agent's claims, and what finalize_here
+        # records next (an integrator's lease and verdicts), kept a run that did nothing from ever counting as one.
+        recorded = recorded_by(Ctx(sync=False)) - before > own[0]
         finalize_here(c)
         if args.max_runs and runs >= args.max_runs:
             return 0
@@ -2651,7 +2793,7 @@ def cmd_run(args):
             except KeyboardInterrupt:
                 return 130
             continue
-        empty = 0 if Ctx(sync=False).st.last_seen.get(c.me) != seen else empty + 1
+        empty = 0 if recorded else empty + 1
         if empty >= RUN_EMPTY:
             print(f"legion run: the agent ran {empty} times in a row without recording anything (no claim, report "
                   "or patch): it has nothing to do here, or it's stuck. Stopping; look at what it says, and start "
@@ -3094,9 +3236,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=float, default=0,
                    help="with --loop, stop after this many seconds (default 0: keep integrating until stopped)")
     s.add_argument("--cmd-timeout", type=int, default=600)
-    s.add_argument("--lease", type=int, default=int(os.environ.get("LEGION_LEASE", "300")),
+    s.add_argument("--lease", type=int, default=LEASE,
                    help="seconds the integration lease lasts without renewal, so how long a takeover can take; "
-                        "it's renewed at half of it (default 300, or LEGION_LEASE)")
+                        "it's renewed at half of it (default 120, or LEGION_LEASE)")
     s.add_argument("--reviewers", type=int, default=integrator.REVIEWERS,
                    help="patches checked at once, as a merge queue (default 2, or LEGION_REVIEWERS); each one "
                         "runs the task's acceptance command, so mind the memory a check needs")

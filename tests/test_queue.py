@@ -1,6 +1,7 @@
 """The integrator's merge queue and its persistent review folders, on a real repository."""
 
 import subprocess
+import json
 import time
 
 import pytest
@@ -444,7 +445,7 @@ def test_a_claim_is_short_and_working_on_the_task_renews_it(project):
     main(["claim", tid])
     claim = lambda: next(c for c in Ctx(sync=False).st.claims[tid] if c.name == "luis#1")  # noqa: E731
     first = claim()
-    assert first.ttl == CLAIM_TTL == 45 * 60
+    assert first.ttl == CLAIM_TTL == 30 * 60
     main(["note", tid, "trying the obvious route first"])
     assert claim().last_beat > first.last_beat
 
@@ -955,7 +956,7 @@ def test_run_stops_an_agent_that_runs_again_and_again_without_doing_anything(pro
     ran, run_agent = [], cli.run_agent
     monkeypatch.setattr(cli, "run_agent", lambda argv: ran.append(argv) or 0)
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    assert cli.main(["run", "--", "my-agent"]) == 3 and len(ran) == cli.RUN_EMPTY
+    assert cli.main(["run", "--max-runs", "10", "--", "my-agent"]) == 3 and len(ran) == cli.RUN_EMPTY
     assert "without recording anything" in capsys.readouterr().out
     envs = []
     monkeypatch.setattr(cli.subprocess, "run", lambda argv, env=None: envs.append(env) or subprocess.CompletedProcess(argv, 0))
@@ -1143,3 +1144,194 @@ def test_in_the_open_mode_run_finalizes_what_the_others_verified(project, monkey
     monkeypatch.setattr(cli, "run_agent", lambda argv: 0)
     assert cli.main(["run", "--max-runs", "1", "--", "my-agent"]) == 0
     assert verdicts(tids)["a"] == ["accepted"]
+
+
+def test_a_claim_lost_to_another_agent_takes_another_task_in_the_same_command(project, monkeypatch, capsys):
+    """A lost race (exit 3) sent the agent round again, a whole turn of its own, for another free task it could have
+    been handed at once. And what it let go of because someone claimed it first doesn't cool."""
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    real, lost = cli.Ctx.holder_is_me, []
+
+    def rigged(self, tid):  # the first task it claims goes to someone else
+        mine = [cl for cl in self.st.claims.get(tid, ()) if cl.author == self.me]
+        if not lost and mine:
+            lost.append(tid)
+            return False
+        return real(self, tid)
+    monkeypatch.setattr(cli.Ctx, "holder_is_me", rigged)
+    capsys.readouterr()
+    assert cli.main(["claim", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["won"] is True                               # one answer, the task it got
+    st = Ctx(sync=False).st
+    me = make_project.people["luis"].author
+    assert [cl.lost for cl in st.claims[lost[0]] if cl.author == me][0] is True
+    assert lost[0] not in st.cooling(me, time.time())
+
+
+def test_with_nothing_else_open_claim_hands_back_what_was_let_go_of(project, monkeypatch, capsys):
+    """An hour of cooldown kept agents idle with the task open and nothing else to do: claim hands it back, asking
+    for another route."""
+    from legion import cli
+    from legion.cli import main
+    repo, tids, patch = project
+    monkeypatch.setattr(cli, "research_work", lambda c, args, now: None)  # no research wanted either
+    patch("b", "ok\n")                                                   # b in review
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    main(["release", tids["a"], "--notes", "the counting isn't tight enough"])
+    capsys.readouterr()
+    assert main(["claim"]) == 0
+    shown = capsys.readouterr().out
+    assert "this is the task you let go of" in shown and "The task is yours" in shown
+
+
+def test_who_joins_a_task_splits_the_work_and_reads_the_notes_whole(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    patch("b", "ok\n")                                                   # b in review: nothing open but a
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    long_note = "I take the base case; " + "the induction step needs the counting lemma. " * 12
+    main(["note", tids["a"], long_note])
+    as_(repo, "marta")
+    capsys.readouterr()
+    assert main(["claim", tids["a"]]) == 0                             # held by luis: marta joins it
+    shown = capsys.readouterr().out
+    assert "split the work with them, don't race them" in shown and long_note.strip() in shown
+    as_(repo, "luis")
+    capsys.readouterr()
+    main(["heartbeat", tids["a"]])
+    assert "Working on it with you: marta#1" in capsys.readouterr().out
+
+
+def test_a_trusted_agent_on_a_task_splits_it_with_propose(project, capsys):
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    capsys.readouterr()
+    assert main(["propose", "task", "--parent", tids["a"], "--key", "base", "--title", "The base case",
+                 "--zone", "a.txt", "--accept", "python check.py a"]) == 0
+    assert "Created a/base, a subtask of a" in capsys.readouterr().out
+    st = Ctx(sync=False).st
+    sub = st.find_task("a/base")
+    assert sub.parent == tids["a"] and st.status(sub.id, time.time()) == "open"
+
+
+def test_run_keeps_its_agents_claims_while_it_runs_and_lets_them_go_when_stopped(project):
+    from legion import cli
+    repo, tids, patch = project
+    as_(repo, "luis")
+    cli.main(["claim", tids["a"]])
+
+    class Once:  # one round of renewals, then stop
+        n = 0
+
+        def wait(self, seconds):
+            self.n += 1
+            return self.n > 1
+    own = [0]
+    cli.renew_while(Once(), own)
+    st = Ctx(sync=False).st
+    me = make_project.people["luis"].author
+    assert any(e["type"] == "task.heartbeat" and e["author"] == me for e in st.events) and own == [1]
+    cli.release_held("legion run was stopped")
+    assert Ctx(sync=False).st.holder(tids["a"], time.time()) is None
+
+
+def test_what_run_records_itself_doesnt_make_an_idle_agents_runs_count(project, monkeypatch):
+    """An integrator's run took the lease after each session, whatever waited, and renews its agent's claims
+    during them: those events of its own reset the count of runs that recorded nothing, and an agent doing
+    nothing was started again for ever."""
+    from legion import cli
+    repo, tids, patch = project
+    patch("a", "ok\n")                    # something for luis, an integrator, to integrate between sessions
+    as_(repo, "luis")
+    cli.main(["claim", tids["b"]])        # and a task its run renews while the agent runs
+    nap, ran = time.sleep, []
+    monkeypatch.setattr(cli, "RUN_BEAT", 0.05)
+    monkeypatch.setattr(cli, "run_agent", lambda argv: ran.append(argv) or nap(0.5) or 0)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    assert cli.main(["run", "--max-runs", "6", "--", "my-agent"]) == 3 and len(ran) == cli.RUN_EMPTY
+    st, me = Ctx(sync=False).st, make_project.people["luis"].author
+    assert any(e["type"] == "task.heartbeat" and e["author"] == me and e["ts"] > st.claims[tids["b"]][0].ts
+               for e in st.events)
+    assert verdicts(tids)["a"] == ["accepted"]
+    lease = [e for e in st.events if e["type"] == "integrator.lease"]
+    assert len(lease) == 1                # once, when a patch waited: not after every session
+
+
+def test_a_check_announced_holds_the_others_off_for_its_own_limit_not_half_an_hour():
+    ev = {"timeout": 120}
+    assert integrator.abandoned_after(ev) == 540 and integrator.abandoned_after({}) == integrator.CHECKING_SECONDS
+    assert integrator.abandoned_after({"timeout": 5000}) == integrator.CHECKING_SECONDS
+
+
+def test_a_commit_that_hasnt_arrived_waits_while_nothing_newer_came_from_its_author(project, monkeypatch):
+    """Rejected after ten minutes whatever came, a slow network turned into rejections."""
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    c = as_(repo, "boss")
+    p = next(iter(c.st.patches.values()))
+    monkeypatch.setattr(integrator, "prepare_merge", lambda *a, **k: ("rejected", {"code": "missing", "reason": "x"}))
+    real = time.time
+    try:
+        integrator.time.time = lambda: p.ts + integrator.MISSING_AFTER + 60   # nothing newer from ana: it waits
+        assert integrator.plan(c, p) is None
+        integrator.time.time = lambda: p.ts + integrator.MISSING_MAX + 60     # but not for ever
+        assert integrator.plan(c, p)[0] == "rejected"
+        integrator.time.time = lambda: p.ts + integrator.MISSING_AFTER + 60
+        c.st.last_seen[p.author] = p.ts + integrator.MISSING_HEARD + 1        # ana's later events came: lost
+        assert integrator.plan(c, p)[0] == "rejected"
+    finally:
+        integrator.time.time = real
+
+
+def test_a_traced_check_lists_the_files_of_the_tree_it_touched(tmp_path):
+    folder = tmp_path / "trace"
+    folder.mkdir()
+    (folder / "root").write_text("/w/review")
+    (folder / "accept.trace").write_text("\n".join([
+        '101 execve("/usr/bin/python3", ["python3", "check.py"], 0x7ffd /* 30 vars */) = 0',
+        '101 openat(AT_FDCWD, "check.py", O_RDONLY|O_CLOEXEC) = 3</w/review/check.py>',
+        '101 newfstatat(AT_FDCWD, "/w/review/src/mod.py", 0x7ffd, 0) = 0',
+        '101 openat(AT_FDCWD, "/w/review/src/new.py", O_RDONLY) = -1 ENOENT (No such file or directory)',
+        '101 openat(3</w/review/src>, "util.py", O_RDONLY) = 4</w/review/src/util.py>',
+        '101 openat(AT_FDCWD, "/w/review/.git/HEAD", O_RDONLY) = 5',
+        '101 openat(AT_FDCWD, "/usr/lib/python3.11/os.py", O_RDONLY) = 6',
+        r'102 openat(AT_FDCWD, "/w/review/src/x\303\251.py", O_RDONLY <unfinished ...>',  # strace escapes UTF-8
+        '102 <... openat resumed>) = 7',
+        '+++ exited with 0 +++']), encoding="utf-8")
+    assert integrator.traced_reads(folder) == {"check.py", "src/mod.py", "src/new.py", "src/util.py", "src/xé.py"}
+    (folder / "metric.trace").write_text('103 openat(AT_FDCWD</w/review/data>, "x.csv", O_RDONLY) = 3\n')
+    assert "data/x.csv" in integrator.traced_reads(folder)                      # newer strace says where it is
+    (folder / "metric.trace").write_text('103 fchdir(3</tmp>) = 0\n103 openat(AT_FDCWD, "data.txt", O_RDONLY) = 3\n')
+    assert integrator.traced_reads(folder) is None                              # after a chdir: can't tell
+    (folder / "metric.trace").write_text('103 openat(AT_FDCWD, "/w/review/a-very-long-na"..., O_RDONLY) = 3\n')
+    assert integrator.traced_reads(folder) is None                              # cut short
+
+
+def test_blobs_gives_files_and_folders_and_none_for_what_isnt_there(tmp_path):
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("x\n")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "i")
+    tree = git(repo, "rev-parse", "HEAD^{tree}")
+    got = integrator.blobs(repo, tree, ["src/a.py", "src", "src/b.py"])
+    assert got["src/a.py"] == git(repo, "rev-parse", "HEAD:src/a.py") and got["src"] == git(repo, "rev-parse", "HEAD:src")
+    assert got["src/b.py"] is None
+
+
+def test_an_integrators_run_integrates_when_nobody_holds_the_lease(project, monkeypatch):
+    """With an integrator, nothing went in unless someone kept integrate --loop running in a terminal."""
+    from legion import cli
+    repo, tids, patch = project
+    patch("a", "ok\n")
+    c = as_(repo, "boss")
+    assert cli.finalize_here(c) == 1
+    assert verdicts(tids)["a"] == ["accepted"] and Ctx(sync=False).st.leader(time.time()) is None

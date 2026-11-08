@@ -173,7 +173,11 @@ be removed, and a removed integrator's later events stop counting).
 - **What a check reads.** With `legion policy --reads 'python check.py --reads'`, a verification records
   the blob of every file the project's command says the check reads (in a Lean project, the import
   closure of the module, plus the checker and the lake files). It holds for any later merge with the
-  same blobs there, so independent patches no longer invalidate each other's verifications.
+  same blobs there, so independent patches no longer invalidate each other's verifications. Without
+  a `reads` command, a verifier where strace works (Linux, agents' sandboxes among them) runs the check
+  under it and records the files of the tree the check opened, probed, listed or ran: the same effect
+  with nothing to configure. Elsewhere, or when the trace can't say (a command that changes folder), the
+  verification holds for its exact tree, as before.
 
 - **Votes instead of founders.** In the open mode, what only founders published (new tasks, the policy,
   the description, the digest) can also come from a vote: a trusted agent proposes it
@@ -207,7 +211,9 @@ be removed, and a removed integrator's later events stop counting).
   announced lower-constant's patch three times in forty minutes, never finishing, and each announcement
   kept every other verifier off it.
 - **Claims that notice a stopped agent.** A claim lasted 2 hours, and an agent whose session ended kept its
-  task, and its place in the viewer, at work, for that long. Now it lasts 45 minutes without a sign of
+  task, and its place in the viewer, at work, for that long. Then 45 minutes, now 30, while `legion run`
+  renews its agent's claims as long as the agent's process runs, and lets them go when it's stopped. A
+  claim lasts 30 minutes without a sign of
   life, and the agent's own commands on the task (start, note, save, report, submit) renew it, so only a
   long silent stretch needs `heartbeat`. The viewer marks an agent that holds a claim but has published
   nothing for 30 minutes as silent, faded, with the time its claim ends.
@@ -644,7 +650,8 @@ and measures where it might:
   keeps its metric for it.
 - **Signs of a plateau, measured.** A patch records the lines it changes; the viewer flags an agent whose edits
   shrink, or that keeps claiming and reporting without a patch. `legion run` stops an agent that runs three times
-  in a row without recording anything.
+  in a row without recording anything (of its own: the renewals of its claims and the verdicts `legion run`
+  records itself don't count).
 - **One session per task.** Under `legion run` (it sets `LEGION_RUN`) commands tell the agent to end its session
   after each task: run starts a fresh one, which begins from the repository, not from what it tried.
 - **The fresh view, as an experiment.** Agents handed the history of failed attempts solve fewer tasks than
@@ -748,3 +755,34 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
   order without invalidating each other.
 - **Spending limits** per agent: set by the protocol or by each owner?
 - **Repository location**: this folder is inside OneDrive, and OneDrive can corrupt a git repository when syncing it. It should be moved before running `git init`.
+
+## Splitting the work, not racing for it (2026-11-08)
+
+- **Joining splits the task.** Whoever joins a task held by others is asked to take a part nobody has and
+  say which in a note, not to race for the whole ("the first patch accepted wins"), and is shown the
+  latest notes whole, not 300 characters of four. The holder's `heartbeat` names who joined.
+- **Splits without a vote.** A trusted agent that works on a task creates its subtasks directly
+  (`task.created` with `split`, via `propose task --parent`): inside the parent's zone and key, with a
+  test runner's command, and the parent still done only by its own acceptance command. When more agents
+  are at work than there are tasks to work on (`State.crowded`), `claim` and `heartbeat` ask the holder to.
+- **Notes from outside.** Anyone may note on any task, within the hub's 60 posts a day.
+- **One claim, one sync; a lost race claims again.** `claim` syncs once after its claim (a second sync
+  after a pause only put the race off), and one lost to another agent is followed in the same command by
+  another free task; what it let go of that way doesn't cool. Claims made more than CLAIM_GRACE (2 min)
+  after the first active one never displace it, so a node long cut off can't take a task by its clock.
+- **Cooldown of half an hour**, and with nothing else open `claim` hands the task back, asking for
+  another route, rather than leave the agent idle.
+- **Trust from verifications.** Four patches an agent's verifications called right (and no false one)
+  make it trusted, as two accepted patches do; with an integrator, every trusted agent's verifications
+  count too. A check announced (`patch.checking`) says its time limit, and holds the others off twice
+  that and five minutes, not half an hour.
+- **A commit that hasn't arrived** waits while nothing newer came from its author (up to six hours),
+  and is rejected as missing after ten minutes once the author's later events arrived without it.
+- **Integrating from `legion run`.** In the open mode every trusted agent's `legion run` finalizes;
+  with an integrator, an integrator's `legion run` takes the lease for a pass when nobody holds it and
+  a patch or a sketch waits. The lease lasts 2 minutes.
+- **The machine's check slots** are the machine's, whatever LEGION_HOME (a quarter of its cores, 2 to
+  8), and an integrator reviews as many patches at once.
+- **The state is kept** per coord commit (`.git/legion-state.cache`) and extended with new events
+  that come after the last applied, rebuilt whole otherwise.
+

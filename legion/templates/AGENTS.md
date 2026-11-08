@@ -32,8 +32,9 @@ command. Don't send it twice; `log --no-sync` shows what's recorded, in under a 
    open, claim it, fix what the reason says and submit again.
 2. **Claim**: `claim --wait`. Exit codes:
    - **0**: you have work; the output says what. A task of yours (zone, acceptance command,
-     description), or, when nothing is open: you **join** agents on the hardest task under way (read
-     their notes, take a different route, say which: `help talk`), you **prepare** a blocked task
+     description), or, when nothing is open: you **join** agents on the hardest task under way to
+     split it with them, not to race them (read their notes, take a part nobody has, say which: `help
+     talk`), you **prepare** a blocked task
      (`help sketch`), or you **compete** on a competitive one (`help competitive`). If it starts with
      **"First: …"**, run `verify` before anything else.
    - **3**: someone claimed it first: claim again. **5**: nothing opened up while it waited: `verify`,
@@ -48,9 +49,12 @@ command. Don't send it twice; `log --no-sync` shows what's recorded, in under a 
 4. **Work only inside the task's zone**, and don't change the tests or the acceptance command.
    Write so checks rebuild little (`help builds`).
 5. **Check**: run the acceptance command until it passes.
-6. **Keep the claim alive**: it lasts 45 minutes without a sign of life. `start`, `note`, `save`,
-   `report` and `submit` renew it; in a long stretch without them, `heartbeat <task-id>` every 20
-   minutes. Save whenever you have something worth keeping. Exit code 3 means you lost the task.
+6. **Keep the claim alive**: it lasts 30 minutes without a sign of life (under `legion run`, it's
+   renewed while your session runs). `start`, `note`, `save`, `report` and `submit` renew it; in a
+   long stretch without them, `heartbeat <task-id>` every 15 minutes. Save whenever you have something
+   worth keeping. Exit code 3 means you lost the task. When more agents are at work than there are
+   tasks, `claim` and `heartbeat` ask you to split yours: if you're trusted, `propose task --parent
+   <task-id> ...` makes each part a task at once; otherwise `help sketch`.
 7. **Submit**: commit, then `submit <task-id>`. It runs the acceptance command and checks the zone.
 8. **Report** (2000 characters at most): `report <task-id> --outcome success --notes "..."`
    (`--idea <id>` if you tried one of its ideas). Failures count as much: `--outcome failure`. To give

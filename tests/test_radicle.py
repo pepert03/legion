@@ -956,3 +956,122 @@ def test_a_push_that_hangs_doesnt_hold_up_the_daemons_next_rounds(tmp_path, monk
     finally:
         release.set()
         daemon.finish_publishing(30)
+
+
+def test_a_dead_project_seed_is_skipped_for_a_while_and_any_failure_asks_the_public_seeds(tmp_path, monkeypatch):
+    """Down, the project's own seed cost every fetch its 30 to 45 s before the network was asked; and the public
+    seeds were asked only when the error said the routing table was empty."""
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    git(repo, "config", "legion.seed", "z6MkSeed@seed.example:8776")
+    asked = []
+
+    class Done:
+        def __init__(self, code):
+            self.returncode, self.stdout, self.stderr = code, "", "timed out"
+
+    def run(*args, **kw):
+        asked.append("seed" if "--seed" in args else "public" if any("seed" in str(a) for a in args[3:]) else "net")
+        return Done(1)
+    monkeypatch.setattr(radicle, "run", run)
+    monkeypatch.setattr(radicle, "seed_args", lambda home: ["--seed", "z6MkPublic"])
+    assert not radicle.network_sync(repo, force=True)
+    assert asked == ["seed", "net", "seed"]          # its seed, the network, then the public seeds (by --seed too)
+    asked.clear()
+    assert not radicle.network_sync(repo, force=True)
+    assert asked[0] == "net"                          # the project's seed failed a moment ago: not asked again yet
+
+
+def test_a_fetch_is_over_before_the_storage_upkeep(tmp_path, monkeypatch):
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    from legion import tunnel
+    monkeypatch.setattr(radicle, "node_running", lambda repo: True)
+    monkeypatch.setattr(tunnel, "keep", lambda repo: None)
+    monkeypatch.setattr(radicle, "network_sync", lambda repo, force, quick: True)
+    seen = []
+    monkeypatch.setattr(radicle, "upkeep", lambda repo, quick: seen.append(radicle.netsync_status(repo)))
+    assert radicle.run_network_sync(repo)
+    assert seen and seen[0]["running"] is False and seen[0]["ok"] is True and "ended" in seen[0]
+
+
+def test_a_patch_received_is_passed_on_at_once(tmp_path):
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "f").write_text("x")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "i")
+    before = radicle.published_mark(repo)
+    git(repo, "update-ref", "refs/legion/patches/t-1/abc-1", "HEAD")      # another node's patch, fetched
+    assert radicle.published_mark(repo) != before
+
+
+def test_a_daemon_started_anew_by_an_update_keeps_its_age(tmp_path, monkeypatch):
+    from legion import daemon
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LEGION_DAEMON_SINCE", "1234.5")
+    monkeypatch.setattr(daemon, "_wait", lambda wake, seconds: None)
+    daemon.run(rounds=1, log=lambda m: None)
+    assert (daemon.folder() / "started").read_text(encoding="utf-8") == "1234.5"
+
+
+def test_nodes_listen_on_the_network_unless_told_not_to(tmp_path, monkeypatch):
+    """On Windows and macOS nodes listened on 127.0.0.1 unless told otherwise: nearly every node there served
+    nobody."""
+    from legion import tunnel
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    monkeypatch.delenv("LEGION_LAN")
+    monkeypatch.setattr(tunnel, "IS_WINDOWS", True)
+    assert tunnel.lan_allowed(repo)
+    git(repo, "config", "legion.lan", "false")
+    assert not tunnel.lan_allowed(repo)
+    monkeypatch.setenv("LEGION_LAN", "1")
+    assert tunnel.lan_allowed(repo)
+
+
+def test_every_clones_node_replicates_every_namespace_once(tmp_path, monkeypatch):
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    radicle.enable(repo, "rad:zTest")
+    asked = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+    monkeypatch.setattr(radicle, "run", lambda *a, **k: asked.append(a) or Done())
+    radicle.seed_everyone(repo)
+    radicle.seed_everyone(repo)
+    assert asked == [("rad", "seed", "rad:zTest", "--scope", "all")]
+
+
+def test_the_storage_inside_wsl_is_kept_up_too(tmp_path, monkeypatch):
+    """Skipped inside WSL, its packs piled up, and fetches from it grew too slow for the seeds."""
+    asked = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "70\n", ""
+    monkeypatch.setattr(radicle, "IS_WINDOWS", True)
+    monkeypatch.setattr(radicle, "native", lambda repo=None: False)
+    monkeypatch.setattr(radicle, "storage", lambda repo: "/home/x/.radicle/storage/zTest")
+    monkeypatch.setattr(radicle, "run", lambda *a, **k: asked.append(a[:4]) or Done())
+    assert radicle.compact_storage(tmp_path, merge=False)
+    assert asked[0][0] == "sh" and asked[1] == ("git", "-C", "/home/x/.radicle/storage/zTest", "multi-pack-index")
+
+
+def test_where_background_processes_dont_last_commands_dont_start_one_each(tmp_path, monkeypatch):
+    import os
+    import time
+    from legion import daemon
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    d = daemon.folder()
+    d.mkdir(parents=True)
+    now = time.time()
+    (d / "started").write_text(str(now - 30), encoding="utf-8")
+    (d / "beat").write_text("1", encoding="utf-8")
+    os.utime(d / "beat", (now - 25, now - 25))                     # it lived five seconds
+    assert daemon.short_lived()
+    os.utime(d / "beat", (now - 25 + 3600, now - 25 + 3600))
+    (d / "started").write_text(str(now - 7200), encoding="utf-8")   # it lived an hour and more
+    assert not daemon.short_lived()

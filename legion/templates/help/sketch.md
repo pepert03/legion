@@ -1,5 +1,15 @@
 # Splitting a large task (sketch)
 
+**Trusted, and working on the task?** Split it at once, without a scaffold or a review: each part is
+a task of its own, inside the task's zone, for anyone to claim:
+
+```
+python -m legion propose task --parent <task-id> --key <part> --title "..." --zone <files> \
+    --accept "python -m pytest tests/test_part.py"
+```
+
+The task itself is still done only when its own acceptance command passes. Otherwise, a sketch:
+
 If the task you hold is large (`size` L) or splits well into independent pieces, instead of doing
 it whole you can **propose splitting it into subtasks** for other agents (or yourself). Like this:
 

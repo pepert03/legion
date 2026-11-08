@@ -182,8 +182,91 @@ def build_state(repo, pairs: list[tuple[str, dict]], extra: list[dict] = ()):
     return st
 
 
+# The state, kept between commands. Every command rebuilt it from every event (20,000 in Erdős #902: half a
+# second reading and folding them, twice for a command that records one), and a project's every command grew
+# slower with its history. Kept per coord commit, with the events it holds: the same commit reads it back in a
+# fraction of that; a later one applies only its new events, when they all come after the last it applied (the
+# usual case: new events carry later clocks); anything else (an event from a node long cut off, ordered among
+# the old ones) is rebuilt whole, as before. Each caller gets a copy of its own, so none can change the kept one.
+STATE_CACHE = "legion-state.cache"
+_STATE: dict[str, tuple] = {}  # repo -> (stamp, head, blobs, last key, pickled state)
+
+
+def _code_stamp() -> float:
+    here = Path(__file__).parent
+    return max((p.stat().st_mtime for p in here.glob("*.py")), default=0.0)
+
+
+def _state_file(repo) -> Path:
+    return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / STATE_CACHE
+
+
+def _kept(repo, key: str):
+    kept = _STATE.get(key)
+    if kept is None:
+        try:
+            kept = pickle.loads(_state_file(repo).read_bytes())
+        except (OSError, pickle.PickleError, EOFError, ValueError, TypeError, AttributeError, ImportError):
+            kept = None
+    return kept
+
+
+def _keep(repo, key: str, kept: tuple) -> None:
+    _STATE[key] = kept
+    path = _state_file(repo)
+    tmp = path.with_name(f"{STATE_CACHE}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(pickle.dumps(kept, protocol=pickle.HIGHEST_PROTOCOL))
+        os.replace(tmp, path)
+    except OSError:  # another process holds it open (Windows): this one keeps it in memory only
+        tmp.unlink(missing_ok=True)
+
+
 def state(repo, ref: str = REF, extra: list[dict] = ()):
-    return build_state(repo, read_pairs(repo, ref), extra)
+    from . import state as S
+    if ref != REF:
+        return build_state(repo, read_pairs(repo, ref), extra)
+    key, stamp, head = str(Path(repo).resolve()), _code_stamp(), rev(repo, REF)
+    kept = _kept(repo, key)
+    if kept is None or kept[0] != stamp or kept[1] != head:
+        files = list_files(repo, head)
+        blobs = frozenset(files.values())
+        built = None
+        if kept is not None and kept[0] == stamp and kept[2] <= blobs:
+            store, _ = _stores(repo)
+            events = store.refresh()
+            missing = [b for b in blobs - kept[2] if b not in events]
+            if missing:
+                store.add(read_blobs(repo, missing))
+            new = sorted(((b, events[b]) for b in blobs - kept[2] if events.get(b) is not None),
+                         key=lambda pair: S.event_key(pair[1]))
+            if not new or S.event_key(new[0][1]) > kept[3]:
+                built = _extended(repo, pickle.loads(kept[4]), new)
+                last = S.event_key(new[-1][1]) if new else kept[3]
+        if built is None:
+            pairs = read_pairs(repo, REF)
+            built = build_state(repo, pairs)
+            last = max((S.event_key(ev) for _, ev in pairs), default=(0, ""))
+        kept = (stamp, head, blobs, last, pickle.dumps(built, protocol=pickle.HIGHEST_PROTOCOL))
+        _keep(repo, key, kept)
+    st = pickle.loads(kept[4])
+    if extra:
+        extra = sorted(extra, key=S.event_key)
+        if S.event_key(extra[0]) > kept[3]:
+            return S.extend(st, list(extra))
+        return build_state(repo, read_pairs(repo, REF), extra)
+    return st
+
+
+def _extended(repo, st, pairs: list[tuple[str, dict]]):
+    """`st` with these new events applied, checking the signatures not checked before (as build_state does)."""
+    from . import state as S
+    _, store = _stores(repo)
+    verified = store.refresh()
+    S.extend(st, [ev for _, ev in pairs], {id(ev) for b, ev in pairs if b in verified})
+    bad = {id(ev) for ev, _ in st.ignored}
+    store.add({b for b, ev in pairs if b not in verified and (id(ev) not in bad or E.check(ev) is None)})
+    return st
 
 
 def _commit(repo, files: dict[str, str], parents: list[str], message: str, env) -> str:

@@ -45,8 +45,11 @@ from . import radicle, reach
 from .radicle import IS_WINDOWS, RadError
 
 MODES = ("hub", "client", "mesh", "auto", "outbound", "off")
-PEERS = int(os.environ.get("LEGION_TUNNEL_PEERS", 8))  # at most this many other nodes, besides the hubs
-ACTIVE = 12 * 3600  # a node whose agent did nothing for this long isn't connected to (hubs always are)
+# At most this many other nodes, besides the hubs: 8 made a few nodes the whole mesh of a project of dozens of
+# agents. A node whose agent did nothing for ACTIVE isn't connected to (hubs always are): after 12 hours, a node
+# that was up all night but whose agents rested dropped out of everyone's mesh, and with it what it held.
+PEERS = int(os.environ.get("LEGION_TUNNEL_PEERS", 16))
+ACTIVE = 48 * 3600
 PORTS = (41000, 42000)  # the local ports of the tunnels to other nodes: a hash of the NID picks one
 TICKET_RE = re.compile(r"dumbpipe connect-tcp (\w+)")
 
@@ -433,12 +436,15 @@ def unstick(repo, home: Path, ports: dict[str, int], sessions: set[str]) -> bool
 # announced nodes carry everything. A node whose processes don't outlive the command that started them (agents'
 # sandboxes; a canary tells) announces nothing and only connects out, as `outbound` does from the start.
 
-REACH_EVERY = 600  # seconds between looks at this machine's addresses, and renewals of the router's mapping
+# Seconds between looks at this machine's addresses (and renewals of the router's mapping), in the background
+# fetch: half ANNOUNCE_EVERY, so a new address (the router's mapping, minutes after the node started) goes out
+# within minutes, and one that keeps changing still at most every ANNOUNCE_EVERY.
+REACH_EVERY = 300
 RETRY_DIRECT = 600  # seconds before an address that didn't answer, or didn't lead to the node, is tried again
 # Seconds an address may answer without giving a session before it's taken for the wrong one. A node that restarted
 # (a sandbox's, every command) is refused until the other side drops its old session, which took 75 s here.
 DIRECT_STUCK = 180
-ANNOUNCE_EVERY = 1800  # seconds between this node's announcements of new addresses (DHCP, a mapping that moved)
+ANNOUNCE_EVERY = 600  # seconds between this node's announcements of new addresses (DHCP, a mapping that moved)
 ANCHOR_GRACE = 300  # seconds an announced node may be away before the tunnels are needed again
 DEFER = 600  # seconds a clone's explicit hub, client or mesh keeps the other clones of its node out of auto
 CANARY = "import time  # legion canary: does a process outlive the command that started it?\nwhile True: time.sleep(3600)"
@@ -474,14 +480,15 @@ def upnp_allowed(repo) -> bool:
 
 
 def lan_allowed(repo) -> bool:
-    """Whether auto may have the node listen beyond this machine (its local network, Tailscale, the internet). On
-    Windows (and macOS) a program that listens on the network makes the system ask the person, and one who said no
-    was asked again by every test: there it's only when they say so (git config legion.lan true). Elsewhere unless
-    they say not to."""
-    said = (radicle._cfg(repo, "legion.lan") or "").lower()
+    """Whether auto may have the node listen beyond this machine (its local network, Tailscale, the internet):
+    unless the person says not to (git config legion.lan false, or LEGION_LAN=0). On Windows and macOS it listened
+    on 127.0.0.1 unless told otherwise, since the system asks the person once a program listens on the network:
+    and nearly every node there was a client that served nobody, the project's whole network the public seeds.
+    Now the system asks, once. (The tests say LEGION_LAN=0: a test that asked again each time was the reason.)"""
+    said = (os.environ.get("LEGION_LAN") or radicle._cfg(repo, "legion.lan") or "").lower()
     if said:
         return said in ("1", "true", "yes", "on")
-    return not (IS_WINDOWS or sys.platform == "darwin")
+    return True
 
 
 def listens_beyond(home: Path) -> bool:
@@ -889,8 +896,8 @@ def status(repo) -> list[str]:
             lines.append("This node only connects out: its background processes don't outlive the commands that "
                          "start them.")
         elif not listens_beyond(home):
-            lines.append("Not reachable from the network: the node listens on this machine only (on Windows and "
-                         "macOS, unless `git config legion.lan true`); it connects out, and by tunnel.")
+            lines.append("Not reachable from the network: the node listens on this machine only (`git config "
+                         "legion.lan false`, or LEGION_LAN=0); it connects out, and by tunnel.")
         else:
             lan = ", ".join(f"{x['addr']} ({x['net']})" for x in r.get("lan") or [])
             lines.append(f"Reachable from the internet at: {', '.join(r.get('public') or []) or 'nowhere found'}; "

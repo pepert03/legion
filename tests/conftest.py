@@ -2,12 +2,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def no_daemon(monkeypatch):
+def no_daemon(monkeypatch, tmp_path):
     """Commands sync by themselves in tests: no machine-wide sync process started behind their back, and the
     push they leave to a process of their own (radicle.kick_publish) runs at once, in this one, as the command's
     identity."""
     from legion import coordgit, ctx, radicle
     monkeypatch.setenv("LEGION_NO_DAEMON", "1")
+    # The machine's check slots are shared by every legion on it: a test's checks don't wait for an agent's.
+    monkeypatch.setenv("LEGION_SLOTS", str(tmp_path / "check-slots"))
+    monkeypatch.setenv("LEGION_LAN", "0")  # nor do nodes of tests listen on the network (see tunnel.lan_allowed)
     # run_publish sets it for its process, which a test is too: it carried over to the tests after it.
     monkeypatch.setattr(radicle, "ANNOUNCE_INLINE", False)
     monkeypatch.setattr(ctx.Ctx, "_publish",

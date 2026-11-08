@@ -78,8 +78,29 @@ def serving(repo) -> bool:
     register(repo)
     if alive():
         return True
-    start()
+    if not short_lived():
+        start()
     return False
+
+
+SHORT_LIVED, RETRY_SHORT = 120, 1800
+
+
+def short_lived() -> bool:
+    """The last sync process died within SHORT_LIVED seconds of starting, less than RETRY_SHORT ago: here background
+    processes don't outlive the command that starts them (a sandbox). Each command started one anyway, which lived
+    a few seconds and only made the commands guess (a young process: push by yourself and wait); now they sync by
+    themselves, one way, and one is tried again after RETRY_SHORT."""
+    d = folder()
+    try:
+        started = float((d / "started").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    try:
+        last = (d / "beat").stat().st_mtime
+    except OSError:
+        last = started  # gone before its first round
+    return last - started < SHORT_LIVED and time.time() - last < RETRY_SHORT
 
 
 def start() -> None:
@@ -150,6 +171,14 @@ def publish_aside(repo: str, ident, log=print) -> None:
 
     def push():
         try:
+            try:  # a storage rebuilt from an older copy forks this node's chain, and the seeds drop what it
+                # publishes: healed here too, not only by the publishes of commands (at most every HEAL_EVERY)
+                from . import radicle
+                healed = radicle.heal_sigrefs(repo)
+                if healed:
+                    log(f"{time.strftime('%H:%M:%S')} {repo}: {healed}")
+            except Exception:  # noqa: BLE001
+                pass
             coordgit.publish_radicle(repo, ident)
         except Exception as e:  # noqa: BLE001
             log(f"{time.strftime('%H:%M:%S')} {repo}: {str(e).strip()[-300:]}")
@@ -259,7 +288,9 @@ def run(rounds: int | None = None, log=_log) -> int:
     if not lock_file(me):
         return 0  # another daemon serves this machine
     stamp, done = _code_stamp(), 0
-    (d / "started").write_text(str(time.time()), encoding="utf-8")
+    # Started anew by an update, it's the same sync process that stays: it keeps its age. Taken for a young one, a
+    # process sandboxes kill, every command synced by itself for two minutes after each update (transport.SETTLED).
+    (d / "started").write_text(os.environ.get("LEGION_DAEMON_SINCE") or str(time.time()), encoding="utf-8")
     log(f"{time.strftime('%H:%M:%S')} legion daemon started (pid {os.getpid()})")
     while rounds is None or done < rounds:
         (d / "beat").write_text(str(os.getpid()), encoding="utf-8")
@@ -287,6 +318,10 @@ def run(rounds: int | None = None, log=_log) -> int:
             log(f"{time.strftime('%H:%M:%S')} legion was updated: the daemon starts the new one and ends")
             me.close()  # its lock, for the new one
             (d / "beat").unlink(missing_ok=True)
+            try:
+                os.environ["LEGION_DAEMON_SINCE"] = (d / "started").read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
             start()
             break
         _wait(d / "wake", EVERY)

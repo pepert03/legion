@@ -247,11 +247,9 @@ A node connected to an announced node runs no tunnel.
 
 That is the **auto** mode, the default. Its rules:
 
-- On Windows and macOS, listening on the network makes the system ask you to allow it, so there the
-  node listens on 127.0.0.1 only (for its tunnel), announces no address, asks no router, and connects
-  out, which is enough: a connection carries both directions. `git config legion.lan true` (and
-  allowing `radicle-node` in the firewall) lets it listen on the network. On Linux it does unless
-  `git config legion.lan false`.
+- The node listens on the network, on every system: on Windows and macOS the system asks you once
+  to allow `radicle-node` (allow it, or the node only connects out and serves nobody).
+  `git config legion.lan false` (or `LEGION_LAN=0`) keeps it on 127.0.0.1, for its tunnel only.
 - A node whose background processes don't outlive the command that started them (agents' sandboxes)
   never announces itself: a canary process tells, and until it has lived a minute the node only
   connects out. `legion radicle tunnel outbound` says so from the start.
@@ -393,9 +391,10 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 - **No peer discovery** over plain git: each person adds the peers they know by hand (Radicle doesn't need it).
 - **Gossip has a delay**: with few links, an agent may start from a main that is no longer the
   latest. The integrator then rejects the patch as a conflict and the agent redoes it.
-- **Wall-clock claims**: they expire according to the time on the machine evaluating them. A node
-  that was offline can publish a claim with a low Lamport clock and win a task from someone who
-  was already working on it.
+- **Wall-clock claims**: they expire according to the time on the machine evaluating them, and a
+  claim made more than two minutes after another active one never displaces it, whatever its Lamport
+  clock (a node that was offline can't take a task from someone already working on it). A machine
+  whose clock is far behind could still claim ahead of the others.
 
 ## Tests
 

@@ -27,6 +27,7 @@ IS_WINDOWS = os.name == "nt"
 NATIVE_BIN = Path.home() / ".radicle" / "bin"  # where Radicle's installer puts it, and a Windows build too
 DEFAULT_DISTRO = "Ubuntu-24.04"
 NETWORK_SYNC_EVERY = 60  # seconds between `rad sync --fetch` runs; pushes announce on their own
+SEED_BACKOFF = 600  # seconds a fetch skips the project's own seed after it failed
 REPUBLISH_EVERY = 600  # seconds after which an unchanged publish goes out again anyway
 # Runs a command with Radicle on the PATH and, if given, a specific RAD_HOME (several nodes per machine).
 SHIM = ('rh="$1"; shift; export PATH="$HOME/.radicle/bin:$PATH" RAD_PASSPHRASE=""; '
@@ -582,14 +583,18 @@ def network_sync(repo, force: bool = False, quick: bool = False) -> bool:
         return True
     seed = _cfg(repo, "legion.seed")
     p = None
-    if seed:  # the project's own seed first: it has everything, and answers (briefly when a command waits: an
-        # Umbrel switched off made every quick fetch fail, the others never asked)
+    down = time.time() - float(_cfg(repo, "legion.seeddown") or 0) < SEED_BACKOFF
+    if seed and not down:  # the project's own seed first: it has everything, and answers (briefly when a command
+        # waits: an Umbrel switched off made every quick fetch fail, the others never asked)
         wait = "10sec" if quick else "30sec"
         p = run("rad", "sync", "--fetch", rid(repo), "--seed", seed.split("@")[0], "--timeout", wait, repo=repo,
                 check=False, timeout=25 if quick else 45)
+        # Down, it cost every fetch its 30 to 45 s before the network was asked: not again for SEED_BACKOFF.
+        subprocess.run(["git", "config", "legion.seeddown", "0" if p.returncode == 0 else str(time.time())],
+                       cwd=repo, capture_output=True)
     if p is None or p.returncode:
         p = run("rad", "sync", "--fetch", rid(repo), "--timeout", "30sec", repo=repo, check=False, timeout=45)
-    if p.returncode and not quick and "seeds" in clean(p.stderr + p.stdout):  # an empty routing table: ask the public seeds
+    if p.returncode and not quick:  # whatever went wrong (not only an empty routing table): the public seeds
         p = run("rad", "sync", "--fetch", rid(repo), *seed_args(_cfg(repo, "legion.radhome")), repo=repo,
                 check=False, timeout=45)
     ok = p.returncode == 0
@@ -714,8 +719,11 @@ def run_announce(repo) -> None:
 # command synced by itself, push included: 20 s of CPU in Radicle's helper, and commands cut off at 60-110 s. The
 # command only brings the coord up to date now, and a process of its own pushes, which lives long enough for that.
 
+PUBLISH_STALE = 300  # seconds after which a publish whose process can't be checked is taken as dead
+
+
 def kick_publish(repo) -> None:
-    _kick(repo, "publish", stale=PUSH_TIMEOUT)
+    _kick(repo, "publish", stale=PUBLISH_STALE)
 
 
 def wait_marked(repo, seconds: float) -> bool:
@@ -734,7 +742,7 @@ def wait_marked(repo, seconds: float) -> bool:
 def wait_published(repo, seconds: float) -> bool:
     """Wait until no publish runs (it finished, or died), up to `seconds`. True if it's done."""
     end = time.time() + seconds
-    while _under_way(netsync_status(repo, "publish"), PUSH_TIMEOUT):
+    while _under_way(netsync_status(repo, "publish"), PUBLISH_STALE):
         if time.time() >= end:
             return False
         time.sleep(0.5)
@@ -749,7 +757,7 @@ def wait_published(repo, seconds: float) -> bool:
 # and when its own chain doesn't descend from that, takes that one back as its starting point: the next signing goes
 # on top of it, and the seeds accept it. At most every HEAL_EVERY seconds.
 HEAL_SEEDS = ("rosa.radicle.network", "iris.radicle.network", "seed.radicle.at")
-HEAL_EVERY = 3600
+HEAL_EVERY = 900  # an hour of a forked chain was an hour of everything this node published lost
 
 
 def heal_urls(repo) -> list[str]:
@@ -1001,7 +1009,7 @@ def run_publish(repo) -> None:
     try:
         if not node_running(repo):
             ensure_node(repo)
-            time.sleep(5)  # it needs a moment to connect to the seeds
+            wait_connected(repo)
     except RadError:
         pass
     _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
@@ -1048,23 +1056,38 @@ def spawn_detached(cmd: list[str], cwd, log=None, env=None) -> subprocess.Popen:
 MAX_PACKS = 64
 
 
-def compact_storage(repo, seconds: float = 100, merge: bool = True) -> bool:
-    """Repack the node's storage if it holds more than MAX_PACKS packs. True if it did."""
+def store_git(repo, store: str, *args: str, timeout: float) -> int:
+    """git on the node's storage, where it lives: inside WSL through WSL's git. Its exit code; None-like 124 when
+    out of time."""
+    try:
+        if IS_WINDOWS and not native(repo):
+            return run("git", "-C", store, *args, repo=repo, check=False, timeout=timeout).returncode
+        return subprocess.run(["git", "-C", store, *args], capture_output=True, timeout=timeout).returncode
+    except (subprocess.TimeoutExpired, RadError):
+        return 124
+
+
+def pack_count(repo, store: str) -> int:
     if IS_WINDOWS and not native(repo):
-        return False  # inside WSL: its own git, and no sandbox piling packs up
+        out = run("sh", "-c", 'ls "$1"/objects/pack/*.pack 2>/dev/null | wc -l', "sh", store, repo=repo, check=False,
+                  timeout=60).stdout.strip()
+        return int(out) if out.isdigit() else 0
+    return len(list((Path(store) / "objects" / "pack").glob("*.pack")))
+
+
+def compact_storage(repo, seconds: float = 100, merge: bool = True) -> bool:
+    """Repack the node's storage if it holds more than MAX_PACKS packs. True if it did. Inside WSL too: skipped
+    there, its packs piled up like anywhere else, and the fetches from it grew slow enough for the seeds to give
+    up."""
     store = storage(repo)
-    if len(list((Path(store) / "objects" / "pack").glob("*.pack"))) <= MAX_PACKS:
+    if pack_count(repo, store) <= MAX_PACKS:
         return False
     end = time.time() + seconds
     steps = [["multi-pack-index", "write"]]
     if merge:
         steps += [["multi-pack-index", "repack", "--batch-size=40m"], ["multi-pack-index", "expire"]]
     for step in steps:
-        try:
-            if subprocess.run(["git", "-C", store, *step], capture_output=True,
-                              timeout=max(1.0, end - time.time())).returncode:
-                return False
-        except subprocess.TimeoutExpired:
+        if store_git(repo, store, *step, timeout=max(1.0, end - time.time())):
             return False  # what's done stays done: it goes on from there next time
     return True
 
@@ -1075,14 +1098,43 @@ GC_EVERY = 86400
 def gc_storage(repo) -> bool:
     """Once a day, where a sync process stays: drop from the node's storage what no ref holds any more (dropped
     saves, judged patches) and pack the rest. Refs going doesn't free the disk by itself. True if it ran."""
-    if IS_WINDOWS and not native(repo) or time.time() - float(_cfg(repo, "legion.gced") or 0) < GC_EVERY:
+    if time.time() - float(_cfg(repo, "legion.gced") or 0) < GC_EVERY:
         return False
     subprocess.run(["git", "config", "legion.gced", str(time.time())], cwd=repo, capture_output=True)
+    return store_git(repo, storage(repo), "gc", "--quiet", "--prune=2.weeks.ago", timeout=1800) == 0
+
+
+def seed_everyone(repo) -> None:
+    """Have the node replicate every namespace of the project (`rad seed --scope all`), once per clone. Only a
+    project's own seed was told to: the others had whatever their `rad clone` or `rad init` left, and a node that
+    follows only the delegates keeps nobody else's events, nor serves them."""
+    project = rid(repo)
+    if not project or _cfg(repo, "legion.scoped") == project:
+        return
     try:
-        return subprocess.run(["git", "-C", storage(repo), "gc", "--quiet", "--prune=2.weeks.ago"],
-                              capture_output=True, timeout=1800).returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
+        if run("rad", "seed", project, "--scope", "all", repo=repo, check=False, timeout=60).returncode == 0:
+            subprocess.run(["git", "config", "legion.scoped", project], cwd=repo, capture_output=True)
+    except (RadError, OSError, subprocess.SubprocessError):
+        pass
+
+
+CONNECT_WAIT = 20  # seconds a node just started is given to connect to a peer
+
+
+def wait_connected(repo, seconds: float = CONNECT_WAIT) -> bool:
+    """Wait until the node just started has a session with some peer, up to `seconds`. Five seconds blind were
+    too few on a slow network (the fetch then found nobody) and too many on a quick one."""
+    end = time.time() + seconds
+    while True:
+        try:
+            out = rad(repo, "node", "status", check=False, timeout=15)
+            if "✓" in out:
+                return True
+        except (RadError, OSError, subprocess.SubprocessError):
+            pass
+        if time.time() >= end:
+            return False
+        time.sleep(1)
 
 
 def run_network_sync(repo, quick: bool = False) -> bool:
@@ -1092,23 +1144,38 @@ def run_network_sync(repo, quick: bool = False) -> bool:
     try:
         if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
             ensure_node(repo)
-            time.sleep(5)  # it needs a moment to connect to the seeds
+            wait_connected(repo)
+        seed_everyone(repo)
         tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
         ok = network_sync(repo, force=True, quick=quick)
-        if ok and not quick:
-            # What it brought is in the node's storage: the sync process copies it now, not at its next round,
-            # which had copied what the storage held before this fetch began, one round late.
-            from . import daemon
-            if daemon.enabled():
-                daemon.wake()
-        compact_storage(repo, 20 if quick else 300, merge=not quick)
-        if not quick:
-            gc_storage(repo)
     except RadError:
         ok = False
     finally:
+        # The fetch is over: said before the storage's upkeep, which took up to five minutes more and held every
+        # fetch after it off meanwhile, the node seeing nothing new.
         _write_netsync(repo, {"started": started, "ended": time.time(), "running": False, "ok": ok})
+    if ok and not quick:
+        # What it brought is in the node's storage: the sync process copies it now, not at its next round,
+        # which had copied what the storage held before this fetch began, one round late.
+        from . import daemon
+        if daemon.enabled():
+            daemon.wake()
+    upkeep(repo, quick)
     return ok
+
+
+def upkeep(repo, quick: bool) -> None:
+    """Compact the node's storage (and gc it, when nothing waits): one process at a time, the others skip it."""
+    from .locks import held
+    try:
+        with held(_netsync_file(repo, "upkeep").with_suffix(".lock"), wait=0) as got:
+            if not got:
+                return
+            compact_storage(repo, 20 if quick else 300, merge=not quick)
+            if not quick:
+                gc_storage(repo)
+    except (RadError, OSError, subprocess.SubprocessError):
+        pass
 
 
 # Where no sync process lives (a sandbox kills what a command leaves running, the node included), the fetch kicked
@@ -1430,10 +1497,12 @@ def push_lock(repo) -> Path:
 
 def published_mark(repo) -> str:
     """What makes a publish worth its time, as one hash: this node's own latest event (a patch of its own comes
-    with one) and the official main. Not the coord, which every sync merges with the others' events, nor the
-    others' patches it fetched: those reach the network from their authors' namespaces, and this node re-offers
-    them every REPUBLISH_EVERY anyway."""
+    with one), the official main, and the patches it holds, the others' it fetched among them, which it passes on
+    as soon as they arrive. Not the coord, which every sync merges with the others' events."""
     import hashlib
     out = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", "refs/legion/own",
-                          "refs/legion/main"], cwd=repo, capture_output=True).stdout
+                          "refs/legion/main", "refs/legion/patches/"], cwd=repo, capture_output=True).stdout
+    # And the patches this clone holds, others' among them: a node passes on what it receives (that's the gossip),
+    # and it did only every REPUBLISH_EVERY, ten minutes; now at its next round. publish_specs still pushes only
+    # what the node lacks.
     return hashlib.sha1(out).hexdigest()

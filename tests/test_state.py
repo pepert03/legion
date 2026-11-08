@@ -393,12 +393,17 @@ def test_agents_on_a_task_talk_through_notes():
     log.add(BEA, "task.claimed", task=tid, ttl=600, join=True)
     log.add(ANA, "task.note", task=tid, text="I'm trying induction on m")
     log.add(BEA, "task.note", task=tid, text="then I take the counting route")
-    log.add(CEL, "task.note", task=tid, text="spam")  # not working on it
+    log.add(CEL, "task.note", task=tid, text="Lemma 3 of the survey gives the base case")  # help from outside
     log.add(ANA, "task.note", task=tid, text="")
     st = log.state()
-    assert [n["text"] for n in st.notes[tid]] == ["I'm trying induction on m", "then I take the counting route"]
-    assert [why for _, why in st.ignored] == ["only someone who works on the task, or has, may post notes on it",
-                                              f"a note is text of at most {E.MAX_NOTES} characters"]
+    assert [n["text"] for n in st.notes[tid]] == ["I'm trying induction on m", "then I take the counting route",
+                                                  "Lemma 3 of the survey gives the base case"]
+    assert [why for _, why in st.ignored] == [f"a note is text of at most {E.MAX_NOTES} characters"]
+    assert len(st.hub_by[CEL.author]) == 1 and not st.hub_by[BEA.author]  # outside, it counts in the hub's cap
+    for i in range(S.MAX_HUB_PER_DAY - 1):
+        log.add(CEL, "hub.message", text=f"hello {i}")
+    log.add(CEL, "task.note", task=tid, text="one more")
+    assert log.state().ignored[-1][1].startswith("a note on a task one doesn't work on counts in the hub's")
 
 
 def test_an_agent_long_on_a_task_can_keep_posting_notes_on_it():
@@ -1329,3 +1334,74 @@ def test_in_the_open_mode_the_quorum_is_capped_at_the_trusted_owners_there_are()
     assert st.patches[p["id"]].verdict == "accepted" and st.main_tip == "m1"
     log.add(BOSS, "project.policy", mode="integrator")
     assert log.state().quorum_for("cel") == 9                          # with an integrator, the policy's as it is
+
+
+def test_a_later_claim_never_displaces_an_earlier_one():
+    """By the Lamport clock alone, a node cut off for a while (its clock behind) claimed a task someone had been
+    working on for an hour, and took it. Claims close in time still race by the clock."""
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=7200, ts=1000.0, lamport=50)
+    log.add(BEA, "task.claimed", task=tid, ttl=7200, ts=4600.0, lamport=10)   # an hour later, from far behind
+    assert log.state().holder(tid, 4601).author == ANA.author
+    log2, tid2 = project()
+    log2.add(ANA, "task.claimed", task=tid2, ttl=7200, ts=1000.0, lamport=6)
+    log2.add(BEA, "task.claimed", task=tid2, ttl=7200, ts=1050.0, lamport=5)  # within the grace: a race
+    assert log2.state().holder(tid2, 1051).author == BEA.author
+
+
+def test_a_task_let_go_of_after_a_lost_race_doesnt_cool():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "task.released", task=tid, lost=True)
+    assert tid not in log.state().cooling(ANA.author, 1001)
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(ANA, "task.released", task=tid)
+    assert tid in log.state().cooling(ANA.author, 1001)
+
+
+def test_a_trusted_agent_on_a_task_splits_it_without_a_vote_or_a_review():
+    """Only integrators, votes and reviewed sketches made tasks: with few tasks the queue emptied and agents
+    waited. Whoever works on a task, and is trusted, creates subtasks of it inside its zone."""
+    log, tid = project(zone=["src/"])
+    for who in (ANA,):
+        for i in range(2):
+            t = S.task_id(log.add(BOSS, "task.created", key=f"w-{i}", title="w", zone=["w"], accept="true"))
+            q = log.add(who, "patch.submitted", task=t, commit="c", branch=f"legion/w/{i}")
+            log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit=f"m-{i}")
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(CEL, "task.claimed", task=tid, ttl=600, join=True)
+    sub = dict(title="A1", zone=["src/a1.py"], accept="python -m pytest tests/test_a1.py", parent=tid, split=True)
+    log.add(ANA, "task.created", key="a/one", **sub)
+    log.add(CEL, "task.created", key="a/two", **sub)                    # works on it, but isn't trusted
+    log.add(ANA, "task.created", key="a/three", **dict(sub, zone=["lib/x.py"]))  # outside the parent's zone
+    log.add(ANA, "task.created", key="a/four", **dict(sub, accept="rm -rf ~"))   # nobody votes: a test runner only
+    log.add(ANA, "task.created", key="b", title="B", zone=["src/b.py"], accept="true")  # not a subtask
+    st = log.state()
+    assert [t.key for t in st.tasks.values() if t.parent == tid] == ["a/one"]
+    assert [why for _, why in st.ignored][:3] == ["only an integrator can publish this event",
+                                                  "a subtask must carry its parent's key and stay inside its zone",
+                                                  "the acceptance command must start with one of: "
+                                                  + ", ".join(S.DEFAULT_RUNNERS)]
+    assert st.ignored[3][1] == "only an integrator can publish this event"
+
+
+def test_crowded_counts_the_active_agents_against_the_tasks_to_work_on():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    log.add(BEA, "task.claimed", task=tid, ttl=600, join=True)
+    log.add(CEL, "hub.message", text="hello")
+    assert log.state().crowded(1001) == (3, 1)
+
+
+def test_verifications_called_right_make_an_agent_trusted():
+    """Only accepted patches made agents trusted: one that verified without writing patches ran builds that never
+    counted, nor ever would."""
+    log, tid = open_project()
+    for i in range(S.VERIFIED_AFTER):
+        t = S.task_id(log.add(BOSS, "task.created", key=f"v-{i}", title="v", zone=["v"], accept="true"))
+        p = log.add(ANA, "patch.submitted", task=t, commit="c", branch=f"legion/v/{i}")
+        log.add(CEL, "patch.verified", task=t, patch=p["id"], base_tree=TREE_A, tree=TREE_B, outcome="pass")
+        assert not log.state().trusted(CEL.author)
+        log.add(BOSS, "patch.accepted", patch=p["id"], merge_commit=f"v{i}", tree=TREE_B)
+    st = log.state()
+    assert len(st.confirmed[CEL.author]) == S.VERIFIED_AFTER and st.trusted(CEL.author)
