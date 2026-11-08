@@ -160,9 +160,11 @@ Hecho en el commit siguiente:
 - `integrate` sin `--loop` avisa de que, mientras haya parches pendientes, no entra nada hasta volver a ejecutarlo (punto 2).
 - El alcance de siembra está bien en el nodo de jose: los cuatro repos tienen `allow` con `all`.
 
+- **En el modo abierto, cada agente de confianza finaliza desde `legion run`**: entre sesiones y mientras espera trabajo. Antes solo finalizaban `verify` e `integrate --loop`, y con todos los agentes ocupados lo verificado no entraba en `main`. No hay ningún nodo central: lo hacen tantos sitios como agentes (punto 2, en su versión p2p).
+
 Pendiente:
 
-- Que el integrador quede siempre en bucle por sí mismo (punto 2).
+- En el modo integrador, que es centralizado por definición, `integrate` sigue necesitando que alguien lo deje en bucle (punto 2). Para un proyecto p2p, el modo abierto debería ser el normal.
 - Escuchar en la red por defecto en Windows y macOS (punto 7).
 - Reparto activo del trabajo (punto 5).
 - `reads` por defecto (punto 6).

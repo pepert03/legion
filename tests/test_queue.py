@@ -1124,3 +1124,22 @@ def test_run_waits_for_work_between_sessions_that_found_nothing_open(project, mo
     assert cli.main(["run", "--max-runs", "2", "--pause", "7", "--", "my-agent"]) == 0
     assert len(ran) == 2 and slept == [7]                              # one look, and the task was there
     assert "nothing was open" in capsys.readouterr().out
+
+
+def test_in_the_open_mode_run_finalizes_what_the_others_verified(project, monkeypatch, capsys):
+    """Only `verify` and `integrate --loop` finalized, and while every agent was busy on a task nobody ran them:
+    verified patches waited out of main. Every trusted agent's `legion run` finalizes between its sessions now,
+    no node more central than another."""
+    from legion import cli
+    repo, tids, patch = project
+    c = as_(repo, "boss")
+    c.emit("project.policy", mode="open", quorum=3)                   # trusted owners: boss, luis and marta
+    c.sync()
+    patch("a", "ok\n")
+    for who in ("luis", "marta", "boss"):
+        assert integrator.verify_one(as_(repo, who), 60)[1] == "pass"  # verified, and nobody finalized
+    assert verdicts(tids)["a"] == [None]
+    as_(repo, "luis")
+    monkeypatch.setattr(cli, "run_agent", lambda argv: 0)
+    assert cli.main(["run", "--max-runs", "1", "--", "my-agent"]) == 0
+    assert verdicts(tids)["a"] == ["accepted"]

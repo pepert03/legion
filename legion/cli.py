@@ -2583,6 +2583,22 @@ def work_waiting(c: Ctx, now: float) -> bool:
     return any(t.id not in cool for t in tasks) or st.question_for(c.me, c.ident.name, now) is not None
 
 
+def finalize_here(c: Ctx) -> int:
+    """The open mode has no integrator: every trusted node finalizes what the others verified (integrator.finalize:
+    merges only, no build). Only `verify` and `integrate --loop` did it, and while every agent was busy on a task
+    nobody ran them, and verified patches waited out of main. Now `legion run` does it too, between an agent's
+    sessions and while it waits for work: as many places as agents, none of them central. What went in, or 0."""
+    if c.st.policy["mode"] != "open" or not c.st.trusted(c.me):
+        return 0
+    try:
+        need_git_merge_tree()
+        c.sync()
+        return integrator.finalize(c, lambda m: print(f"legion run: {m}", flush=True))
+    except (coordgit.GitError, Fail) as e:
+        print(f"legion run: couldn't finalize this time ({str(e).strip()[-200:]})", flush=True)
+        return 0
+
+
 def wait_for_work(c: Ctx, pause: float) -> None:
     """Between an agent's sessions, when its claim found nothing open: look every `pause` seconds, syncing, until
     there is something, or RUN_MAX_WAIT has passed. The waiting happens here, where it costs no tokens and no
@@ -2592,6 +2608,7 @@ def wait_for_work(c: Ctx, pause: float) -> None:
     while time.time() < end:
         time.sleep(min(pause, max(1, end - time.time())))
         c.sync()
+        finalize_here(c)
         if c.st.exclusive_done() or work_waiting(c, time.time()):
             return
 
@@ -2622,6 +2639,7 @@ def cmd_run(args):
         except KeyboardInterrupt:
             return 130
         runs, took = runs + 1, time.time() - started
+        finalize_here(c)
         if args.max_runs and runs >= args.max_runs:
             return 0
         if last_claim(c.repo, started) == 5:  # nothing was open for it: the project's doing, not the agent's
