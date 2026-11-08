@@ -1075,16 +1075,45 @@ def pack_count(repo, store: str) -> int:
     return len(list((Path(store) / "objects" / "pack").glob("*.pack")))
 
 
+def unindexed_packs(repo, store: str) -> list[Path]:
+    """The packs of the node's storage that lost their index: git can't see what they hold."""
+    if IS_WINDOWS and not native(repo):
+        return []  # inside WSL: git there deletes what it means to, nothing holds the files open
+    return [p for p in (Path(store) / "objects" / "pack").glob("pack-*.pack") if not p.with_suffix(".idx").exists()]
+
+
+def repair_packs(repo, store: str) -> int:
+    """Index again the packs that lost their index (see deletes_safely). How many it did."""
+    fixed = 0
+    for p in unindexed_packs(repo, store):
+        try:
+            done = subprocess.run(["git", "-C", store, "index-pack", str(p)], capture_output=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            break
+        fixed += done.returncode == 0
+    return fixed
+
+
+def deletes_safely(repo) -> bool:
+    """Whether git may delete packs from the node's storage now. On Windows a file that's open can't be deleted,
+    and a running node holds its packs open: in Erdős #902 jose's storage was compacted while its node ran, git
+    deleted the old packs' indexes but not the packs, and 209 of 215 packs were left with no index. Every ref but
+    a few pointed at objects git couldn't find, the node couldn't check the project's identity in anything it was
+    sent, and it took nothing in for four days. There, packs go only while the node is stopped."""
+    return not (IS_WINDOWS and native(repo)) or not node_running(repo)
+
+
 def compact_storage(repo, seconds: float = 100, merge: bool = True) -> bool:
     """Repack the node's storage if it holds more than MAX_PACKS packs. True if it did. Inside WSL too: skipped
     there, its packs piled up like anywhere else, and the fetches from it grew slow enough for the seeds to give
-    up."""
+    up. Packs that lost their index are indexed again first."""
     store = storage(repo)
+    repair_packs(repo, store)
     if pack_count(repo, store) <= MAX_PACKS:
         return False
     end = time.time() + seconds
     steps = [["multi-pack-index", "write"]]
-    if merge:
+    if merge and deletes_safely(repo):
         steps += [["multi-pack-index", "repack", "--batch-size=40m"], ["multi-pack-index", "expire"]]
     for step in steps:
         if store_git(repo, store, *step, timeout=max(1.0, end - time.time())):
@@ -1098,7 +1127,7 @@ GC_EVERY = 86400
 def gc_storage(repo) -> bool:
     """Once a day, where a sync process stays: drop from the node's storage what no ref holds any more (dropped
     saves, judged patches) and pack the rest. Refs going doesn't free the disk by itself. True if it ran."""
-    if time.time() - float(_cfg(repo, "legion.gced") or 0) < GC_EVERY:
+    if time.time() - float(_cfg(repo, "legion.gced") or 0) < GC_EVERY or not deletes_safely(repo):
         return False
     subprocess.run(["git", "config", "legion.gced", str(time.time())], cwd=repo, capture_output=True)
     return store_git(repo, storage(repo), "gc", "--quiet", "--prune=2.weeks.ago", timeout=1800) == 0
@@ -1143,6 +1172,8 @@ def run_network_sync(repo, quick: bool = False) -> bool:
     started, ok = time.time(), False
     try:
         if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
+            if not quick and IS_WINDOWS and native(repo):
+                upkeep(repo, quick)  # while nothing holds the packs open: the only time they can go (deletes_safely)
             ensure_node(repo)
             wait_connected(repo)
         seed_everyone(repo)

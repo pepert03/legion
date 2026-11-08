@@ -797,6 +797,50 @@ def test_a_storage_piling_up_packs_is_compacted(tmp_path, monkeypatch):
     assert not radicle.compact_storage(tmp_path)                       # few enough: left alone
 
 
+def test_on_windows_packs_go_only_while_the_node_is_stopped_and_one_that_lost_its_index_gets_it_back(tmp_path,
+                                                                                                    monkeypatch):
+    """jose's storage was compacted while its node ran: Windows kept the packs the node had open, git deleted
+    their indexes, and with 209 of 215 packs unreadable the node took nothing in for four days."""
+    store, repo = tmp_path / "storage", tmp_path / "r"
+    for r in (store, repo):
+        git(tmp_path, "init", "-q", str(r))
+    for n in range(5):
+        git(store, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "--allow-empty", "-m", str(n))
+        git(store, "repack", "-d", "-q")
+    radicle.enable(repo, "rad:zTest")
+    head = git(store, "rev-parse", "HEAD")
+    pack_dir = store / ".git" / "objects" / "pack"
+    for idx in pack_dir.glob("*.idx"):
+        idx.chmod(0o666)
+        idx.unlink()                                                    # what the compaction left
+    assert subprocess.run(["git", "-C", str(store), "cat-file", "-e", head], capture_output=True).returncode
+    monkeypatch.setattr(radicle, "IS_WINDOWS", True)
+    monkeypatch.setattr(radicle, "native", lambda repo: True)
+    monkeypatch.setattr(radicle, "storage", lambda repo: str(store / ".git"))
+    monkeypatch.setattr(radicle, "MAX_PACKS", 3)
+    monkeypatch.setattr(radicle, "node_running", lambda repo=None, home=None: True)
+    steps = []
+    monkeypatch.setattr(radicle, "store_git", lambda repo, store, *args, timeout: steps.append(args[:2]) or 0)
+    assert radicle.compact_storage(repo)
+    assert not radicle.unindexed_packs(repo, str(store / ".git"))       # indexed again first
+    git(store, "cat-file", "-e", head)
+    assert steps == [("multi-pack-index", "write")]                     # nothing deleted while the node runs
+    assert not radicle.gc_storage(repo) and steps == [("multi-pack-index", "write")]
+    monkeypatch.setattr(radicle, "node_running", lambda repo=None, home=None: False)
+    assert radicle.compact_storage(repo) and ("multi-pack-index", "expire") in steps
+    assert radicle.gc_storage(repo) and steps[-1] == ("gc", "--quiet")
+    from legion import tunnel
+    order = []
+    monkeypatch.setattr(radicle, "upkeep", lambda repo, quick: order.append("upkeep"))
+    monkeypatch.setattr(radicle, "ensure_node", lambda repo: order.append("node"))
+    monkeypatch.setattr(radicle, "wait_connected", lambda repo: None)
+    monkeypatch.setattr(radicle, "seed_everyone", lambda repo: None)
+    monkeypatch.setattr(tunnel, "keep", lambda repo: None)
+    monkeypatch.setattr(radicle, "network_sync", lambda repo, force, quick: True)
+    radicle.run_network_sync(repo)
+    assert order[:2] == ["upkeep", "node"]                              # stopped: the upkeep before it starts
+
+
 def test_the_nodes_storage_is_collected_once_a_day(tmp_path, monkeypatch):
     """Dropping refs doesn't free the disk by itself: what no ref holds stays until a gc."""
     store, repo = tmp_path / "storage", tmp_path / "r"
