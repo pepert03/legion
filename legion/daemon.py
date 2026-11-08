@@ -238,7 +238,9 @@ def clear_stale_locks(repo, log=print) -> list[str]:
     and any under refs/; not gc.log.lock, which a long background gc holds), when no process holds them open.
     With a stale packed-refs.lock, every fetch that deleted a ref failed ("failed to delete reference"), and since
     nodes drop judged patches and old saves they all do: a node in Erdős #902 saw nothing new for two hours. At
-    most every STALE_LOCK seconds per clone (.git/legion-locks-checked); off with LEGION_LOCK_CLEANUP=0."""
+    most every STALE_LOCK seconds per clone (.git/legion-locks-checked); off with LEGION_LOCK_CLEANUP=0.
+    And the clone's own (HEAD.lock, index.lock, its ref locks): instinct's `c` had a HEAD.lock that a git cut off by
+    its sandbox left, and couldn't commit, check out or save anything for a whole day."""
     from . import radicle
     if not cleanup_enabled(repo):
         return []
@@ -249,30 +251,41 @@ def clear_stale_locks(repo, log=print) -> list[str]:
             return []
     except OSError:
         pass
+    git_dir = stamp.parent
+    clone = [*(git_dir / name for name in ("HEAD.lock", "index.lock", "packed-refs.lock")),
+             *(git_dir / "refs").rglob("*.lock")]
     try:
         stamp.touch()
-        where = radicle.storage(repo)
-        if radicle.IS_WINDOWS and not radicle.native(repo):  # the storage lives in WSL
+        held = None if radicle.IS_WINDOWS else open_files()  # Windows refuses to remove an open file itself
+        if held is None and not radicle.IS_WINDOWS:
+            return []
+        gone = _unlink_stale(clone, held)
+        where = radicle.storage(repo) if radicle.rid(repo) else None
+        if where and radicle.IS_WINDOWS and not radicle.native(repo):  # the storage lives in WSL
             out = radicle.run("sh", "-c", WSL_CLEAR.format(), "sh", where, str(STALE_LOCK // 60), repo=repo,
                               check=False, timeout=120).stdout
-            gone = out.split()
-        else:
-            held = None if radicle.IS_WINDOWS else open_files()  # Windows refuses to remove an open file itself
-            if held is None and not radicle.IS_WINDOWS:
-                return []
-            gone, now = [], time.time()
-            for p in [*Path(where).glob("packed-refs.lock"), *Path(where, "refs").rglob("*.lock")]:
-                if now - p.stat().st_mtime > STALE_LOCK and str(p) not in (held or ()):
-                    try:
-                        p.unlink()
-                    except PermissionError:  # open in another process
-                        continue
-                    gone.append(str(p))
+            gone += out.split()
+        elif where:
+            gone += _unlink_stale([*Path(where).glob("packed-refs.lock"), *Path(where, "refs").rglob("*.lock")], held)
     except (radicle.RadError, OSError):
         return []
     if gone:
-        log(f"{time.strftime('%H:%M:%S')} {repo}: removed {len(gone)} lock file(s) the Radicle node left behind: "
+        log(f"{time.strftime('%H:%M:%S')} {repo}: removed {len(gone)} stale lock file(s), left by a process cut off mid-write: "
             + ", ".join(g.rsplit("/", 1)[-1] for g in gone[:5]))
+    return gone
+
+
+def _unlink_stale(paths, held) -> list[str]:
+    """Remove the lock files older than STALE_LOCK that no process holds open. The ones it removed."""
+    gone, now = [], time.time()
+    for p in paths:
+        try:
+            if not p.is_file() or now - p.stat().st_mtime <= STALE_LOCK or str(p) in (held or ()):
+                continue
+            p.unlink()
+        except OSError:  # open in another process (Windows), or gone meanwhile
+            continue
+        gone.append(str(p))
     return gone
 
 

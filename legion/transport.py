@@ -9,6 +9,7 @@ LEGION_SYNC=off: commands don't touch the network at all. What they record stays
 
 import os
 import sys
+import time
 
 from . import coordgit
 from . import daemon
@@ -16,10 +17,19 @@ from . import locks
 from . import radicle
 
 LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see sync)
-PUBLISH_WAIT = 75  # seconds a command with events of its own waits for their push (see publish)
+# seconds a command with events of its own waits for their push (see publish). Within the 60 s that Instinct's
+# sandboxes give a command, with the fetch from the seeds before it: at 75 every claim there was cut off.
+PUBLISH_WAIT = 45
 SETTLED = 120  # seconds after which a sync process is taken to stay, and a command doesn't wait for its push
 STARVED = 3  # where no sync process stays, a command that publishes fetches too after this many fetch intervals
 repo_lock = daemon.repo_lock
+
+
+def timed(what: str, since: float) -> None:
+    """With LEGION_TIMING set, how long a step of the sync round took, on stderr: Instinct's agents measured
+    claims of 60 to 120 s from the outside, and nothing said which step they went on."""
+    if os.environ.get("LEGION_TIMING"):
+        print(f"legion: timing: {what} {time.time() - since:.1f} s", file=sys.stderr, flush=True)
 
 
 def keep_fetching(repo) -> None:
@@ -70,19 +80,27 @@ def _sync(c) -> None:
                     and not (daemon.alive() and daemon.age() >= SETTLED)):  # no sync process stays: fetch, waiting
                 print("legion: fetching from the Radicle network (no sync process stays on this machine)",
                       file=sys.stderr, flush=True)
+                t0 = time.time()
                 try:
                     radicle.fetch_inline(c.repo)
                 except radicle.RadError:
                     pass
+                timed("fetch from the network", t0)
+            t0 = time.time()
             with locks.held(daemon.repo_lock(c.repo), wait=wait) as got:
+                timed("waiting for the clone's lock", t0)
+                t0 = time.time()
                 if got or wait > LOCK_WAIT:
                     c.unreachable = coordgit.sync(c.repo, c.ident, publish=False)
+                    timed("sync with the node's storage", t0)
                 else:
                     print("legion: this clone is being synced by another process right now: reading what it "
                           "has", file=sys.stderr)
             done = True
             if coordgit.is_radicle(c.repo):
+                t0 = time.time()
                 done = c._publish(wait=bool(getattr(c, "unpublished", None)))
+                timed("publish" + (" (out)" if done else " (not out yet)"), t0)
                 daemon.clear_stale_locks(c.repo, lambda m: print(f"legion: {m}", file=sys.stderr))
                 if (done and getattr(c, "unpublished", None) and not (daemon.alive() and daemon.age() >= SETTLED)
                         and radicle.fetch_due(c.repo, radicle.SANDBOX_FETCH_EVERY * STARVED)):

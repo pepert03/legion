@@ -389,6 +389,7 @@ class State:
         self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
         self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
         self.worked: set[str] = set()  # owners whose agents did something here (more than join): see newcomer
+        self.cant: dict[str, dict[str, str]] = {}  # agent -> {task: what its machine lacks for it}: see cannot
         self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
         self.briefs: dict[str, list[dict]] = defaultdict(list)  # task -> its state of the art, every version
         self.questions: dict[str, dict] = {}  # id -> {ev, task, result, taken: [(author, ts)], answers, status}
@@ -635,6 +636,12 @@ class State:
         return {tid for tid, ts in left.items()
                 if not any(i["task"] == tid and i["ev"]["ts"] > ts and self.idea_status(i) == "open"
                            for i in self.ideas.values())}
+
+    def cannot(self, author: str) -> dict[str, str]:
+        """The tasks this agent said its machine can't do (`release --cant`), and what it lacks: claim never hands
+        them to it again, until it takes one back by name. In Erdős #902 instinct's #6 had no SAT solver, was
+        handed the SAT task at every session (its cooldown ran out between them), and let it go every time."""
+        return self.cant.get(author, {})
 
     def newcomer(self, author: str) -> bool:
         """An agent whose owner hasn't done anything here yet: it starts at the hub (claim sends it). The founders
@@ -1506,6 +1513,7 @@ class State:
             self.claims[task.id].append(Claim(task.id, ev["author"], ev["name"], ev["lamport"], ev["ts"], ttl, ev["ts"],
                                               join=ev.get("join") is True,
                                               view=ev["view"] if ev.get("view") in ("fresh", "full") else ""))
+            self.cant.get(ev["author"], {}).pop(task.id, None)  # taken back by name: it can do it now
         elif t == "task.heartbeat":
             c = self._my_claim(ev)
             if c is None:
@@ -1517,8 +1525,13 @@ class State:
             mine = [c for c in self.claims[task.id] if c.author == ev["author"] and not c.released]
             if not mine:
                 return "no claim to release"
+            cant = ev.get("cant")
+            if cant is not None and (not isinstance(cant, str) or not cant.strip() or len(cant) > 200):
+                return "cant must say, in at most 200 characters, what this machine lacks for the task"
             for c in mine:
                 c.released, c.released_ts, c.lost = True, ev["ts"], ev.get("lost") is True
+            if cant:
+                self.cant.setdefault(ev["author"], {})[task.id] = cant.strip()
         elif t == "attempt.reported":
             if ev.get("outcome") not in ("success", "failure"):
                 return "outcome must be success or failure"

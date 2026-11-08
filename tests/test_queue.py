@@ -703,6 +703,30 @@ def test_letting_a_task_go_takes_a_report_and_cools_it_down(project, capsys):
     assert main(["claim", tids["a"]]) == 0                          # named, it can take it back
 
 
+def test_a_task_this_machine_cant_do_isnt_handed_back_and_the_steps_can_be_timed(project, capsys, monkeypatch):
+    """Instinct's #6 had no SAT solver: handed the SAT task at every session, its cooldown over between them, it
+    let it go every time. And claims of 60 to 120 s, with nothing saying which step they went on."""
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    assert main(["claim", tids["a"]]) == 0
+    assert main(["release", tids["a"], "--cant", "a SAT solver"]) == 0   # it says what was missing: no notes needed
+    said = capsys.readouterr().out
+    assert "won't hand it to you again" in said and "a SAT solver" in said
+    c = Ctx(sync=False)
+    st = c.st
+    assert st.cannot(c.me) == {tids["a"]: "a SAT solver"}
+    assert any("lacks a SAT solver" in a["notes"] for a in st.attempts)
+    monkeypatch.setattr(S, "COOLDOWN", 0)                                # its cooldown over: still not handed back
+    monkeypatch.setenv("LEGION_TIMING", "1")
+    assert main(["claim"]) == 0 and Ctx(sync=False).st.holder(tids["b"], time.time()).name == "luis#1"
+    assert "legion: timing: claim took" in capsys.readouterr().err
+    main(["release", tids["b"], "--notes", "no route"])
+    capsys.readouterr()
+    assert main(["claim"]) != 0 or Ctx(sync=False).st.holder(tids["a"], time.time()) is None
+    assert main(["claim", tids["a"]]) == 0                               # by name, once it can
+
+
 def test_an_agent_going_round_in_circles_is_told_and_handed_another_task(project, capsys, monkeypatch):
     """The viewer said "Plateaued?" of fifteen agents in Erdős #902, and nothing told them: Instinct's and Muse's
     loops kept one session going, claiming and reporting the same tasks scores of times a day with no patch."""

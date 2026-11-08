@@ -529,6 +529,22 @@ def test_lock_files_a_node_left_in_its_storage_are_removed(network, monkeypatch)
     os.utime(new, (0, 0))
     assert daemon.clear_stale_locks(alice, log=lambda m: None) == []    # looked at lately: not again so soon
 
+def test_a_lock_left_in_the_clone_by_a_git_cut_off_is_removed(tmp_path, monkeypatch):
+    """instinct's `c` had a HEAD.lock a git cut off by its sandbox left: a day without committing anything."""
+    import os
+    from legion import daemon
+    repo = tmp_path / "r"
+    git(tmp_path, "init", "-q", str(repo))
+    head, index = repo / ".git" / "HEAD.lock", repo / ".git" / "index.lock"
+    for f in (head, index):
+        f.write_text("")
+    os.utime(head, (0, 0))                                               # left long ago; index.lock is in use
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(daemon, "open_files", lambda: set())
+    assert daemon.clear_stale_locks(repo, log=lambda m: None) == [str(head)]
+    assert not head.exists() and index.exists()
+
+
 def test_where_no_sync_process_stays_a_command_fetches_waiting_now_and_then(network, monkeypatch):
     """Instinct's sandboxes kill what a command leaves running: the fetch kicked in the background died with each
     command, and for days its clones got nothing from the nodes their node didn't meet in its seconds alive."""
@@ -712,6 +728,72 @@ def test_a_node_whose_storage_went_back_takes_up_the_networks_chain_of_its_signe
     assert radicle.unheal(repo) == (True, f"this node's signed refs are back at {moved_meanwhile[:8]}, what they "
                                           "held before the heal")
     assert git(store, "rev-parse", ref) == moved_meanwhile and radicle.unheal(repo)[0] is False
+
+
+def test_a_node_that_lives_seconds_reads_the_other_namespaces_from_the_seeds_over_https(signed_chains, tmp_path,
+                                                                                        monkeypatch):
+    """Instinct's sandboxes: a node up for seconds got what the nodes it met then gossiped, and for five days
+    nothing from jose's node or opencode's, which the seeds had; the fetch through the node failed, and took a
+    minute doing it, every claim cut off by the tools' 60 s."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    c = signed_chains
+    repo, store, bare = c["repo"], c["store"], c["bare"]
+    seed = bare("rosa")
+    work = tmp_path / "w-ns"
+    git(tmp_path, "init", "-q", str(work))
+
+    def nid_of(key):
+        n = int.from_bytes(b"\xed\x01" + key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw), "big")
+        out = ""
+        while n:
+            n, d = divmod(n, 58)
+            out = radicle.B58[d] + out
+        return "z" + out
+
+    def publish(where, key, nid, text, parent=None, signer=None):
+        """A namespace as Radicle leaves it: a coord, and its signed refs listing it."""
+        git(work, "checkout", "-q", "--orphan", f"c-{text}")
+        (work / "f").write_text(text)
+        git(work, "add", "f")
+        git(work, "-c", "user.name=n", "-c", "user.email=n@n", "commit", "-q", "-m", text)
+        coord = git(work, "rev-parse", "HEAD")
+        listed = f"{coord} refs/legion/pub/abc/coord\n" + (f"{parent} refs/rad/sigrefs-parent\n" if parent else "")
+        git(work, "checkout", "-q", "--orphan", f"s-{text}")
+        git(work, "rm", "-q", "-rf", "--cached", ".")
+        (work / "refs").write_bytes(listed.encode())
+        (work / "signature").write_bytes((signer or key).sign(listed.encode()))
+        git(work, "add", "refs", "signature")
+        args = ["commit-tree", git(work, "write-tree"), "-m", text] + (["-p", parent] if parent else [])
+        sig = git(work, "-c", "user.name=n", "-c", "user.email=n@n", *args)
+        git(work, "push", "-q", "--force", str(where), f"{coord}:refs/namespaces/{nid}/refs/legion/pub/abc/coord",
+            f"{sig}:refs/namespaces/{nid}/refs/rad/sigrefs")
+        return coord, sig
+
+    other, stranger = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    o_nid, s_nid = nid_of(other), nid_of(stranger)
+    first = publish(store, other, o_nid, "o1")                          # what the storage has of `other`
+    git(seed, "fetch", "-q", str(store), f"refs/namespaces/{o_nid}/*:refs/namespaces/{o_nid}/*")
+    later = publish(seed, other, o_nid, "o2", parent=first[1])          # and the seeds have since
+    publish(seed, stranger, s_nid, "s1", signer=other)                  # signed by a key not its own
+    publish(seed, c["keys"][0], c["nid"], "mine")                       # this node's own: never taken from them
+    c["seeds"][:] = [seed]
+    monkeypatch.setattr(radicle, "_storage_values", lambda repo: dict(
+        (ref, sha) for sha, ref in (l.split(" ", 1) for l in git(store, "for-each-ref",
+                                                                   "--format=%(objectname) %(refname)").splitlines())))
+    assert radicle.fetch_inline(repo) and radicle.netsync_status(repo)["ok"]
+    ns = lambda nid: git(store, "for-each-ref", "--format=%(objectname) %(refname)", f"refs/namespaces/{nid}/")
+    assert ns(o_nid).split() == [later[0], f"refs/namespaces/{o_nid}/refs/legion/pub/abc/coord",
+                                 later[1], f"refs/namespaces/{o_nid}/refs/rad/sigrefs"]
+    assert not ns(s_nid) and not ns(c["nid"])                           # not its signature; this node's own
+    assert not git(store, "for-each-ref", "refs/legion-seed/")
+    git(store, "update-ref", f"refs/namespaces/{o_nid}/refs/rad/sigrefs", publish(store, other, o_nid, "o3",
+                                                                                  parent=later[1])[1])
+    newest = git(store, "rev-parse", f"refs/namespaces/{o_nid}/refs/rad/sigrefs")
+    assert radicle.fetch_from_seeds(repo)
+    assert git(store, "rev-parse", f"refs/namespaces/{o_nid}/refs/rad/sigrefs") == newest  # never back
+    c["seeds"][:] = [str(seed) + "-gone"]
+    assert not radicle.fetch_inline(repo) and not radicle.netsync_status(repo)["ok"]
 
 
 def test_the_check_only_reads_and_says_how_each_seed_compares(signed_chains):

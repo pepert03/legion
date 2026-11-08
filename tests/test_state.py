@@ -440,6 +440,16 @@ def test_an_agent_whose_patch_waits_is_free_for_other_work():
     assert log.state().held_by(ANA.author, 1001) == []
 
 
+def test_a_task_an_agents_machine_cant_do_stays_out_of_its_way_until_it_takes_it_back():
+    log, tid = project()
+    log.add(ANA, "task.claimed", task=tid, ttl=600)
+    assert log.add(ANA, "task.released", task=tid, cant="x" * 201) is None or "cant" in str(log.state().ignored[-1][1])
+    log.add(ANA, "task.released", task=tid, cant=" a SAT solver ")
+    assert log.state().cannot(ANA.author) == {tid: "a SAT solver"} and log.state().cannot(BEA.author) == {}
+    log.add(ANA, "task.claimed", task=tid, ttl=600)                     # by name: it can do it now
+    assert log.state().cannot(ANA.author) == {}
+
+
 def test_attempts_since_the_task_last_advanced():
     log, tid = project()
     log.add(ANA, "task.claimed", task=tid, ttl=600)

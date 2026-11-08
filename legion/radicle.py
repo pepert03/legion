@@ -1171,16 +1171,22 @@ def run_network_sync(repo, quick: bool = False) -> bool:
     from . import tunnel
     started, ok = time.time(), False
     try:
-        if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
-            if not quick and IS_WINDOWS and native(repo):
-                upkeep(repo, quick)  # while nothing holds the packs open: the only time they can go (deletes_safely)
-            ensure_node(repo)
-            wait_connected(repo)
-        seed_everyone(repo)
-        tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
-        ok = network_sync(repo, force=True, quick=quick)
-    except RadError:
-        ok = False
+        try:
+            if not node_running(repo):  # stopped (a reboot, a suspended computer): start it
+                if not quick and IS_WINDOWS and native(repo):
+                    upkeep(repo, quick)  # nothing holds the packs open: the only time they can go (deletes_safely)
+                ensure_node(repo)
+                wait_connected(repo)
+            seed_everyone(repo)
+            tunnel.keep(repo)  # the direct tunnels to the other nodes, if this clone uses them: relaunched if they died
+            ok = network_sync(repo, force=True, quick=quick)
+        except RadError:
+            ok = False
+        if not ok:  # the node couldn't fetch (a broken storage, no peer answering): the seeds over HTTPS
+            try:
+                ok = fetch_from_seeds(repo)
+            except (RadError, OSError, subprocess.SubprocessError):
+                pass
     finally:
         # The fetch is over: said before the storage's upkeep, which took up to five minutes more and held every
         # fetch after it off meanwhile, the node seeing nothing new.
@@ -1223,8 +1229,96 @@ def fetch_due(repo, every: float = SANDBOX_FETCH_EVERY) -> bool:
 
 
 def fetch_inline(repo) -> bool:
-    """A network fetch this command waits for (see SANDBOX_FETCH_EVERY). True if it reached the network."""
-    return run_network_sync(repo, quick=True)
+    """A network fetch this command waits for (see SANDBOX_FETCH_EVERY). True if it reached the network. From the
+    seeds over HTTPS (see fetch_from_seeds): through the node it started the node, waited for it to connect and
+    for `rad sync --fetch`, a minute in all, and Instinct's sandboxes, whose tools stop a command at 60 s, saw
+    every claim fail while the fetch itself failed too."""
+    started = time.time()
+    ok = fetch_from_seeds(repo)
+    _write_netsync(repo, {"started": started, "ended": time.time(), "running": False, "ok": ok})
+    return ok
+
+
+SEED_BUDGET = 15  # seconds a fetch from the seeds over HTTPS may take, all seeds together (with PUBLISH_WAIT, < 60)
+
+
+def fetch_from_seeds(repo, budget: float = SEED_BUDGET) -> bool:
+    """Every other node's namespace as the public seeds hold it (HEAL_SEEDS), over HTTPS and into the node's
+    storage, where the next sync copies it into the clone as from any fetch: no node has to be up, connected, or
+    hear of it by gossip. A sandbox's node lives seconds: in Erdős #902 instinct's machines got the nodes they met
+    in those seconds and nobody else's, and for five days nothing from jose's node or opencode's, which the seeds
+    had. A namespace is taken only as the node itself signed it (every new commit of its signed refs, see
+    chain_signed_by), only where it goes on from what the storage has, and with exactly the refs it signed.
+    This node's own namespace is never touched (heal_sigrefs is for that). True if a seed answered."""
+    if IS_WINDOWS and not native(repo):
+        return False  # inside WSL: its node fetches as ever
+    end = time.time() + budget
+    own = _cfg(repo, "legion.nid") or node_id(repo)
+    store = storage(repo)
+    for url in heal_urls(repo):
+        if end - time.time() < 5:
+            break
+        try:
+            p = _git(store, "ls-remote", url, timeout=max(5.0, min(20.0, end - time.time())))
+        except subprocess.TimeoutExpired:
+            continue
+        if p.returncode:
+            continue
+        remote = {}
+        for line in p.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            m = re.match(r"refs/namespaces/([^/]+)/(refs/.+)$", ref)
+            if m and m.group(1) != own:
+                remote.setdefault(m.group(1), {})[m.group(2)] = sha
+        local = _storage_values(repo)
+        sig = "refs/rad/sigrefs"
+        changed = [n for n, refs in remote.items()
+                   if refs.get(sig) and refs[sig] != local.get(f"refs/namespaces/{n}/{sig}")]
+        if changed and end - time.time() > 3:
+            take(repo, store, url, changed, remote, local, end)
+        return True
+    return False
+
+
+def take(repo, store: str, url: str, nids: list[str], remote: dict, local: dict, end: float) -> list[str]:
+    """Bring these namespaces from a seed into the storage (see fetch_from_seeds). The ones it took."""
+    sig, temp, took = "refs/rad/sigrefs", "refs/legion-seed/", []
+    try:
+        try:  # one fetch for all of them, under a prefix of its own: nothing of the namespaces moves yet
+            _git(store, "fetch", "-q", "--no-tags", "--no-write-fetch-head", url,
+                 *[f"+refs/namespaces/{n}/*:{temp}{n}/*" for n in nids], timeout=max(3.0, end - time.time()))
+        except subprocess.TimeoutExpired:
+            return took
+        for n in nids:
+            new, old = remote[n][sig], local.get(f"refs/namespaces/{n}/{sig}")
+            if _git(store, "rev-parse", "-q", "--verify", f"{temp}{n}/{sig}").stdout.strip() != new:
+                continue  # it moved at the seed meanwhile, or didn't come: the next fetch
+            if old and not _descends(store, old, new):
+                continue  # behind what the storage has, or another branch: Radicle's own fetch decides
+            if not chain_signed_by(store, new, old or "", n):
+                continue
+            listed = _git(store, "cat-file", "blob", f"{new}:refs")
+            signed = dict(reversed(line.split(" ", 1)) for line in listed.stdout.splitlines() if " " in line)
+            signed.pop("refs/rad/sigrefs-parent", None)  # signed, but not a ref: the chain's previous commit
+            if listed.returncode or not signed:
+                continue
+            # bytes in: as text they'd go in with Windows' line ends, which git takes for part of the line
+            check = subprocess.run(["git", "-C", store, "cat-file", "--batch-check"], capture_output=True,
+                                   input="".join(f"{o}\n" for o in signed.values()).encode())
+            if b"missing" in check.stdout:
+                continue
+            prefix = f"refs/namespaces/{n}/"
+            lines = [f"update {prefix}{sig} {new} {old or '0' * 40}\n"]  # only from what it held
+            lines += [f"update {prefix}{r} {o}\n" for r, o in signed.items()]
+            lines += [f"delete {ref}\n" for ref in local if ref.startswith(prefix) and ref != prefix + sig
+                      and ref[len(prefix):] not in signed]
+            if not subprocess.run(["git", "-C", store, "update-ref", "--stdin"], capture_output=True,
+                                  input="".join(lines).encode()).returncode:  # all of it, or nothing
+                took.append(n)
+    finally:
+        for r in _git(store, "for-each-ref", "--format=%(refname)", temp).stdout.split():
+            _git(store, "update-ref", "-d", r)
+    return took
 
 
 MAX_ARGS = 20000  # characters of refspecs per fetch: Windows caps a command line at 32767

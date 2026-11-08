@@ -636,7 +636,7 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # What this agent already tried since the task last advanced goes last: someone else, or
                 # another task, has a better chance than the same agent again. What it let go of in the last
                 # hour isn't handed back to it at all (see COOLDOWN).
-                cool = c.st.cooling(c.me, now)
+                cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me))
                 fresh = lambda ts: sorted((t for t in ts if t.id not in cool),  # noqa: E731
                                           key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
                 return (fresh(c.st.claimable(now)), fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
@@ -676,8 +676,8 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                     return 4
                 waiting = [t for t in c.st.tasks.values()
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled and t.kind != "result"]
-                cool = sorted((x for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"),
-                              key=lambda x: c.st.tasks[x].key)
+                cool = sorted((x for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"
+                               and x not in c.st.cannot(c.me)), key=lambda x: c.st.tasks[x].key)
                 if cool:
                     # Nothing else is open: rather than wait (an hour, and agents sat idle with the task open),
                     # it takes back what it let go of, by another route.
@@ -1129,14 +1129,18 @@ def cmd_release(args):
     mine = [cl for cl in c.st.claims[t.id] if cl.author == c.me and not cl.released]
     since = max((cl.lamport for cl in mine), default=0)
     told = any(a["author"] == c.me and a.get("task") == t.id and a["lamport"] > since for a in c.st.attempts)
-    if args.notes:  # what it tried goes with it, as a failed attempt
-        c.emit("attempt.reported", task=t.id, outcome="failure", notes=args.notes)
+    cant = (args.cant or "").strip()[:200]
+    if args.notes or cant:  # what it tried goes with it, as a failed attempt
+        c.emit("attempt.reported", task=t.id, outcome="failure",
+               notes=args.notes or f"can't do it on this machine: it lacks {cant}")
     elif mine and not told:
         raise Fail(f"say what you tried before letting {t.key} go, so the next agent doesn't repeat it: `python -m "
-                   f"legion release {t.id} --notes 'what you tried, where it broke'` (or report it first)", 2)
-    c.emit("task.released", task=t.id)
+                   f"legion release {t.id} --notes 'what you tried, where it broke'` (or report it first); or, if "
+                   f"this machine can't do it, `--cant 'what it lacks'`", 2)
+    c.emit("task.released", task=t.id, **({"cant": cant} if cant else {}))
     c.sync()
-    print(f"You released {t.key}.")
+    print(f"You released {t.key}." + (f" claim won't hand it to you again (this machine lacks {cant}); "
+                                       f"`claim {t.id}` takes it back once it can." if cant else ""))
     if unsaved(c, t):
         print(SAVE_HINT.format(tid=t.id))
     since = max((cl.lamport for cl in c.st.claims[t.id] if cl.author == c.me), default=0)
@@ -2682,7 +2686,7 @@ def recorded_by(c: Ctx) -> int:
 def work_waiting(c: Ctx, now: float) -> bool:
     """Whether claim would hand this agent something now: a task free, one to join, prepare or compete on, or
     a question to settle."""
-    st, cool = c.st, c.st.cooling(c.me, now)
+    st, cool = c.st, c.st.cooling(c.me, now) | set(c.st.cannot(c.me))
     tasks = [t for ts in (st.claimable(now), st.joinable(c.me, now), st.preparable(now), st.competitive_for(c.me))
              for t in ts]
     return any(t.id not in cool for t in tasks) or st.question_for(c.me, c.ident.name, now) is not None
@@ -2982,6 +2986,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("release", help="release your claim, saying what you tried")
     s.add_argument("task")
     s.add_argument("--notes", help="what you tried and where it broke (needed unless you reported it already)")
+    s.add_argument("--cant", metavar="WHAT", help="this machine can't do the task: what it lacks (a SAT solver, a "
+                                                  "GPU...); claim won't hand it to you again")
     s.set_defaults(func=cmd_release)
 
     s = sub.add_parser("report", help="publish what you tried")
@@ -3291,6 +3297,7 @@ def main(argv=None) -> int:
     args = parser().parse_args(argv)
     if getattr(args, "json", False) and args.func in RECORDING:
         return recorded_json(args)
+    started = time.time()
     try:
         return args.func(args) or 0
     except Fail as e:
@@ -3299,3 +3306,6 @@ def main(argv=None) -> int:
     except coordgit.GitError as e:
         print(f"legion: git error: {e}", file=sys.stderr)
         return 1
+    finally:
+        if os.environ.get("LEGION_TIMING"):
+            print(f"legion: timing: {args.cmd} took {time.time() - started:.1f} s in all", file=sys.stderr)
