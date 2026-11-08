@@ -687,6 +687,13 @@ def _kick(repo, name: str, stale: float = 120) -> None:
         _write_netsync(repo, {"started": now, "running": False}, name)
 
 
+def timed(what: str, since: float) -> None:
+    """With LEGION_TIMING set, how long a step took, on stderr (see transport.timed): instinct's `a` ran
+    `netsync --publish` twice to its tools' limit of 120 s, and nothing said where it stood."""
+    if os.environ.get("LEGION_TIMING"):
+        print(f"legion: timing: {what} {time.time() - since:.1f} s", file=sys.stderr, flush=True)
+
+
 def _rounds(repo, name: str, work) -> None:
     """What a kicked process does: the work, again while more was asked for meanwhile."""
     try:
@@ -860,10 +867,12 @@ def sigrefs_status(repo, fetch: bool = False) -> dict:
     seeds = []
     for n, url in enumerate(heal_urls(repo)):
         host = url.split("//", 1)[-1].split("/", 1)[0]
-        try:
-            p = _git(store, "ls-remote", url, ref, timeout=40)
+        t0 = time.time()
+        try:  # 15 s: iris, down, cost every publish 40 s here
+            p = _git(store, "ls-remote", url, ref, timeout=15)
         except subprocess.TimeoutExpired:
             p = None
+        timed(f"asking {host}", t0)
         if p is None or p.returncode:
             seeds.append({"seed": host, "url": url, "tip": "", "case": "error"})
             continue
@@ -999,6 +1008,7 @@ def run_publish(repo) -> None:
         return
     # A node the sandbox stopped can't announce, nor serve what it announces: pushed, the events stayed in its
     # storage. Only the network fetch started it, in a process of its own the sandbox killed too.
+    t0 = time.time()
     try:
         healed = heal_sigrefs(repo)
         if healed:
@@ -1006,13 +1016,18 @@ def run_publish(repo) -> None:
                   "what it published", file=sys.stderr, flush=True)
     except (RadError, OSError, subprocess.SubprocessError):
         pass
+    timed("heal check of the signed refs", t0)
+    t0 = time.time()
     try:
         if not node_running(repo):
             ensure_node(repo)
             wait_connected(repo)
     except RadError:
         pass
+    timed("node up", t0)
+    t0 = time.time()
     _rounds(repo, "publish", lambda: publish_radicle(repo, ident))
+    timed("publish, all of it", t0)
 
 
 def kick_network_sync(repo) -> bool:
@@ -1544,8 +1559,12 @@ def publish(repo, who: str) -> None:
         # Pushed without the helper's own announcement, which waits for the seeds with no bound of its own: on
         # muse's machine it never came back, the publish died at its time limit, and nothing went out for hours.
         # The announcement that follows has one.
+        t0 = time.time()
         _push(repo, own, strict=True)
+        timed(f"push of this node's own refs ({len(own)})", t0)
+        t0 = time.time()
         announce_waiting(repo)
+        timed("announcement, waiting for a seed", t0)
         own = []
     try:
         # Everything in one push when it goes through: Radicle's helper spends ten seconds and more on each
@@ -1554,8 +1573,10 @@ def publish(repo, who: str) -> None:
         # when the command returns, the big one never finished, and with it went this node's events.
         if len(rest) > BIG_PUBLISH:
             raise RadError("too much for one push")
+        t0 = time.time()
         try:
             _push(repo, own + rest + main, strict=True)
+            timed(f"push of the rest ({len(own + rest + main)} refs)", t0)
         except RadError as e:
             if not only_main_refused(e):  # the node has a newer main: the rest went through
                 raise
@@ -1567,15 +1588,19 @@ def publish(repo, who: str) -> None:
         # Then its own coord first and alone: whatever happens to the patches, its events go out. Then the
         # patches it gossips, in batches split in two on failure: one patch whose objects this clone lacks
         # ("missing necessary objects") made every push fail, and with them every event of this node.
+        t0 = time.time()
         _push(repo, own, strict=True)
         for i in range(0, len(rest), 200):  # keeps the command line short with many patches
             _push(repo, rest[i:i + 200], strict=False)
         publish_main(repo)
+        timed(f"push of the rest, in batches ({len(rest)} refs)", t0)
     subprocess.run(["git", "config", "legion.published", f"{mark} {time.time()}"], cwd=repo, capture_output=True)
     if not ANNOUNCE_INLINE:
         kick_announce(repo)
     elif rest or main:
+        t0 = time.time()
         announce_waiting(repo)  # the patches and main too, as far as a bounded wait goes
+        timed("announcement of the rest", t0)
 
 
 def _push(repo, specs: list[str], strict: bool, sync: bool = False) -> None:
