@@ -263,7 +263,7 @@ def cmd_heal(args):
         return 0
     if radicle.heal_off():
         raise Fail("LEGION_HEAL=off: healing is turned off on this machine")
-    did, said = radicle.unheal(repo) if args.undo else radicle.heal(repo)
+    did, said = radicle.unheal(repo) if args.undo else radicle.heal(repo, args.seed)
     print(said)
     return 0 if did else 1
 
@@ -323,6 +323,8 @@ def add_parsers(sub) -> None:
     s = sub.add_parser("heal", help="this node's signed refs against what the seeds hold of them")
     s.add_argument("--check", action="store_true", help="only compare them, changing nothing")
     s.add_argument("--undo", action="store_true", help="put back what the last heal replaced")
+    s.add_argument("--seed", metavar="HOST", help="take this seed's chain when the seeds hold different branches "
+                                                   "(rosa.radicle.network, iris.radicle.network, seed.radicle.at)")
     s.set_defaults(func=cmd_heal)
 
     s = sub.add_parser("daemon", help="this machine's sync process (commands start it by themselves)")

@@ -906,13 +906,22 @@ def status_text(st: dict) -> str:
     return "\n".join(lines)
 
 
-def heal(repo) -> tuple[bool, str]:
+def heal(repo, seed: str | None = None) -> tuple[bool, str]:
     """Take up the network's chain of this node's signed refs where this storage's forked from it (see
     HEAL_SEEDS). Only when the seeds agree: one of them holds a tip every other seed's goes on to; only a chain
     whose every new commit this node's key signed; and only if the ref still holds what it held when the seeds
     were asked: another process that signed meanwhile wins. What it held is kept in the clone, under
-    refs/legion-backup/, and unheal() puts it back. Whether it moved the ref, and why (not)."""
+    refs/legion-backup/, and unheal() puts it back. Whether it moved the ref, and why (not).
+
+    `seed` (a host of HEAL_SEEDS): that seed's chain, whatever the others hold. instinct's `b` forked more than
+    once, rosa and seed.radicle.at each kept another branch of its chain, and no heal could choose: nothing it
+    published reached anyone. With one seed named, that one takes it from there; the other keeps its branch."""
     st = sigrefs_status(repo, fetch=True)
+    if seed:
+        named = [s for s in st["seeds"] if s["seed"] == seed]
+        if not named:
+            return False, f"{seed} isn't one of the seeds asked ({', '.join(s['seed'] for s in st['seeds'])})"
+        st = dict(st, seeds=named)
     store, ref, mine = st["store"], st["ref"], st["mine"]
     try:
         cases = {s["case"] for s in st["seeds"]}

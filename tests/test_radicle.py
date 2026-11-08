@@ -827,6 +827,10 @@ def test_a_heal_needs_the_seeds_to_agree_and_every_new_commit_signed(signed_chai
     did, said = radicle.heal(repo)
     assert not did and "different branches" in said and git(store, "rev-parse", ref) == mine
     assert not git(store, "for-each-ref", "refs/legion-heal/")
+    named = radicle.sigrefs_status(repo)["seeds"][1]["seed"]           # instinct's b: one seed named, it's taken
+    assert radicle.heal(repo, seed=named)[0] and git(store, "rev-parse", ref) == git(b, "rev-parse", ref)
+    assert radicle.unheal(repo)[0] and git(store, "rev-parse", ref) == mine
+    assert not radicle.heal(repo, seed="nowhere.example")[0]
     bad = bare("bad")
     root = chain(bad, "g1")
     chain(bad, "g2", "g3", start=root, unsigned=("g2",))                # its tip signed, the one under it not
