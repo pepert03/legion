@@ -22,6 +22,18 @@ STARVED = 3  # where no sync process stays, a command that publishes fetches too
 repo_lock = daemon.repo_lock
 
 
+def keep_fetching(repo) -> None:
+    """For a reader that stays open (the viewer): the network fetch a command would start, in a process of its
+    own and once a minute at most (see radicle.kick_network_sync), and with it the node, started if it stopped.
+    Without it the viewer showed what the node held when it last ran: after a reboot, nothing new for hours."""
+    if os.environ.get("LEGION_SYNC", "").lower() in ("off", "0", "no") or not coordgit.is_radicle(repo):
+        return
+    try:
+        radicle.kick_network_sync(repo)
+    except (radicle.RadError, OSError):
+        pass
+
+
 def sync(c) -> None:
     if os.environ.get("LEGION_SYNC", "").lower() in ("off", "0", "no"):
         if c.unpublished:

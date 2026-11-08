@@ -86,6 +86,36 @@ def test_http_endpoints(tmp_path):
         server.shutdown()
 
 
+def test_a_viewer_reads_again_only_what_moved_and_a_failed_read_doesnt_stop_it(tmp_path, monkeypatch):
+    """Erdős #902's viewer read 93 coords of 20,000 events on every refresh, 21 s, and drew the state again on
+    every request; and one refresh that raised killed its thread: the page showed the same hour for good."""
+    import time
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    evs, tid = project_events()
+    for ev in evs[:2]:
+        coordgit.append(tmp_path, BOSS, ev)
+    reads, real = [], coordgit.read_pairs
+    monkeypatch.setattr(coordgit, "read_pairs", lambda repo, ref=coordgit.REF: reads.append(ref) or real(repo, ref))
+    source = viz.Source(tmp_path, 0.05, fetch=False)
+    assert len(reads) == 1 and source.snapshot(None)["total"] == 2
+    drawn = source.snapshot(None)
+    source.refresh()
+    assert len(reads) == 1 and source.snapshot(None) is drawn            # nothing moved: nothing read or drawn
+    monkeypatch.setattr(viz, "REDRAW", 0)
+    source.refresh()
+    assert len(reads) == 1 and source.snapshot(None) is not drawn        # the clock moves who's active
+    monkeypatch.setattr(coordgit, "view_pairs", lambda *a, **kw: 1 / 0)
+    time.sleep(0.3)                                                      # refreshes that raise...
+    assert source.thread.is_alive()                                      # ...don't stop the thread
+    monkeypatch.undo()
+    coordgit.append(tmp_path, ANA, evs[2])
+    for _ in range(100):
+        if source.snapshot(None)["total"] == 3:
+            break
+        time.sleep(0.05)
+    assert source.snapshot(None)["total"] == 3 and source.snapshot(None)["tasks"][0]["status"] == "claimed"
+
+
 def test_agent_names_are_person_and_number():
     assert viz.split_name("ana#2") == ("ana", 2)
     assert viz.split_name("ana") == ("ana", None)

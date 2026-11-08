@@ -533,7 +533,10 @@ def view_state(repo, fetch: bool = True):
     return build_state(repo, view_pairs(repo, fetch))
 
 
-def view_pairs(repo, fetch: bool = True) -> list[tuple[str, dict]]:
+def view_pairs(repo, fetch: bool = True, memo: dict | None = None) -> list[tuple[str, dict]]:
+    """memo, kept by a caller that reads again and again (the viewer): each coord's commit and its events, so a
+    coord whose commit hasn't moved isn't read again. The viewer of Erdős #902 read 93 of them, 20,000 events each,
+    on every refresh: 15 s of its 21."""
     if fetch and is_radicle(repo):
         from . import radicle
         try:
@@ -551,11 +554,23 @@ def view_pairs(repo, fetch: bool = True) -> list[tuple[str, dict]]:
         elif has_origin(repo):
             run(repo, "fetch", "-q", "origin", f"+{REF}:{TRACK}")
     refs = [REF, TRACK] + [f"{PEERS}{p}/coord" for p in peers(repo)]
-    seen = {}
+    out = run(repo, "for-each-ref", "--format=%(refname) %(objectname)", REF, TRACK, PEERS).stdout.decode()
+    heads = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
+    memo = {} if memo is None else memo
+    for ref in set(memo) - set(refs):
+        del memo[ref]
+    seen, blobs = {}, set()
     for ref in refs:
-        if rev(repo, ref):
-            for blob, ev in read_pairs(repo, ref):
-                seen.setdefault(ev.get("id"), (blob, ev))
+        head = heads.get(ref)
+        if not head:
+            memo.pop(ref, None)
+            continue
+        if memo.get(ref, (None,))[0] != head:
+            memo[ref] = (head, dict(read_pairs(repo, head)))
+        held = memo[ref][1]
+        for blob in held.keys() - blobs:  # most coords hold the same events: only the ones not seen yet
+            seen.setdefault(held[blob].get("id"), (blob, held[blob]))
+        blobs |= held.keys()
     return list(seen.values())
 
 

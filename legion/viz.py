@@ -25,31 +25,66 @@ GONE_SECONDS = 7200   # and it leaves the graph after 2 hours without publishing
 # Holding a claim but publishing nothing for this long: perhaps still working, perhaps stopped. The claim keeps the
 # task until it expires; the viewer says so instead of showing it at work.
 SILENT_SECONDS = 1800
+REDRAW = 30  # seconds between drawings of the live state when no event came: the clock moves who's active
 
 
 class Source:
     """A repository's events. A thread refreshes them every `interval` seconds, so fetching from
-    peers (which can be slow) never delays a response to the page."""
+    peers (which can be slow) never delays a response to the page.
+
+    Kept between refreshes: each coord's events (a coord that didn't move isn't read again), and the live
+    snapshot, drawn once per change instead of on every request. With Radicle it also keeps the node fetching
+    from the network, as a command would: a viewer left open is the one thing that has to stay up to date."""
 
     def __init__(self, repo: Path, interval: float, fetch: bool):
         self.repo, self.interval, self.fetch = repo, interval, fetch
         self.events: list[dict] = []
+        self.memo: dict = {}  # see coordgit.view_pairs
+        self.blobs: frozenset = frozenset()
+        self.live: dict | None = None  # the snapshot of the latest events, drawn once per change
+        self.drawn = 0.0  # when: who's active or gone moves with the clock too, so it's redrawn every REDRAW s
+        self.lock = threading.Lock()
         self.refresh()
-        threading.Thread(target=self._loop, daemon=True).start()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
 
     def refresh(self) -> None:
+        if self.fetch:
+            from .transport import keep_fetching
+            keep_fetching(self.repo)
         try:
-            self.events = coordgit.view_state(self.repo, fetch=self.fetch).events  # only valid ones, sorted
+            pairs = coordgit.view_pairs(self.repo, fetch=self.fetch, memo=self.memo)
         except coordgit.GitError:
-            pass  # keep showing the last thing that could be read
+            return  # keep showing the last thing that could be read
+        blobs = frozenset(b for b, _ in pairs)
+        events = self.events
+        if blobs != self.blobs:
+            events = coordgit.build_state(self.repo, pairs).events  # only valid ones, sorted
+        elif time.time() - self.drawn < REDRAW:
+            return
+        live = snapshot(events, None)
+        with self.lock:
+            self.events, self.blobs, self.live, self.drawn = events, blobs, live, time.time()
 
     def _loop(self) -> None:
         while True:
             time.sleep(self.interval)
-            self.refresh()
+            try:
+                self.refresh()
+            except Exception:  # noqa: BLE001 (one failed read mustn't freeze the viewer for good)
+                # It did: a refresh that raised killed this thread, and the page kept showing the same hour.
+                import traceback
+                traceback.print_exc()
 
     def get(self) -> list[dict]:
         return self.events
+
+    def snapshot(self, upto: int | None) -> dict:
+        with self.lock:
+            live, events = self.live, self.events
+        if upto is None and live is not None:
+            return live
+        return snapshot(events, upto)
 
 
 def snapshot(events: list[dict], upto: int | None) -> dict:
@@ -281,7 +316,7 @@ def make_handler(source: Source):
             if url.path == "/":
                 self.send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/state.json":
-                data = snapshot(source.get(), upto)
+                data = source.snapshot(upto)
                 self.send(200, json.dumps(data, ensure_ascii=False).encode(), "application/json")
             elif url.path == "/history.json" and q.get("node"):
                 data = history(source.get(), q["node"][0], upto)
