@@ -145,22 +145,45 @@ def _mask(data: bytes, mask: bytes) -> bytes:
     return (int.from_bytes(data, "big") ^ int.from_bytes(key, "big")).to_bytes(n, "big")
 
 
+PROXY: str | None = None  # an HTTP proxy to use when the environment names none (live.py: git's http.proxy)
+CA_FILES: list[str] = []  # more certificate authorities to trust (live.py: git's http.sslCAInfo)
+
+
+def proxy() -> str | None:
+    return proxy_from_env() or PROXY
+
+
+def tls() -> ssl.SSLContext:
+    """What a TLS connection is checked against: the system's authorities, and the ones the other tools here were
+    told to trust. A proxy that inspects TLS signs with an authority of its own, which the sandbox gives git,
+    curl or node in a variable of theirs: Python, not told, refused every relay."""
+    ctx = ssl.create_default_context()
+    for path in [os.environ.get(k) for k in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+                                             "NODE_EXTRA_CA_CERTS")] + CA_FILES:
+        if path and os.path.isfile(path):
+            try:
+                ctx.load_verify_locations(cafile=path)
+            except (ssl.SSLError, OSError):
+                pass
+    return ctx
+
+
 def _open(host: str, port: int, timeout: float) -> socket.socket:
     """A TCP connection to host:port: straight, or through the HTTP proxy the environment names (CONNECT), which
     is all some sandboxes have."""
-    url = proxy_from_env()
+    url = proxy()
     bypass = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
     local = host in ("localhost", "127.0.0.1", "::1") or any(
         h.strip() and (h.strip() == "*" or host.endswith(h.strip().lstrip("."))) for h in bypass.split(","))
     if not url or local:
         return socket.create_connection((host, port), timeout=timeout)
-    proxy = Proxy(url)
-    s = socket.create_connection((proxy.host, proxy.port), timeout=timeout)
-    if proxy.tls:
-        s = ssl.create_default_context().wrap_socket(s, server_hostname=proxy.host)
+    via = Proxy(url)
+    s = socket.create_connection((via.host, via.port), timeout=timeout)
+    if via.tls:
+        s = tls().wrap_socket(s, server_hostname=via.host)
     head = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n"
-    if proxy.auth:
-        head += f"Proxy-Authorization: {proxy.auth}\r\n"
+    if via.auth:
+        head += f"Proxy-Authorization: {via.auth}\r\n"
     s.sendall((head + "\r\n").encode())
     answer = b""
     while b"\r\n\r\n" not in answer:
@@ -187,7 +210,7 @@ class WS:
         s = _open(u.hostname, port, timeout)
         try:
             if secure:
-                s = ssl.create_default_context().wrap_socket(s, server_hostname=u.hostname)
+                s = tls().wrap_socket(s, server_hostname=u.hostname)
             s.settimeout(timeout)
             key = base64.b64encode(os.urandom(16)).decode()
             host = u.hostname if port in (80, 443) else f"{u.hostname}:{port}"
@@ -295,6 +318,18 @@ class WS:
             self.sock.close()
         except OSError:
             pass
+
+
+def why(url: str, timeout: float = 8) -> str | None:
+    """Why this relay can't be reached from here, in a line, or None when it can: what `legion relay` says."""
+    try:
+        WS(url, timeout).close()
+        return None
+    except ssl.SSLCertVerificationError as e:
+        return (f"its certificate isn't trusted here ({e.verify_message}): a proxy that inspects TLS signs with its "
+                "own authority; point SSL_CERT_FILE at the bundle the other tools here use")
+    except Exception as e:  # noqa: BLE001
+        return " ".join(str(e).split())[:200] or type(e).__name__
 
 
 # --- relays ---------------------------------------------------------------------------------------------

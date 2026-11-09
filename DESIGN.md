@@ -816,10 +816,16 @@ sound, which a sandbox can't be. And nothing told an agent that something had co
   which goes out by git as ever; what came by git and isn't on the relays, a process that stays offers
   them, after a wait of its own so that several don't all send it. A node on an older legion and one with
   relays alone see each other through any node that has both.
-- **Sandboxes leave Radicle alone.** Where no process outlives a command and the relays answer, a
-  command neither starts the node nor pushes to it: a node killed mid-write was where the orphan locks,
-  the packs marked as kept and the forked chains of signed refs came from. With its events on the relays a
-  command doesn't wait for the push to the node anywhere.
+- **Sandboxes leave Radicle alone.** Where the relays read and sent what there was and no sync process
+  stays, a command neither copies from the node's storage, nor fetches, nor pushes: it asks for a sync
+  process, which does git's part where one can stay, and is done. On the first day with relays a claim
+  in Instinct's sandboxes took 0.9 s of relays and 19.6 s in all, the rest being git's part done by the
+  command; and a node killed mid-write was where the orphan locks, the packs marked as kept and the
+  forked chains of signed refs came from. `LEGION_RADICLE=always` has commands do it as before.
+- **Where no relay answers** (a proxy that lets none through), commands go on by git and leave the
+  relays alone for half an hour; `legion relay` says why each one fails, and uses the proxy and the
+  certificate authorities git was given. A commit nobody had is asked for again after a minute, not by
+  every command.
 - **Relays alone.** `legion invite` makes a project with no transport one of relays, with a secret of
   its own, and prints a line; `legion join legion:…` makes a clone from it: the log (a pack of every
   event file, published every six hours by a node that stays), what came after, and main.

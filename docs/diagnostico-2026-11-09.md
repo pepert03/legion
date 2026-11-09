@@ -483,3 +483,20 @@ Dos cosas que salieron de esta prueba:
 - **El log en git no cambia:** sigue siendo un directorio plano y los heartbeats siguen entrando. Pasarlos a señales que no se guardan cambiaría quién tiene cada claim en los nodos que se pierdan una.
 - **La copia entera del log** solo se publica sola en proyectos de relays. En Erdős (26.000 eventos, varios MB) un recién llegado sigue entrando por Radicle.
 - **Retención de los relays públicos:** no la garantiza nadie. Los nodos que se quedan vuelven a ofrecer lo que falta de las últimas seis horas, y la copia del log cubre lo anterior.
+
+### 10.5 Primer despliegue (9 de noviembre, 23:05)
+
+Subido a GitHub como `45060d1` e instalado en este PC. Lo que se vio en la primera hora:
+
+| Dónde | Qué pasó |
+|---|---|
+| jose (este PC) | El daemon se suscribió a los relays. Los eventos de `instinct-pepe#2`, ya actualizado, llegaron al clon 1,4 y 2,0 s después de crearse |
+| Instinct (sandboxes) | Responden 4 o 5 de los 5 relays. Leer costó 0,6–1,7 s y enviar 0,1–0,5 s, pero un `claim` tardó 19 s y un `release` 32 s: el comando seguía copiando del almacén del nodo, haciendo fetch a las semillas y esperando el candado |
+| Muse | No responde ningún relay: su proxy no deja pasar las conexiones. Todo sigue por Radicle, y cada comando perdía 5 s intentándolo |
+
+Arreglos que salieron de ahí:
+- **El comando ya no hace el trabajo de Radicle** cuando los relays han leído y enviado y no hay un proceso de sincronización estable.
+- **`legion relay` dice por qué falla cada relay** y usa el proxy y los certificados de git. Si no responde ninguno, los comandos no lo reintentan en media hora.
+- **Un commit que nadie tiene** no se vuelve a pedir hasta pasado un minuto.
+
+**La suite completa** tarda 74 s dentro de WSL con 12 procesos, frente a 7–11 minutos en Windows. Tres tests fallan en Linux con Python 3.12, y fallaban igual antes de este trabajo.

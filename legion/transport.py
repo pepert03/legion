@@ -127,10 +127,25 @@ def relay_status(repo) -> list[str]:
     ch = live.channel(repo)
     lines = ["This clone sends its events to the relays and reads the others' from them"
              + (" (and nothing else: no Radicle node)." if coordgit.is_relay(repo) else "; git (Radicle) keeps the archive.")]
-    for url in live.all_relays(repo):
+    urls, failed = live.all_relays(repo), 0
+    nostr._down.clear()  # asked to look: it tries every one now, whatever the last commands found
+    via = nostr.proxy()
+    if via:
+        lines.append(f"  (through the proxy {via.split('@')[-1]})")
+    for url in urls:
         t0 = time.time()
         _, answered = nostr.query([url], [{"kinds": [live.KIND], "#t": [ch.tag if ch else "x"], "limit": 1}], 5, grace=5)
-        lines.append(f"  {url}: " + (f"answers in {1000 * (time.time() - t0):.0f} ms" if answered else "no answer"))
+        if answered:
+            lines.append(f"  {url}: answers in {1000 * (time.time() - t0):.0f} ms")
+        else:
+            failed += 1
+            lines.append(f"  {url}: no answer: {nostr.why(url) or 'it connects, but did not answer in time'}")
+    if failed == len(urls):
+        lines.append("  None answers: this clone's commands go on through git alone, and try the relays again in "
+                     "half an hour (`legion relay` tries now). The reason is above; an outbound connection to port 443 that allows a WebSocket "
+                     "is all a relay needs" + ("." if via else ", and no proxy is set here (HTTPS_PROXY, or git's "
+                                                              "http.proxy)."))
+    live.remember_relays(repo)  # what it found is what the next commands go by
     last = live.read_at(repo)
     lines.append("A process stays subscribed for this clone: what anyone sends is here within a moment."
                  if live.watched(repo) else
@@ -228,12 +243,17 @@ def _sync(c) -> None:
             print(f"legion: warning: no relay took {', '.join(c.unpublished)}; it stays in this clone and goes "
                   "out with your next command", file=sys.stderr)
         if (on_radicle and read and out and not c.strict and os.environ.get("LEGION_RADICLE", "").lower() != "always"
-                and not daemon.alive() and daemon.short_lived()):
-            # A sandbox: no process outlives a command here, so its Radicle node never stayed up to be fetched
-            # from, and a node killed mid-write left locks, packs marked as kept and a forked chain of signed refs
-            # (what Erdős #902's sandboxes spent their days on). With the relays carrying its events and the
-            # commits they name, this command leaves the node alone: a node that stays (see live.Bridge) puts
-            # what the relays bring into git for everyone.
+                and not (daemon.alive() and daemon.age() >= SETTLED)):
+            # The relays read and sent what there was, and no sync process stays here to do git's part: the
+            # command doesn't do it either. It asks for a sync process (where one can stay, it carries on with
+            # git; in a sandbox it dies with the command and nothing touches the node) and is done. Doing it
+            # itself was what was left of a command's time once the relays worked: in Instinct's sandboxes a
+            # claim took 0.9 s with the relays and 14 s more copying from the node's storage twice and fetching
+            # from the seeds, 19.6 s in all, and a release 32 s, eight of them waiting for the clone's lock. And a
+            # node started and killed with each command was where the orphan locks, the packs marked as kept and
+            # the forked chains of signed refs came from. What the relays bring is put into git, for the nodes on
+            # an older legion, by a node that stays (see live.Bridge).
+            daemon.serving(c.repo)
             on_radicle = False
         if not on_radicle:
             c.unpublished = []

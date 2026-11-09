@@ -550,7 +550,9 @@ def update_main(repo, tip: str | None, fetch: bool = False) -> bool:
     at = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
     if at.get(MAIN) == tip and at.get(PUB + "main") == tip:
         return False  # where it was: nothing to move (every command asks)
-    if not (need_commit(repo, tip) if fetch else has_commit(repo, tip)):
+    # (a few seconds for a node that stays to publish it, when the relays don't hold it: a main an older legion
+    # made went out by git alone)
+    if not (need_commit(repo, tip, wait=5) if fetch else has_commit(repo, tip)):
         return False
     moved = at.get(PUB + "main") != tip
     git(repo, "update-ref", MAIN, tip)
@@ -684,7 +686,7 @@ def has_origin(repo) -> bool:
     return "origin" in git(repo, "remote").split()
 
 
-def sync(repo, ident: Identity, attempts: int = 12, publish: bool = True) -> list[str]:
+def sync(repo, ident: Identity, attempts: int = 30, publish: bool = True) -> list[str]:
     """Merge the local coord with origin's (and publish it), or with every peer's in p2p mode. With Radicle,
     publish=False leaves the push to the caller (see daemon.sync_one)."""
     if is_radicle(repo):
@@ -718,5 +720,7 @@ def sync(repo, ident: Identity, attempts: int = 12, publish: bool = True) -> lis
             git(repo, "update-ref", TRACK, local)
             return []
         last_error = p.stderr.decode("utf-8", "replace").strip()
-        time.sleep(random.uniform(0.05, 0.3) * (i + 1))  # another node published first: retry
+        # Another node published first: retry, after a while of its own. Not longer each time: whoever had lost
+        # most waited longest and lost again, and with four writers at once one of them ran out of tries.
+        time.sleep(random.uniform(0.05, 0.6))
     raise GitError(f"couldn't sync the coord branch. Last git error:\n{last_error}")

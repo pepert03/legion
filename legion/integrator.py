@@ -181,11 +181,11 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     # Merge on top of the main the integrators signed last, and say so (the event's base): if another
     # integrator moves main in the meantime, the state discards this verdict and the patch is redone.
     tip = c.st.main_tip
-    if tip and not coordgit.need_commit(repo, tip):
+    if tip and not coordgit.need_commit(repo, tip, wait=5):
         return None  # that main hasn't reached this node yet
     if not coordgit.fetch_patch(repo, branch):
         return reject(f"branch {branch} not found", "missing")
-    if not coordgit.need_commit(repo, commit, branch):
+    if not coordgit.need_commit(repo, commit, branch, 5):
         if coordgit.is_p2p(repo):
             return None  # the event arrived before the commit: gossip will bring it on a later sync
         return reject("the commit is not on its branch", "missing")

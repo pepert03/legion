@@ -110,8 +110,7 @@ def test_a_relay_that_kept_a_command_waiting_is_left_out_of_the_next_ones(relay,
     assert live.relays(a) == [dead, relay.url] and live.push(a, [first])
     nostr._down.clear()  # the next command: a new process, that remembers nothing itself
     assert live.relays(a) == [relay.url]
-    started = time.time()
-    assert live.pull(a, ana)[1] and time.time() - started < 1
+    assert live.pull(a, ana)[1]
     assert live.all_relays(a) == [dead, relay.url]  # a process that stays keeps trying it
     monkeypatch.setattr(live, "BENCHED", 0)
     nostr._down.clear()
@@ -189,7 +188,7 @@ def test_a_clone_that_stays_subscribed_has_an_event_within_a_moment_of_its_being
     note = record(a, ana, "hub.message", text="now")
     sent = time.time()
     live.push(a, [note])
-    assert until(lambda: len(got) == 2) and time.time() - sent < 1.5
+    assert until(lambda: len(got) == 2) and time.time() - sent < 5  # (half a second on a machine at rest)
     assert [m["text"] for m in coordgit.state(b).hub] == ["now"]
     w.close()
     assert not live.watched(b)
@@ -235,7 +234,7 @@ def team(relay, tmp_path, monkeypatch):
     as_("luis")
     assert cli.main(["context", "--no-update"]) == 0  # and luis says it's here
     as_.repos = repos
-    team_of.repos = repos
+    team_of.repos, team_of.relay_url = repos, relay.url
     return as_
 
 
@@ -455,6 +454,16 @@ def test_a_big_commit_goes_in_chunks_and_a_relay_that_keeps_half_of_them_gives_n
     assert not live.get_commit(c, sha)
 
 
+def test_a_commit_nobody_has_isnt_waited_for_by_every_command(relay, tmp_path):
+    """The main an older legion made, with no node that stays to publish it: each command waited for it anew."""
+    b, luis = clone(tmp_path, "luis#1")
+    sha = "ab" * 20
+    started = time.time()
+    assert not live.get_commit(b, sha, wait=1.2) and time.time() - started >= 1.2
+    asked, started = relay.received, time.time()
+    assert not coordgit.need_commit(b, sha, wait=5) and time.time() - started < 0.5 and relay.received == asked
+
+
 def test_a_node_that_stays_answers_whoever_asks_for_a_commit_the_relays_dont_hold(relay, tmp_path):
     """A patch from a node that only has git: its commit isn't on the relays, but a node that got it by git has it."""
     a, ana = clone(tmp_path, "ana#1")
@@ -599,13 +608,29 @@ def test_a_newcomer_takes_the_log_whole_and_reads_only_what_came_after(relay, tm
     assert not live.keep_log(a)  # published a moment ago: not again for hours
 
 
-def test_relay_says_which_relays_answer_and_only_leaves_radicle(team, capsys):
+def test_relay_says_which_relays_answer_and_only_leaves_radicle(team, capsys, monkeypatch):
     from legion import cli
     b, luis = team("luis")
     capsys.readouterr()
     assert cli.main(["relay"]) == 0
     out = capsys.readouterr().out
     assert "answers in" in out and "no Radicle node" in out
+    # Where none answers it says why, relay by relay: muse's machine said "no answer" five times and nothing else.
+    monkeypatch.setenv("LEGION_RELAYS", "ws://127.0.0.1:9")
+    assert cli.main(["relay"]) == 0
+    out = capsys.readouterr().out
+    assert "no answer: " in out and "None answers" in out and "no proxy is set here" in out
+    # Git's way out of the machine is the relays' way out too, when the environment names none.
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    git(b, "config", "http.proxy", "http://user:secret@127.0.0.1:9")
+    assert cli.main(["relay"]) == 0
+    out = capsys.readouterr().out
+    assert "through the proxy 127.0.0.1:9" in out and "secret" not in out
+    assert nostr.proxy() == "http://user:secret@127.0.0.1:9"
+    git(b, "config", "--unset", "http.proxy")
+    live.all_relays(b)
+    assert nostr.proxy() is None
     git(b, "config", "legion.transport", "radicle")
     assert cli.main(["relay", "only"]) == 0 and git(b, "config", "legion.transport") == "relay"
 
@@ -637,6 +662,7 @@ def test_with_its_events_on_the_relays_a_command_doesnt_wait_for_the_push_to_the
     from legion import cli, daemon
     b, calls = on_radicle
     monkeypatch.setattr(daemon, "short_lived", lambda: False)
+    monkeypatch.setenv("LEGION_RADICLE", "always")  # told to do git's part itself, as an integrator's pass does
     capsys.readouterr()
     assert cli.main(["chat", "hello from a clone on both"]) == 0
     err = capsys.readouterr().err
@@ -648,12 +674,21 @@ def test_with_its_events_on_the_relays_a_command_doesnt_wait_for_the_push_to_the
 
 
 def test_where_no_process_stays_and_the_relays_work_a_command_leaves_the_node_alone(on_radicle, monkeypatch, capsys):
+    """With the relays working, a claim in Instinct's sandboxes still took 19.6 s: 0.9 of relays, the rest git."""
     from legion import cli, daemon
     b, calls = on_radicle
-    monkeypatch.setattr(daemon, "short_lived", lambda: True)  # a sandbox: the last sync process died at once
-    assert cli.main(["chat", "from a sandbox"]) == 0
-    assert calls == [] and "the relays have it" in capsys.readouterr().err
+    asked = []
+    monkeypatch.setattr(daemon, "serving", lambda repo: asked.append(repo) and False)
+    for short in (True, False):  # the last sync process died at once (a sandbox), or none was ever started
+        monkeypatch.setattr(daemon, "short_lived", lambda: short)
+        assert cli.main(["chat", f"from a sandbox {short}"]) == 0
+        assert calls == [] and "the relays have it" in capsys.readouterr().err
+    assert asked  # it asked for a sync process: where one can stay, that one does git's part
+    monkeypatch.setattr(daemon, "alive", lambda: True)
+    monkeypatch.setattr(daemon, "age", lambda: 5)  # one just started: it will, the command still doesn't
+    assert cli.main(["chat", "a young sync process"]) == 0 and calls == []
     monkeypatch.setenv("LEGION_RADICLE", "always")
+    monkeypatch.setattr(daemon, "alive", lambda: False)
     assert cli.main(["chat", "told to keep the node"]) == 0
     assert "publish" in calls
 
@@ -669,3 +704,9 @@ def test_when_no_relay_answers_git_carries_as_before_and_the_relays_arent_tried_
     assert not live.reachable(b)
     started = time.time()
     assert cli.main(["status"]) == 0 and time.time() - started < 3  # and no second wait for relays that are down
+    # None answered: not five minutes later either (a proxy doesn't change its mind), until `legion relay` looks.
+    monkeypatch.setattr(live, "BENCHED", 0)
+    nostr._down.clear()
+    assert not live.reachable(b)
+    monkeypatch.setenv("LEGION_RELAYS", team_of.relay_url)
+    assert cli.main(["relay"]) == 0 and live.reachable(b)

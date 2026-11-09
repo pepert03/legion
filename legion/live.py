@@ -79,9 +79,15 @@ def enabled(repo) -> bool:
 
 
 BENCHED = 300  # seconds a relay that failed, or was too slow to wait for, is left out of the commands' rounds
+# Seconds the commands leave the relays alone once none of them answered: that's a machine whose way out doesn't
+# let them through (muse's proxy), which five minutes don't change, and each try cost a command five seconds.
+ALL_DOWN = 1800
 
 
 def all_relays(repo) -> list[str]:
+    # The way out git was given here (its proxy, the authorities it trusts) is the relays' way out too.
+    nostr.PROXY = _cfg(repo, "https.proxy") or _cfg(repo, "http.proxy")
+    nostr.CA_FILES = [p for p in (_cfg(repo, "http.sslCAInfo"),) if p]
     said = os.environ.get("LEGION_RELAYS") or _cfg(repo, "legion.relays")
     return [u for u in said.replace(",", " ").split() if u] if said else list(DEFAULT_RELAYS)
 
@@ -93,6 +99,7 @@ def relays(repo) -> list[str]:
     urls = all_relays(repo)
     try:
         kept = json.loads((folder(repo) / "down.json").read_text(encoding="utf-8"))
+        kept = kept if isinstance(kept, dict) else {}
     except (OSError, ValueError):
         kept = {}
     now = time.time()
@@ -105,10 +112,17 @@ def relays(repo) -> list[str]:
 
 
 def reachable(repo) -> bool:
-    """False when every relay failed in the last BENCHED seconds: a command doesn't try again until then (behind
-    a proxy that lets none through, each command waited its whole LIVE_WAIT for nothing)."""
+    """False when every relay failed in the last BENCHED seconds, or none answered in the last ALL_DOWN: a
+    command doesn't try again until then (behind a proxy that lets none through, each command waited its whole
+    LIVE_WAIT for nothing)."""
     relays(repo)  # loads what the last commands found
     now = time.time()
+    try:
+        none = json.loads((folder(repo) / "down.json").read_text(encoding="utf-8")).get("none answered", 0)
+    except (OSError, ValueError, AttributeError):
+        none = 0
+    if isinstance(none, (int, float)) and now - none < ALL_DOWN:
+        return False
     return any(now - nostr._down.get(u, 0) > BENCHED for u in all_relays(repo))
 
 
@@ -116,6 +130,8 @@ def remember_relays(repo) -> None:
     """Keep for the next commands which relays failed this one."""
     urls, now = all_relays(repo), time.time()
     down = {u: t for u, t in nostr._down.items() if u in urls and now - t <= BENCHED}
+    if urls and len(down) == len(urls):
+        down["none answered"] = now
     f = folder(repo) / "down.json"
     try:
         if down or f.exists():
@@ -441,6 +457,17 @@ def on_relays(repo, sha: str, timeout: float = 5.0) -> bool:
     return bool(got)
 
 
+ASK_AGAIN = 60  # seconds before a commit nobody had is asked for again: every command would wait for it anew
+
+
+def _missed(repo) -> dict:
+    try:
+        kept = json.loads((folder(repo) / "missing.json").read_text(encoding="utf-8"))
+        return {k: v for k, v in kept.items() if isinstance(v, (int, float)) and time.time() - v < ASK_AGAIN}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
 def get_commit(repo, sha: str, ref: str | None = None, wait: float = 0.0, depth: int = 0) -> bool:
     """Bring commit `sha` from the relays, and the commits it was made on if this clone lacks them too. `wait`:
     seconds to give another node to publish it when the relays don't hold it (see want). `ref`: a ref to leave
@@ -449,16 +476,23 @@ def get_commit(repo, sha: str, ref: str | None = None, wait: float = 0.0, depth:
         return False
     if not coordgit.has_commit(repo, sha):
         ch = channel(repo)
-        if ch is None:
+        missed = _missed(repo)
+        if ch is None or sha in missed:
             return False
         asked, end = False, time.time() + wait
         while not _fetch_pack(repo, ch, ch.blob(sha), sha, depth):
             if time.time() >= end:
+                if wait:  # nobody who listens had it: not asked again, by this command or the next, for a while
+                    try:
+                        (folder(repo) / "missing.json").write_text(json.dumps({**missed, sha: time.time()}),
+                                                                   encoding="utf-8")
+                    except OSError:
+                        pass
                 return False
             if not asked:
                 want(repo, sha)
                 asked = True
-            time.sleep(min(2.0, max(0.1, end - time.time())))
+            time.sleep(min(1.0, max(0.1, end - time.time())))
         if not coordgit.has_commit(repo, sha):
             return False
     if ref and ref.startswith(coordgit.PATCHES):  # the name comes from someone's event: only where patches live
