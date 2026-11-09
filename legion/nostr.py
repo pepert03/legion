@@ -334,8 +334,11 @@ def why(url: str, timeout: float = 8) -> str | None:
 
 # --- relays ---------------------------------------------------------------------------------------------
 
-CONNECT = 6  # seconds to reach a relay; one that doesn't answer is left out of the round
-GRACE = 0.3  # seconds the others get once a relay has answered: a slow or dead one doesn't hold a command
+CONNECT = 10  # seconds to reach a relay; one that doesn't answer is left out of the round
+# Once a relay has answered, the others get this long, or a third of what the first one took if that's longer: a
+# slow or dead one doesn't hold a command. Through muse's proxy every relay takes 4 to 5 s, half a second apart:
+# with 0.3 s for all, the first to answer was the only one that counted, and the rest were taken for down.
+GRACE = 0.3
 _pool: dict[str, WS] = {}  # the connections this process keeps, one per relay: a command reads, then writes
 _pool_lock = threading.Lock()
 # relay -> when it last failed or was too slow to wait for, so a command doesn't wait for it twice (live.py keeps
@@ -406,13 +409,14 @@ def _each(urls: list[str], fn, timeout: float, grace: float) -> dict:
     threads = [threading.Thread(target=run, args=(u,), daemon=True) for u in urls]
     for t in threads:
         t.start()
-    end, first = time.time() + timeout, None
+    began = time.time()
+    end, first = began + timeout, None
     while time.time() < end and len(out) < len(urls):
         done.wait(0.02)
         done.clear()
         if first is None and any(not isinstance(v, Exception) for v in list(out.values())):
             first = time.time()
-        if first is not None and time.time() - first >= grace:
+        if first is not None and time.time() - first >= max(grace, (first - began) / 3):
             break
     got = dict(out)
     for u in urls:

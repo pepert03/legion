@@ -23,7 +23,8 @@ LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading wh
 PUBLISH_WAIT = 45
 SETTLED = 120  # seconds after which a sync process is taken to stay, and a command doesn't wait for its push
 STARVED = 3  # where no sync process stays, a command that publishes fetches too after this many fetch intervals
-LIVE_WAIT = 5  # seconds a command gives the relays to answer; they take 0.2 to 0.5
+# Seconds a command gives the relays to answer. They take 0.2 to 0.5; through a slow proxy, 4 to 5 (muse's).
+LIVE_WAIT = 9
 # With the relays bringing the events, a command without a sync process fetches from the Radicle network this many
 # times less often: what's left for git to bring are commits, which the relays carry too (coordgit.need_commit).
 LIVE_RELAX = 10
@@ -134,7 +135,7 @@ def relay_status(repo) -> list[str]:
         lines.append(f"  (through the proxy {via.split('@')[-1]})")
     for url in urls:
         t0 = time.time()
-        _, answered = nostr.query([url], [{"kinds": [live.KIND], "#t": [ch.tag if ch else "x"], "limit": 1}], 5, grace=5)
+        _, answered = nostr.query([url], [{"kinds": [live.KIND], "#t": [ch.tag if ch else "x"], "limit": 1}], 12, grace=12)
         if answered:
             lines.append(f"  {url}: answers in {1000 * (time.time() - t0):.0f} ms")
         else:

@@ -104,7 +104,7 @@ def test_a_relay_that_is_down_or_refuses_doesnt_stop_the_others(relay):
 def test_a_relay_that_kept_a_command_waiting_is_left_out_of_the_next_ones(relay, tmp_path, monkeypatch):
     """Each command is a process of its own: one dead relay in the list cost every one of them its whole wait."""
     a, ana = clone(tmp_path, "ana#1")
-    dead = "ws://127.0.0.1:9"
+    dead = "ws://127.0.0.1:19"  # (not the one the test before left a connection trying: that one ends late)
     monkeypatch.setenv("LEGION_RELAYS", f"{dead} {relay.url}")
     first = record(a, ana, "project.init", project="p", integrators=[ana.author])
     assert live.relays(a) == [dead, relay.url] and live.push(a, [first])
@@ -115,6 +115,23 @@ def test_a_relay_that_kept_a_command_waiting_is_left_out_of_the_next_ones(relay,
     monkeypatch.setattr(live, "BENCHED", 0)
     nostr._down.clear()
     assert live.relays(a) == [dead, relay.url]  # and after a while the commands do again
+
+
+def test_relays_that_all_take_long_are_all_waited_for_not_only_the_first(relay, monkeypatch):
+    """Through muse's proxy every relay answered in 4 to 5 s: the 0.3 s the others got after the first one made
+    it the only one that counted, and benched the rest."""
+    other = Relay()
+    real = nostr.WS
+
+    def slow(url, timeout=10):
+        time.sleep(1.2 if url == relay.url else 1.5)  # a proxy on the way: slow to connect, both of them
+        return real(url, timeout)
+
+    monkeypatch.setattr(nostr, "WS", slow)
+    ev = nostr.event(bytes([7]) * 32, 9467, [["t", "room"]], "x")
+    answers = nostr.publish([relay.url, other.url], [ev], timeout=8)
+    assert set(answers) == {relay.url, other.url} and not {relay.url, other.url} & set(nostr._down)
+    other.close()
 
 
 def test_a_connection_the_relay_dropped_is_opened_again(relay):
