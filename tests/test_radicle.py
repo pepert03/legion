@@ -436,7 +436,7 @@ def test_one_process_per_machine_syncs_every_clone_so_commands_dont(network, tmp
     identity.bind(alice, boss)
     identity.bind(bob, ana)
     started = []
-    monkeypatch.setattr(daemon, "start", lambda: started.append(1))
+    monkeypatch.setattr(daemon, "start", lambda again=False: started.append(1))
     assert not daemon.serving(alice) and started == [1]          # not running: this command syncs, and starts it
     daemon.register(bob)
     coordgit.append(alice, boss, E.create(boss, "project.init", 1, project="p"))
@@ -632,7 +632,7 @@ def test_an_updated_daemon_starts_the_new_one_instead_of_waiting_for_a_command(t
     daemon.register(repo)
     monkeypatch.setattr(daemon, "sync_one", lambda path, log: None)
     started, said = [], []
-    monkeypatch.setattr(daemon, "start", lambda: started.append(1))
+    monkeypatch.setattr(daemon, "start", lambda again=False: started.append(1))
     assert daemon.run(log=said.append) == 0
     assert started == [1] and "starts the new one" in said[-1] and not (daemon.folder() / "beat").exists()
 
@@ -990,6 +990,20 @@ def test_a_command_waits_for_the_sync_process_to_push_its_events(tmp_path, monke
     monkeypatch.setattr(radicle.time, "sleep", lambda s: None)
     assert not radicle.wait_marked(repo, 0)                             # not yet: the command goes on
 
+def test_asking_whether_a_process_lives_never_ends_it(monkeypatch):
+    """os.kill(pid, 0) only asks on POSIX; on Windows it ends the process. A test that played Linux on a Windows
+    machine (IS_WINDOWS off) asked about the machine's real sync process, and killed it at every run of the suite."""
+    import os
+    from legion import tunnel
+    sent = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append(sig))
+    monkeypatch.setattr(radicle, "IS_WINDOWS", False)
+    monkeypatch.setattr(tunnel, "IS_WINDOWS", False)
+    assert radicle.pid_alive(os.getpid(), "legion") or os.name != "nt"
+    tunnel.alive(os.getpid())
+    assert sent == [] if os.name == "nt" else set(sent) <= {0}
+
+
 def test_a_sync_process_the_sandbox_killed_isnt_taken_for_alive_by_its_fresh_beat(tmp_path, monkeypatch):
     """Killed as each command returned, its beat stayed fresh for a minute: commands woke a dead process and
     waited for a push that never came."""
@@ -1209,3 +1223,38 @@ def test_where_background_processes_dont_last_commands_dont_start_one_each(tmp_p
     os.utime(d / "beat", (now - 25 + 3600, now - 25 + 3600))
     (d / "started").write_text(str(now - 7200), encoding="utf-8")   # it lived an hour and more
     assert not daemon.short_lived()
+
+
+def test_a_sync_process_that_dies_with_each_session_is_tried_less_and_less_often(tmp_path, monkeypatch):
+    """In Instinct's sandboxes one lived a session's few minutes: long enough to take the clone's lock from the
+    commands and start the Radicle node, and each session started another."""
+    import os
+    import time
+    from legion import daemon
+    monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(radicle, "spawn_detached", lambda *a, **k: None)
+    d = daemon.folder()
+    d.mkdir(parents=True)
+    now = time.time()
+
+    def lived(seconds, ended_ago):
+        (d / "started").write_text(str(now - ended_ago - seconds), encoding="utf-8")
+        (d / "beat").write_text("1", encoding="utf-8")
+        os.utime(d / "beat", (now - ended_ago, now - ended_ago))
+
+    lived(240, ended_ago=60)                 # four minutes, a session: it didn't stay
+    assert daemon.short_lived()
+    lived(240, ended_ago=daemon.RETRY_SHORT + 60)
+    assert not daemon.short_lived()          # half an hour later another is tried
+    daemon.start()
+    lived(240, ended_ago=daemon.RETRY_SHORT + 60)
+    assert not daemon.short_lived()
+    daemon.start()                           # the second in a row that didn't last
+    lived(240, ended_ago=daemon.RETRY_SHORT + 60)
+    assert daemon.short_lived()              # now it waits twice as long
+    lived(7200, ended_ago=60)                # one that lasted two hours (a machine that was turned off)
+    assert not daemon.short_lived()
+    daemon.start()
+    assert daemon._young() == 0              # sets it back
+    daemon.start(again=True)                 # making way for a newer legion's is no death
+    assert daemon._young() == 0

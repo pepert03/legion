@@ -100,7 +100,7 @@ def alive(pid) -> bool:
     """Whether this dumbpipe still runs: the number may belong to another program by now."""
     if not pid or not isinstance(pid, int):
         return False
-    if IS_WINDOWS:
+    if IS_WINDOWS or os.name == "nt":  # (os.kill(pid, 0) ends the process on Windows: see radicle.pid_alive)
         listed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True,
                                 text=True).stdout
         return "dumbpipe" in listed.lower()

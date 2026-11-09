@@ -89,29 +89,57 @@ def serving(repo) -> bool:
     return False
 
 
-SHORT_LIVED, RETRY_SHORT = 120, 1800
+SHORT_LIVED, RETRY_SHORT, RETRY_MOST = 1800, 1800, 86400
 
 
-def short_lived() -> bool:
-    """The last sync process died within SHORT_LIVED seconds of starting, less than RETRY_SHORT ago: here background
-    processes don't outlive the command that starts them (a sandbox). Each command started one anyway, which lived
-    a few seconds and only made the commands guess (a young process: push by yourself and wait); now they sync by
-    themselves, one way, and one is tried again after RETRY_SHORT."""
+def _life() -> tuple[float, float] | None:
+    """(when the last sync process started, when it was last seen), or None when there was none."""
     d = folder()
     try:
         started = float((d / "started").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return None
     try:
-        last = (d / "beat").stat().st_mtime
+        return started, (d / "beat").stat().st_mtime
     except OSError:
-        last = started  # gone before its first round
-    return last - started < SHORT_LIVED and time.time() - last < RETRY_SHORT
+        return started, started  # gone before its first round
 
 
-def start() -> None:
+def _young() -> int:
+    """How many sync processes in a row didn't last SHORT_LIVED."""
+    try:
+        return int((folder() / "young").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+
+
+def short_lived() -> bool:
+    """The last sync process died within SHORT_LIVED of starting, and not long enough ago to try another: here
+    background processes don't stay (a sandbox ends them with the command, or with the session a few minutes
+    later). Each command started one anyway. One that lived seconds only made the commands guess; one that
+    lived a session's minutes did worse: it took the clone's lock from the commands (4 to 5 s each, in
+    Instinct's sandboxes) and started the Radicle node, to be killed with it mid-write. Another is tried after
+    RETRY_SHORT, and twice as long after each one in a row that didn't last, up to a day: where they do stay, the
+    first one that lasts sets it back."""
+    life = _life()
+    if life is None:
+        return False
+    started, last = life
+    wait = min(RETRY_MOST, RETRY_SHORT * 2 ** max(0, _young() - 1))
+    return last - started < SHORT_LIVED and time.time() - last < wait
+
+
+def start(again: bool = False) -> None:
+    """Start the sync process. `again`: the running one making way for a newer legion's, which isn't a death."""
     from .radicle import spawn_detached
     folder().mkdir(parents=True, exist_ok=True)
+    if not again:
+        life = _life()
+        died_young = life is not None and life[1] - life[0] < SHORT_LIVED
+        try:
+            (folder() / "young").write_text(str(_young() + 1 if died_young else 0), encoding="utf-8")
+        except OSError:
+            pass
     log = folder() / "log.txt"
     if log.exists() and log.stat().st_size > 1_000_000:  # keep the last of it only
         log.write_text(log.read_text(encoding="utf-8", errors="replace")[-200_000:], encoding="utf-8")
@@ -373,7 +401,7 @@ def run(rounds: int | None = None, log=_log) -> int:
                 os.environ["LEGION_DAEMON_SINCE"] = (d / "started").read_text(encoding="utf-8").strip()
             except OSError:
                 pass
-            start()
+            start(again=True)
             break
         _wait(d / "wake", EVERY)
     finish_publishing(FINISH)

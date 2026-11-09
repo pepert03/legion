@@ -649,16 +649,26 @@ def pid_alive(pid, what: str = "legion") -> bool:
             return what.encode() in cmdline.read_bytes()
         except OSError:
             return False
-    if IS_WINDOWS:
+    if os.name == "nt":
+        # The system this really runs on, whatever IS_WINDOWS was told for a test: below, os.kill(pid, 0) only
+        # asks on POSIX. On Windows it ends the process. A test that played Linux on a Windows machine asked
+        # whether the machine's real sync process was alive, and killed it: jose's died with every run of the
+        # suite, five times in one evening.
         import ctypes
         k = ctypes.windll.kernel32
         h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not h:
             return False
-        code = ctypes.c_ulong()
+        code, size, image = ctypes.c_ulong(), ctypes.c_ulong(1024), ctypes.create_unicode_buffer(1024)
         ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        named = k.QueryFullProcessImageNameW(h, 0, image, ctypes.byref(size))
         k.CloseHandle(h)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
+        if not ok or code.value != 259:  # STILL_ACTIVE
+            return False
+        # Its number may be another program's by now (after a reboot they start low again): legion's own
+        # processes are Python's. The command line can't be read here as on Linux; the program's name can.
+        name = Path(image.value).name.lower() if named else ""
+        return not name or "python" in name or "pypy" in name
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
