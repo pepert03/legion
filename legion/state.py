@@ -86,6 +86,13 @@ MAX_QUESTIONS_PER_DAY, QUESTION_TTL = 10, 7200
 # or not, at most MAX_HUB_PER_DAY of either per agent in any 24 hours. A reference is one per link: whoever adds
 # it again vouches for it, with their own reason.
 MAX_HUB_PER_DAY = 60
+# A message from one agent to others (`legion send`): what a subagent's SendMessage is in one harness, between
+# machines. It reaches whoever it names (an agent, an owner's agents, whoever works on a task) in their inbox, at
+# once where they listen (see live.py), and decides nothing: it makes nobody active, trusted or at work, so a
+# legion that doesn't know the type, and drops it, computes the same state for everything else.
+MAX_MESSAGES_PER_DAY = 200
+MAX_RECIPIENTS = 20
+SIDE = {"message.sent"}
 MAX_URL, MAX_TITLE = 500, 300
 LINK_PREFIXES = ("https://", "http://", "doi:", "arxiv:")
 # Results: what an agent proves along the way that doesn't finish its task but is worth keeping, a lemma others can
@@ -388,6 +395,8 @@ class State:
         self.hub: list[dict] = []  # the central chat's messages, in order
         self.literature: dict[str, dict] = {}  # link_key -> {url, title, by: the lit.added events vouching for it}
         self.hub_by: dict[str, list[float]] = defaultdict(list)  # author -> when it posted in the hub
+        self.messages: list[dict] = []  # message.sent events, in order
+        self.messages_by: dict[str, list[float]] = defaultdict(list)  # author -> when it sent them
         self.worked: set[str] = set()  # owners whose agents did something here (more than join): see newcomer
         self.cant: dict[str, dict[str, str]] = {}  # agent -> {task: what its machine lacks for it}: see cannot
         self.delegates: dict[str, str] = {}  # a subagent's key -> the agent that vouched for it (see trusted)
@@ -977,6 +986,96 @@ class State:
         tasks = [t for t in self.tasks.values() if t.mode == "exclusive" and not t.cancelled and t.kind != "result"
                  and self.status(t.id, now) in ("open", "claimed")]
         return len(agents), len(tasks)
+
+    def _message(self, ev: dict) -> str | None:
+        if self.project is None:
+            return "the project is not started"
+        text, to = ev.get("text"), ev.get("to")
+        if not isinstance(text, str) or not text.strip() or len(text) > E.MAX_NOTES:
+            return f"a message is text of at most {E.MAX_NOTES} characters"
+        if (not isinstance(to, list) or not 0 < len(to) <= MAX_RECIPIENTS
+                or not all(isinstance(x, str) and 0 < len(x) <= 80 for x in to)):
+            return f"a message names who it's for: up to {MAX_RECIPIENTS} agents, owners or tasks"
+        if ev.get("task") is not None and ev["task"] not in self.tasks:
+            return "unknown task"
+        if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.messages_by[ev["author"]]) >= MAX_MESSAGES_PER_DAY:
+            return f"at most {MAX_MESSAGES_PER_DAY} messages a day per agent"
+        self.messages.append(ev)
+        self.messages_by[ev["author"]].append(ev["ts"])
+        return None
+
+    def reaches(self, ev: dict, author: str, name: str, now: float) -> bool:
+        """Whether a message is for this agent: it names it, its owner (every agent of theirs), or a task it
+        works on or worked on."""
+        own = owner(name)
+        for spec in ev["to"]:
+            s = spec.lstrip("@")
+            if s in (name, own, author):
+                return True
+            t = self.find_task(s)
+            if t and self.took_part(t.id, author, now):
+                return True
+        return False
+
+    def inbox(self, author: str, name: str, now: float) -> list[dict]:
+        """What the others recorded that this agent should see, oldest first: the messages sent to it, the notes
+        that name it, what happens on the tasks it holds (a note, a report, saved work, someone else's patch),
+        what becomes of its own patches and questions, and, for an agent whose verification counts, the patches
+        waiting for one. In one harness a subagent is handed these by its parent; here each agent's legion works
+        them out from the log, and `legion inbox`, every command's last lines, a hook or `legion run` hand them
+        over. Each item: {id, kind, from, ts, lamport, task, text}."""
+        own, items = owner(name), []
+
+        def add(ev, kind, text, task=None, key=None):
+            items.append({"id": key or ev["id"], "kind": kind, "from": ev["name"], "ts": ev["ts"],
+                          "lamport": ev["lamport"], "task": task or ev.get("task"), "text": text})
+
+        def said(ev):
+            return next((ev[k] for k in ("text", "notes", "summary", "reason") if isinstance(ev.get(k), str) and ev[k]), "")
+
+        for m in self.messages:
+            if m["author"] != author and self.reaches(m, author, name, now):
+                add(m, "message", m["text"])
+        for n in self.mentions(name):
+            add(n, "mention", n["text"])
+        mine = {tid for tid, cs in self.claims.items() if any(c.author == author and c.active(now) for c in cs)}
+        patches = {p.id for p in self.patches.values() if p.author == author}
+        asked = {qid for qid, q in self.questions.items() if q["ev"]["author"] == author}
+        shown = {i["id"] for i in items}
+        for ev in self.events:
+            if ev["author"] == author or ev["id"] in shown:
+                continue
+            t, tid = ev["type"], ev.get("task")
+            if t in ("patch.accepted", "patch.rejected") and ev.get("patch") in patches:
+                p = self.patches[ev["patch"]]
+                add(ev, "verdict", f"your patch {p.id[:8]} was {t.split('.')[1]}"
+                    + (f" ({ev.get('code')}: {said(ev)})" if t == "patch.rejected" else ""), p.task)
+            elif t == "patch.verified" and ev.get("patch") in patches:
+                add(ev, "verified", f"checked your patch {ev['patch'][:8]}: {ev.get('outcome')}"
+                    + (f" ({said(ev)})" if said(ev) else ""), self.patches[ev["patch"]].task)
+            elif t == "question.answered" and ev.get("question") in asked:
+                add(ev, "answer", f"answered your question: {said(ev)}", self.questions[ev["question"]]["task"])
+            elif tid in mine:
+                if t == "task.note":
+                    add(ev, "note", said(ev))
+                elif t == "attempt.reported":
+                    add(ev, "report", f"reported {ev.get('outcome') or ''}: {said(ev)}".replace(" : ", ": "))
+                elif t == "work.saved":
+                    add(ev, "save", f"saved work on it you can build on (`start --from`): {said(ev)}")
+                elif t == "patch.submitted":
+                    add(ev, "patch", "sent a patch for this task: a second one would only race it; check it "
+                                     "(`verify`) or carry on from it")
+                elif t == "patch.accepted":
+                    add(ev, "done", "this task is done: a patch for it went in. Stop, and claim another")
+        if self.trusted(author):
+            cannot = self.cannot(author)
+            for p in self.patches.values():
+                if (p.verdict is None and owner(p.name) != own and p.task not in cannot
+                        and not any(owner(v["name"]) == own for v in self.verifications.get(p.id, ()))):
+                    items.append({"id": f"verify:{p.id}", "kind": "verify", "from": p.name, "ts": p.ts,
+                                  "lamport": p.lamport, "task": p.task,
+                                  "text": f"patch {p.id[:8]} waits for a verification you can give (`verify`)"})
+        return sorted(items, key=lambda i: (i["lamport"], i["id"]))
 
     def took_part(self, tid: str, author: str, now: float) -> bool:
         """Works on the task now, or did: claimed it, reported on it, sent or verified a patch, proposed a sketch
@@ -1985,6 +2084,15 @@ def extend(st: State, events: list[dict], trusted=None) -> State:
     for ev in events:
         known = trusted is True or (trusted is not None and id(ev) in trusted)
         err = None if known else E.check(ev)
+        if not err and ev["type"] in SIDE:  # between agents, and nothing else: see MAX_MESSAGES_PER_DAY
+            err = st._message(ev)
+            if err:
+                st.ignored.append((ev, err))
+            else:
+                st.names.setdefault(ev["author"], ev["name"])
+                st.events.append(ev)
+                st.max_lamport = max(st.max_lamport, ev["lamport"])
+            continue
         if not err:  # who acts now is active now: a vote counts its own author among the active owners
             st.names[ev["author"]] = ev["name"]
             st.last_seen[ev["author"]] = max(st.last_seen.get(ev["author"], 0), ev["ts"])

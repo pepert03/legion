@@ -10,6 +10,7 @@ def no_daemon(monkeypatch, tmp_path):
     monkeypatch.setenv("LEGION_NO_DAEMON", "1")
     # The machine's check slots are shared by every legion on it: a test's checks don't wait for an agent's.
     monkeypatch.setenv("LEGION_SLOTS", str(tmp_path / "check-slots"))
+    monkeypatch.setenv("LEGION_LIVE", "off")  # nor do they publish to the public relays (test_live has its own)
     monkeypatch.setenv("LEGION_LAN", "0")  # nor do nodes of tests listen on the network (see tunnel.lan_allowed)
     # run_publish sets it for its process, which a test is too: it carried over to the tests after it.
     monkeypatch.setattr(radicle, "ANNOUNCE_INLINE", False)

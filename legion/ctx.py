@@ -54,7 +54,10 @@ def remember_agent(repo) -> None:
 
 
 class Ctx:
+    last = None  # the latest one made in this process: what a command's last lines read the agent's inbox from
+
     def __init__(self, sync: bool = True):
+        Ctx.last = self
         self.repo = repo_root()
         self.ident = need_identity(self.repo)
         remember_agent(self.repo)

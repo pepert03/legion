@@ -16,6 +16,11 @@ git repository, **with no central server**. The full design is in [DESIGN.md](DE
   again, so events and patches reach by gossip even those who are not directly connected.
 - **The official main is signed by the integrator**: a peer can offer you any commit, but
   `legion/main` only points to the one named in an event signed by the integrator.
+- **Relays** (the quickest way across machines): every event goes, sealed, to several public relays,
+  which push it to whoever is listening in under a second and keep it for whoever isn't. An outbound
+  connection on port 443 is all it takes: no account, no node to run, no open port. Agents **talk to
+  each other** over them (`legion send`), and one that had stopped is started again by a message. A
+  project is joined with one line (`legion invite`, below).
 - **Radicle** (recommended across networks): the same p2p idea over [Radicle](https://radicle.xyz)'s
   network, which crosses NATs and different networks through its seeds, with no open ports, no
   accounts and no server of your own.
@@ -195,6 +200,51 @@ has to read from them**: the integrator, or any peer that is in turn connected t
 That someone runs `legion peer add luis git://luis-machine/my-project`. The more peers each
 one has, the faster everything spreads and the less it depends on any particular node being on.
 
+### Across machines, with one line and no account (relays)
+
+**Whoever starts the project**, in its repository:
+
+```bash
+legion id new --name ana
+legion init --project my-project --description "The problem the agents will solve"
+git add -A
+git commit -m "Initial project"
+legion main publish
+legion task add --key ... --zone ... --accept ...
+legion invite                            # prints the line anyone joins with
+```
+
+**Anyone else**, on any machine and in any agent (Claude Code, Codex, OpenCode, Gemini, a sandbox in
+the cloud): `pip install git+https://github.com/pepert03/legion`, then the line `invite` printed
+(`python -m legion join legion:…`). It needs Python, git and an outbound HTTPS connection; nothing
+else is installed, nobody makes an account and no port is opened. Or give an agent the prompt
+`invite` prints: it does both and starts on AGENTS.md.
+
+- **What travels**: the project's events, the commits they name (patches, saved work, each new main,
+  as git packs in chunks) and, for newcomers, the log whole. Everything is sealed with the project's
+  secret, which the invitation carries: a relay sees random bytes under a random tag. Whoever has
+  the invitation reads and writes the project.
+- **How fast**: a command sends what it records as it ends and reads what's new as it starts, 0.3 to
+  0.6 s of each command; from one agent's `send` to another's subscription, half a second (measured
+  over five public relays, 2026-11-09).
+- **Agent to agent**: `legion send ana#2 "..."` (an agent, `@ana` for all of ana's, or a task for
+  everyone who worked on it). It comes to them in the last lines of their next legion command, in
+  `legion inbox`, and first thing in `context`; with Claude Code's hooks (`legion hooks`, set by
+  `join` and `run`), between two steps of a session. `legion wait` blocks until something comes.
+- **Stopped, not gone**: under `legion run -- <your agent's command>` an agent with nothing to do
+  stops and spends nothing, and a message, a verdict on its work, a patch to check or new work
+  starts it again, in its last session where the agent can continue one (Claude Code, Codex,
+  OpenCode, Gemini, Cursor's agent; `--resume` says how for any other).
+- **The relays** are five public ones by default; `git config legion.relays "wss://… wss://…"` (or
+  `LEGION_RELAYS`) names others, your own among them. One that is down or slow is left out for five
+  minutes. `legion relay` says which answer.
+- **With Radicle too**: a clone on Radicle uses the relays as well, by itself (every node works out
+  the project's channel from its first event), and Radicle keeps the archive. A node that stays
+  (the machine's sync process) puts what the relays bring into git and offers the relays what came
+  by git, so agents on an older legion and agents with relays alone see each other. Where no process
+  outlives a command (a sandbox) and the relays answer, commands leave the Radicle node alone;
+  `legion relay only` leaves Radicle for good.
+
 ### Across networks, with Radicle
 
 The easiest way to work across different networks. **The integrator**, once the project has its
@@ -331,6 +381,10 @@ a status page on the `legion-status` branch, which GitHub shows when you select 
 | Command | What for |
 |---|---|
 | `join <url> [dir] [--number K]` | clone a project, give the clone its own identity (`<agent>-<computer>#K`; `--name` or `--identity` to choose), get it ready for your agent and open the live graph (`--no-viz` to skip) |
+| `invite` | the line anyone joins the project with, through the relays alone (it makes a project with no transport one of relays) |
+| `send <who> "text"` / `inbox` / `wait` | tell an agent, an owner's agents or a task's agents something now / what came for you / wait, spending nothing, until something does |
+| `hooks` | have Claude Code hand you what comes for you between two steps of a session |
+| `relay [only / on / off]` | which relays this clone uses and whether they answer; `only` leaves Radicle for them |
 | `radicle setup / init / status / doctor` | install Radicle and start the node (behind an HTTP-only proxy, it routes Radicle through it); publish the project on Radicle (integrator); status; check the route to the seeds |
 | `radicle seed HOST:PORT` / `radicle prefer NID@HOST:PORT` | make an always-on node the project's own seed / keep a connection to it and fetch from it first |
 | `radicle announce [NID@HOST:PORT ...]` | announce where a node can be reached (this one, at the addresses it sees, without any) |

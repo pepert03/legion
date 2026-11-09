@@ -181,11 +181,11 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     # Merge on top of the main the integrators signed last, and say so (the event's base): if another
     # integrator moves main in the meantime, the state discards this verdict and the patch is redone.
     tip = c.st.main_tip
-    if tip and not coordgit.has_commit(repo, tip):
+    if tip and not coordgit.need_commit(repo, tip):
         return None  # that main hasn't reached this node yet
     if not coordgit.fetch_patch(repo, branch):
         return reject(f"branch {branch} not found", "missing")
-    if not coordgit.has_commit(repo, commit):
+    if not coordgit.need_commit(repo, commit, branch):
         if coordgit.is_p2p(repo):
             return None  # the event arrived before the commit: gossip will bring it on a later sync
         return reject("the commit is not on its branch", "missing")
@@ -232,7 +232,7 @@ def review_sketch(c: Ctx, k: S.Sketch) -> tuple[str, dict] | None:
     tests_dir = S.sketch_dir(task.id)
     if not coordgit.has_commit(c.repo, k.commit) and not coordgit.is_p2p(c.repo):
         coordgit.fetch_patch(c.repo, k.branch)
-    if coordgit.has_commit(c.repo, k.commit):
+    if coordgit.need_commit(c.repo, k.commit, k.branch):
         main = coordgit.base_ref(c.repo)
         base = git(c.repo, "merge-base", main, k.commit)
         files = git(c.repo, "diff", "--name-only", base, k.commit).splitlines()
@@ -1086,7 +1086,7 @@ def audit_job(c: Ctx, now: float) -> Job | None:
                      and p.merge_commit and not audited(p)),
                     key=lambda p: hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest()):
         draw = int(hashlib.sha256(f"{c.me}:{p.id}".encode()).hexdigest(), 16) / 16 ** 64
-        if draw >= c.st.policy["audit"] or not coordgit.has_commit(c.repo, p.merge_commit):
+        if draw >= c.st.policy["audit"] or not coordgit.need_commit(c.repo, p.merge_commit):
             continue
         head = git(c.repo, "rev-parse", p.merge_commit + "^1")
         trees = git(c.repo, "rev-parse", head + "^{tree}", p.merge_commit + "^{tree}").split()

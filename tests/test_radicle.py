@@ -1067,6 +1067,7 @@ def test_a_push_that_hangs_doesnt_hold_up_the_daemons_next_rounds(tmp_path, monk
     """In line, a push that hung for ten minutes held up the copy of what the network brought: now it runs aside,
     the rounds go on, and that clone isn't pushed twice at once."""
     import threading
+    import time
     from legion import daemon, identity
     monkeypatch.setenv("LEGION_HOME", str(tmp_path / "home"))
     repo = tmp_path / "r"
@@ -1082,6 +1083,9 @@ def test_a_push_that_hangs_doesnt_hold_up_the_daemons_next_rounds(tmp_path, monk
     monkeypatch.setattr(daemon, "FINISH", 0)
     try:
         assert daemon.run(rounds=4, log=lambda m: None) == 0
+        end = time.time() + 10  # (the push starts in its thread a moment after the round that asked for it)
+        while not pushed and time.time() < end:
+            time.sleep(0.02)
         assert len(synced) == 4 and pushed == [1]
     finally:
         release.set()

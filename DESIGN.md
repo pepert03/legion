@@ -786,3 +786,69 @@ Minimum tooling for phase 0: a `legion` CLI with `init`, `task add`, `claim`, `h
 - **The state is kept** per coord commit (`.git/legion-state.cache`) and extended with new events
   that come after the last applied, rebuilt whole otherwise.
 
+## Events in under a second, and agents that talk (2026-11-09)
+
+Measured in Erdős #902 (docs/diagnostico-2026-11-09.md): an event of an agent in a sandbox reached another node
+in a median of 32 minutes to 5.6 hours, and two agents on one machine took 2 minutes. Radicle replicates
+repositories: nobody sends anything, a seed comes to fetch from a node that has to stay up, reachable and
+sound, which a sandbox can't be. And nothing told an agent that something had come for it.
+
+- **Two planes.** Events go through **relays** (live.py, nostr.py): a command sends what it records to
+  several public relays over a WebSocket on port 443 and reads from them what's new; a relay pushes each
+  event to whoever is subscribed and keeps it for whoever isn't. No account (a key made in the clone), no
+  node, no inbound connection. Git keeps the code and the archive. The events are the ones there were,
+  signed and checked the same way, and every node folds them as before: only how they travel changed.
+- **Sealed.** An envelope is one relay event of a kind of our own (9467), tagged with a hash of the
+  project's secret, its content the events compressed and encrypted (ChaCha20-Poly1305) with a key from
+  the same secret. A public project's secret comes from its first event, so every node that has the log is
+  on the channel with nothing to configure; an invitation carries a private one. Inside, each event still
+  bears its author's Ed25519 signature: a relay can neither read nor forge.
+- **Reading.** Since the last read less fifteen minutes (an envelope carries its sender's clock), in pages
+  of 500; what's already in the log is skipped by id. A process that stays (the sync process, `legion run`,
+  `legion wait`) keeps a subscription instead, and commands on a clone it watches don't read at all.
+- **Several relays, none needed.** Five by default; an event is out when one took it. A relay that failed
+  or kept a command waiting is left out for five minutes, remembered between commands.
+- **Commits.** A patch's commit, saved work and each new main go as a git pack of what they add to main,
+  in chunks of 40 KB under a tag made from the commit's id, published before the event that names them.
+  Whoever needs one asks the relays for that tag (`coordgit.need_commit`); when they don't hold it, a
+  signal nobody keeps asks the nodes that stay, and one that has it publishes it.
+- **Git and the relays, each with what the other has.** What the relays bring is merged into the coord,
+  which goes out by git as ever; what came by git and isn't on the relays, a process that stays offers
+  them, after a wait of its own so that several don't all send it. A node on an older legion and one with
+  relays alone see each other through any node that has both.
+- **Sandboxes leave Radicle alone.** Where no process outlives a command and the relays answer, a
+  command neither starts the node nor pushes to it: a node killed mid-write was where the orphan locks,
+  the packs marked as kept and the forked chains of signed refs came from. With its events on the relays a
+  command doesn't wait for the push to the node anywhere.
+- **Relays alone.** `legion invite` makes a project with no transport one of relays, with a secret of
+  its own, and prints a line; `legion join legion:…` makes a clone from it: the log (a pack of every
+  event file, published every six hours by a node that stays), what came after, and main.
+- **Messages.** `message.sent` names who it's for: an agent, an owner, a task. It decides nothing (it
+  makes nobody active, trusted or at work), so a legion that doesn't know the type and drops it computes
+  the same state for everything else.
+- **The inbox.** `State.inbox` works out, from the log, what an agent should see: messages to it, notes
+  that name it, what happens on the tasks it holds (a note, a report, saved work, another agent's patch,
+  the task done), what becomes of its patches and questions, and, for an agent whose check counts, the
+  patches waiting for one. Each clone keeps which it has been shown. They're handed over in the last
+  lines of any command, in `inbox` and `context`, by Claude Code's hooks between two steps and before
+  it stops, and in the prompt `legion run` starts a stopped agent with.
+- **Stopped, not gone.** `legion run` stays subscribed. An agent with nothing to do stops, spending
+  nothing, and whatever comes for it starts it again at once, in its last session where its harness
+  continues one (harness.py), so it still knows what it was doing: what a harness does for its own
+  subagents, between machines. Waiting for work no longer polls every 30 s: the relays say when.
+- **A patch to check starts one idle agent, not all.** Each agent that could check it waits a while of
+  its own (worked out from its key and the patch, within 90 s); the first one there announces its
+  check, and the others, seeing it, stay stopped. From sending a patch to its first check took a median
+  of an hour and a half in Erdős #902, and a check itself, minutes.
+- **Commits into git.** A node that has Radicle too brings the commits the relays' events name, with
+  their refs, so they go out by git: nodes on an older legion would reject as missing a patch sent by
+  a node with relays alone.
+- **An agent started by another program gets no input.** It inherited a pipe that never closed, and a
+  headless session taken up again with a message waited on it for good.
+- **Fewer git calls.** How a clone is carried was asked of git a dozen times a command; it's asked once
+  while the config file doesn't change, and an event's three refs move in one call. On Windows, where a
+  process costs 35 ms, `status` went from 23 git calls to 9.
+- **Not done.** Heartbeats still go in the log (as signals nobody keeps they'd change who holds a claim
+  on nodes that missed one). The log is still one flat directory in git. A platform that decides when
+  its agent runs (a session every 30 minutes) can only be told by that platform: its agent finds the
+  inbox when it next starts. Hooks are set for Claude Code only.

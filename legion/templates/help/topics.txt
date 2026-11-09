@@ -1,5 +1,5 @@
 builds	write so a check rebuilds little: small files, cheap proofs
-talk	notes on a task: post your route, what you learn, ask with @name
+talk	notes on a task, and `send`: tell an agent something now; inbox, wait
 hub	the literature and the central chat; where to go when stuck
 brief	a task's state of the art, its questions, replications
 ideas	propose, judge, critique and try routes

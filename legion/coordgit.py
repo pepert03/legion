@@ -10,6 +10,7 @@ import os
 import pickle
 import random
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -198,7 +199,7 @@ def _code_stamp() -> float:
 
 
 def _state_file(repo) -> Path:
-    return Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / STATE_CACHE
+    return common_dir(repo) / STATE_CACHE
 
 
 def _kept(repo, key: str):
@@ -279,15 +280,58 @@ def _commit(repo, files: dict[str, str], parents: list[str], message: str, env) 
     return git(repo, *args, "-m", message, env=env)
 
 
+def add_events(repo, ident: Identity, events: list[dict]) -> int:
+    """Events that didn't come by git (the relays brought them: see live.py), into this clone's log, in one
+    commit. How many it didn't have."""
+    old = rev(repo, REF)
+    files = list_files(repo, old)
+    new = [ev for ev in events if E.filename(ev) not in files]
+    if not new:
+        return 0
+    if len(new) <= 3:
+        blobs = [git(repo, "hash-object", "-w", "--stdin", input=E.encode(ev)) for ev in new]
+    else:  # one git call for all of them
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, ev in enumerate(new):
+                paths.append(str(Path(tmp) / str(i)))
+                Path(paths[-1]).write_bytes(E.encode(ev))
+            listed = "".join(p + os.linesep for p in paths)
+            blobs = git(repo, "hash-object", "-w", "--stdin-paths", input=listed.encode()).split()
+    files.update({E.filename(ev): blob for ev, blob in zip(new, blobs)})
+    commit = _commit(repo, files, [old] if old else [], f"{len(new)} events from the relays", author_env(ident))
+    git(repo, "update-ref", REF, commit, old or ZERO)
+    git(repo, "update-ref", PUB + "coord", commit)
+    return len(new)
+
+
+def take_tree(repo, ident: Identity, commit: str, ok) -> list[dict]:
+    """The events of another copy of the log (a commit holding events/, already in this repository) that this
+    clone lacks and `ok(event)` accepts, into its log in one commit: their blobs are here, nothing is written
+    again. The events it took."""
+    old = rev(repo, REF)
+    mine = list_files(repo, old)
+    missing = {name: blob for name, blob in list_files(repo, commit).items() if name not in mine}
+    events = read_blobs(repo, sorted(set(missing.values())))
+    good = {name: blob for name, blob in missing.items()
+            if isinstance(events.get(blob), dict) and ok(events[blob]) and E.filename(events[blob]) == name}
+    if good:
+        new = _commit(repo, {**mine, **good}, [old] if old else [], f"{len(good)} events from a copy of the log",
+                      author_env(ident))
+        git(repo, "update-ref", REF, new, old or ZERO)
+        git(repo, "update-ref", PUB + "coord", new)
+    return [events[blob] for blob in good.values()]
+
+
 def append(repo, ident: Identity, ev: dict) -> None:
     blob = git(repo, "hash-object", "-w", "--stdin", input=E.encode(ev))
     old = rev(repo, REF)
     files = list_files(repo, old)
     files[E.filename(ev)] = blob
     new = _commit(repo, files, [old] if old else [], f"{ev['type']} {ev.get('task', '')}".strip(), author_env(ident))
-    git(repo, "update-ref", REF, new, old or ZERO)
-    git(repo, "update-ref", PUB + "coord", new)
-    git(repo, "update-ref", OWN, new)  # this node's own latest event: what makes a publish worth its time
+    # The three refs in one git call (OWN: this node's own latest event, what makes a publish worth its time).
+    git(repo, "update-ref", "--stdin",
+        input=f"update {REF} {new} {old or ZERO}\nupdate {PUB}coord {new}\nupdate {OWN} {new}\n".encode())
 
 
 OWN = "refs/legion/own"
@@ -306,21 +350,55 @@ MAIN = "refs/legion/main"  # `git checkout legion/main` resolves to it
 FETCH_TIMEOUT = 30
 
 
+_dirs: dict[str, Path] = {}
+_settings: dict[tuple, tuple] = {}
+
+
+def common_dir(repo) -> Path:
+    """The repository's .git (the one its worktrees share), asked of git once per process."""
+    key = str(repo)
+    if key not in _dirs:
+        _dirs[key] = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    return _dirs[key]
+
+
+def setting(repo, key: str) -> list[str]:
+    """The values of a git setting of this clone. Asked of git again only when the clone's config file changes:
+    how a clone is carried (legion.transport) was asked a dozen times a command, a process each, which on
+    Windows was a third of a second of every command."""
+    try:
+        s = (common_dir(repo) / "config").stat()
+        stamp = (s.st_mtime_ns, s.st_size)
+    except (OSError, GitError):
+        stamp = None
+    kept = _settings.get((str(repo), key))
+    if kept and stamp is not None and kept[0] == stamp:
+        return kept[1]
+    p = run(repo, "config", "--get-all", key)
+    values = p.stdout.decode().split() if p.returncode == 0 else []
+    _settings[(str(repo), key)] = (stamp, values)
+    return values
+
+
 def is_radicle(repo) -> bool:
-    p = run(repo, "config", "--get", "legion.transport")
-    return p.returncode == 0 and p.stdout.decode().strip() == "radicle"
+    return setting(repo, "legion.transport")[-1:] == ["radicle"]
+
+
+def is_relay(repo) -> bool:
+    """A clone whose only transport is the relays (live.py): no Radicle node, no remote. Its refs are laid out as
+    in p2p, and the commits its events name come from the relays (see need_commit)."""
+    return setting(repo, "legion.transport")[-1:] == ["relay"]
 
 
 def peers(repo) -> list[str]:
     if is_radicle(repo):  # with Radicle, the peers are the publishers already copied from its storage
         out = run(repo, "for-each-ref", "--format=%(refname)", PEERS).stdout.decode()
         return sorted({line[len(PEERS):].split("/", 1)[0] for line in out.splitlines() if line.endswith("/coord")})
-    p = run(repo, "config", "--get-all", "legion.peer")
-    return p.stdout.decode().split() if p.returncode == 0 else []
+    return list(setting(repo, "legion.peer"))
 
 
 def is_p2p(repo) -> bool:
-    return is_radicle(repo) or bool(peers(repo))
+    return is_radicle(repo) or is_relay(repo) or bool(peers(repo))
 
 
 def add_peer(repo, name: str, url: str) -> None:
@@ -447,12 +525,34 @@ def has_commit(repo, sha: str | None) -> bool:
     return bool(sha) and run(repo, "cat-file", "-e", sha + "^{commit}").returncode == 0
 
 
-def update_main(repo, tip: str | None) -> bool:
-    """Point legion/main at the main the integrator signed, if we already have that commit. True if what
-    this node offers as main moved."""
-    if not has_commit(repo, tip):
+fetch_commit = None  # set by the transport: (repo, sha, ref, wait) -> whether it brought the commit
+
+
+def need_commit(repo, sha: str | None, ref: str | None = None, wait: float = 0.0) -> bool:
+    """has_commit, and when this clone lacks it, ask the transport for it: with relays, a commit an event names
+    isn't here until someone needs it (a verifier its patch, the next agent the saved work)."""
+    if has_commit(repo, sha):
+        return True
+    if not sha or fetch_commit is None:
         return False
-    moved = rev(repo, PUB + "main") != tip
+    try:
+        return bool(fetch_commit(repo, sha, ref, wait))
+    except Exception:  # noqa: BLE001 (the network's trouble: the commit isn't here, as before)
+        return False
+
+
+def update_main(repo, tip: str | None, fetch: bool = False) -> bool:
+    """Point legion/main at the main the integrator signed, if we already have that commit (`fetch`: or the
+    transport can bring it now, see need_commit). True if what this node offers as main moved."""
+    if not tip:
+        return False
+    out = run(repo, "for-each-ref", "--format=%(refname) %(objectname)", MAIN, PUB + "main").stdout.decode()
+    at = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
+    if at.get(MAIN) == tip and at.get(PUB + "main") == tip:
+        return False  # where it was: nothing to move (every command asks)
+    if not (need_commit(repo, tip) if fetch else has_commit(repo, tip)):
+        return False
+    moved = at.get(PUB + "main") != tip
     git(repo, "update-ref", MAIN, tip)
     git(repo, "update-ref", PUB + "main", tip)
     return moved

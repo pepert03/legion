@@ -37,10 +37,16 @@ def enabled() -> bool:
     return not os.environ.get("LEGION_NO_DAEMON")
 
 
+_locks: dict[str, Path] = {}
+
+
 def repo_lock(repo) -> Path:
     """The lock that keeps the daemon and a command from moving a clone's coord at the same time."""
-    git_dir = coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
-    return Path(git_dir or Path(repo) / ".git") / "legion-sync.lock"
+    key = str(repo)
+    if key not in _locks:
+        git_dir = coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
+        _locks[key] = Path(git_dir or Path(repo) / ".git") / "legion-sync.lock"
+    return _locks[key]
 
 
 def _entry(repo) -> Path:
@@ -137,11 +143,40 @@ def _code_stamp() -> float:
     return max((p.stat().st_mtime for p in here.glob("*.py")), default=0.0)
 
 
+_live: dict[str, tuple] = {}  # clone -> (its subscription to the relays, its bridge between git and them)
+
+
+def keep_live(repo: str, ident, log=print) -> bool:
+    """Where the clone uses the relays (live.py): stay subscribed for it, so what anyone publishes is in its log
+    within a moment and its commands needn't read; answer the nodes that ask for a commit it holds; and offer
+    the relays what reached it by git and isn't there."""
+    from . import live
+    if not live.enabled(repo) or live.channel(repo) is None:
+        gone = _live.pop(repo, None)
+        if gone:
+            gone[0].close()
+        return False
+    if repo not in _live:
+        _live[repo] = (live.Watcher(repo, ident, on_new=lambda new: wake(), serve=True), live.Bridge(repo))
+        log(f"{time.strftime('%H:%M:%S')} {repo}: subscribed to the relays")
+    sent = _live[repo][1].round()
+    if sent:
+        log(f"{time.strftime('%H:%M:%S')} {repo}: offered the relays {sent} events that came by git")
+    return True
+
+
 def sync_one(repo: str, log=print) -> bool:
     try:
         ident = Identity.load(repo=repo)
-        if ident is None or not coordgit.is_radicle(repo):
+        if ident is None:
             return False
+        try:
+            relays = keep_live(repo, ident, log)
+        except Exception as e:  # noqa: BLE001 (the relays' trouble isn't git's)
+            relays = False
+            log(f"{time.strftime('%H:%M:%S')} {repo}: relays: {str(e).strip()[-300:]}")
+        if not coordgit.is_radicle(repo):
+            return relays
         # The lock only while the coord moves here: commands append to it under the same lock, and held it off
         # for the whole push too (20 s, and minutes for a first one), past the time agents' tools allow them.
         with held(repo_lock(repo)):
@@ -316,6 +351,9 @@ def run(rounds: int | None = None, log=_log) -> int:
                 continue
             if age > IDLE or not Path(path).exists():
                 e.unlink(missing_ok=True)
+                gone = _live.pop(path, None)
+                if gone:
+                    gone[0].close()
                 continue
             used += 1
             sync_one(path, log)
@@ -339,6 +377,9 @@ def run(rounds: int | None = None, log=_log) -> int:
             break
         _wait(d / "wake", EVERY)
     finish_publishing(FINISH)
+    for watcher, _ in _live.values():
+        watcher.close()
+    _live.clear()
     return 0
 
 

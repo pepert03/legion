@@ -984,7 +984,7 @@ def test_run_stops_an_agent_that_runs_again_and_again_without_doing_anything(pro
     assert cli.main(["run", "--max-runs", "10", "--", "my-agent"]) == 3 and len(ran) == cli.RUN_EMPTY
     assert "without recording anything" in capsys.readouterr().out
     envs = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda argv, env=None: envs.append(env) or subprocess.CompletedProcess(argv, 0))
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, env=None, **k: envs.append(env) or subprocess.CompletedProcess(argv, 0))
     run_agent(["my-agent"])
     monkeypatch.undo()
     assert envs[0]["LEGION_RUN"] == "1"
