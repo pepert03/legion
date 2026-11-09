@@ -243,10 +243,11 @@ def test_a_standby_integrator_takes_a_subtree(project, monkeypatch):
     patch("a", "ok\n")
     patch("b", "ok\n")
     boss = as_(repo, "boss")
-    assert integrator.hold_lease(boss, 300)[0]
+    # Leases of an hour: on a loaded machine a 300 s one can run out before the boss's round, which then takes it
+    assert integrator.hold_lease(boss, 3600)[0]
     luis = as_(repo, "luis")
-    assert not integrator.hold_lease(luis, 300)[0]
-    taken = integrator.hold_shards(luis, 300, 1)
+    assert not integrator.hold_lease(luis, 3600)[0]
+    taken = integrator.hold_shards(luis, 3600, 1)
     assert len(taken) == 1
     mine = Ctx(sync=False).st.tasks[taken[0]].key
     integrator.integrate_once(as_(repo, "boss"), 60, log=[].append)
