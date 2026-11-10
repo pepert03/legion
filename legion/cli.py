@@ -16,6 +16,7 @@ from pathlib import Path
 from . import coordgit
 from . import harness
 from . import inbox
+from . import timing
 from . import transport
 from . import update
 from . import events as E
@@ -3672,6 +3673,8 @@ def main(argv=None) -> int:
         print(f"legion: git error: {e}", file=sys.stderr)
         return 1
     finally:
+        t0 = time.time()
         hint(args)
-        if os.environ.get("LEGION_TIMING"):
-            print(f"legion: timing: {args.cmd} took {time.time() - started:.1f} s in all", file=sys.stderr)
+        if time.time() - t0 >= 1:
+            timing.timed("what came for you, at the end", t0)
+        timing.summary(args.cmd, started)

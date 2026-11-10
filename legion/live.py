@@ -17,6 +17,7 @@ Git stays the archive: a node with Radicle merges what the relays bring into its
 and offers the relays what came by git from nodes that don't use them yet (see Bridge).
 """
 
+import atexit
 import base64
 import hashlib
 import json
@@ -78,10 +79,13 @@ def enabled(repo) -> bool:
     return _cfg(repo, "legion.transport") in ("radicle", "relay")
 
 
-BENCHED = 300  # seconds a relay that failed, or was too slow to wait for, is left out of the commands' rounds
-# Seconds the commands leave the relays alone once none of them answered: that's a machine whose way out doesn't
-# let them through (muse's proxy), which five minutes don't change, and each try cost a command five seconds.
-ALL_DOWN = 1800
+BENCHED = 300  # seconds a relay that failed (or was never in time: see nostr.LATE) is left out of the commands' rounds
+# Once none of them answered, the commands leave the relays alone for RETRY_FIRST seconds, and twice as long each
+# time in a row that none does, up to ALL_DOWN: a machine whose way out doesn't let them through (muse's proxy,
+# before legion went through it) doesn't change in five minutes, and each try costs a command its whole wait. Not
+# half an hour at the first: on a machine that was only busy for a moment the commands went back to the node, a
+# minute each, for all of it.
+RETRY_FIRST, ALL_DOWN = 60, 1800
 
 
 def all_relays(repo) -> list[str]:
@@ -96,47 +100,76 @@ def relays(repo) -> list[str]:
     """The relays a command uses now: the project's, without the ones that failed or kept a command waiting in
     the last BENCHED seconds (remembered between commands: each is a process of its own), unless that's all of
     them. A dead relay cost every command its whole wait."""
-    urls = all_relays(repo)
-    try:
-        kept = json.loads((folder(repo) / "down.json").read_text(encoding="utf-8"))
-        kept = kept if isinstance(kept, dict) else {}
-    except (OSError, ValueError):
-        kept = {}
-    now = time.time()
+    urls, kept, now = all_relays(repo), _found(repo), time.time()
+    late = kept.get("late") if isinstance(kept.get("late"), dict) else {}
     for u in urls:
-        last = max(kept.get(u, 0) if isinstance(kept.get(u), (int, float)) else 0, nostr._down.get(u, 0))
-        if last:
-            nostr._down[u] = last
+        if u in nostr._ok:
+            continue  # it answered this process since
+        if _num(kept.get(u)) > nostr._down.get(u, 0):
+            nostr._down[u] = _num(kept[u])
+        if u not in nostr._counted and isinstance(late.get(u), int):
+            nostr._late[u] = max(late[u], nostr._late.get(u, 0))
     good = [u for u in urls if now - nostr._down.get(u, 0) > BENCHED]
     return good or urls
 
 
-def reachable(repo) -> bool:
-    """False when every relay failed in the last BENCHED seconds, or none answered in the last ALL_DOWN: a
-    command doesn't try again until then (behind a proxy that lets none through, each command waited its whole
-    LIVE_WAIT for nothing)."""
-    relays(repo)  # loads what the last commands found
-    now = time.time()
+def _num(x) -> float:
+    return x if isinstance(x, (int, float)) and not isinstance(x, bool) else 0
+
+
+def _found(repo) -> dict:
+    """What the last commands found about the relays (each is a process of its own)."""
     try:
-        none = json.loads((folder(repo) / "down.json").read_text(encoding="utf-8")).get("none answered", 0)
-    except (OSError, ValueError, AttributeError):
-        none = 0
-    if isinstance(none, (int, float)) and now - none < ALL_DOWN:
-        return False
-    return any(now - nostr._down.get(u, 0) > BENCHED for u in all_relays(repo))
+        kept = json.loads((folder(repo) / "down.json").read_text(encoding="utf-8"))
+        return kept if isinstance(kept, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def remember_relays(repo) -> None:
-    """Keep for the next commands which relays failed this one."""
-    urls, now = all_relays(repo), time.time()
-    down = {u: t for u, t in nostr._down.items() if u in urls and now - t <= BENCHED}
-    if urls and len(down) == len(urls):
-        down["none answered"] = now
+def retry_at(repo) -> float:
+    """When the commands try the relays again, after none answered (0: they do now)."""
+    kept = _found(repo)
+    none = _num(kept.get("none answered"))
+    return none + min(ALL_DOWN, RETRY_FIRST * 2 ** max(0, int(_num(kept.get("times")) or 1) - 1)) if none else 0.0
+
+
+def reachable(repo) -> bool:
+    """False for a while after no relay at all answered (see RETRY_FIRST): a command doesn't try until then. That
+    some are left out isn't it: when every one is, a command tries them all."""
+    return time.time() >= retry_at(repo)
+
+
+_at_exit: set[str] = set()
+
+
+def remember_relays(repo, answered: bool | None = None) -> None:
+    """Keep for the next commands what this one found: which relays failed, which weren't in time, and whether
+    any answered at all (None: this round doesn't say)."""
+    urls, now, kept = all_relays(repo), time.time(), _found(repo)
+    down: dict = {u: t for u, t in nostr._down.items() if u in urls and now - t <= BENCHED}
+    late = {u: n for u, n in nostr._late.items() if u in urls and n > 0}
+    if late:
+        down["late"] = late
+    if answered is False:
+        down["none answered"], down["times"] = now, int(_num(kept.get("times"))) + 1
+    elif answered is None and kept.get("none answered"):
+        down["none answered"], down["times"] = kept["none answered"], kept.get("times", 1)
     f = folder(repo) / "down.json"
     try:
         if down or f.exists():
             f.write_text(json.dumps(down), encoding="utf-8")
     except OSError:
+        pass
+    if str(repo) not in _at_exit:  # a relay that answered after its round went on was only slow: said as it ends
+        _at_exit.add(str(repo))
+        atexit.register(_as_it_ends, repo)
+
+
+def _as_it_ends(repo) -> None:
+    try:
+        if folder(repo).is_dir():
+            remember_relays(repo)
+    except Exception:  # noqa: BLE001 (the process is ending)
         pass
 
 
@@ -324,7 +357,7 @@ def take(repo, ident, events: list[dict]) -> list[dict]:
         return []
     from .daemon import repo_lock  # here: the daemon uses this module
     new, known = [], []
-    with held(repo_lock(repo), wait=30):
+    with held(repo_lock(repo), wait=30, what="events from the relays going into the log"):
         have, seen = local_ids(repo), set()
         for ev in events:
             i = ev.get("id")
@@ -358,6 +391,13 @@ def pull(repo, ident, timeout: float = 5.0, deep: bool = False) -> tuple[list[di
         if until is not None:
             f["until"] = until
         page, answered = nostr.query(urls, [f], timeout)
+        if not answered and not answered_any:
+            # None of the relays in use: the ones that had been left out, before going without. A command's
+            # fastest relay having a bad moment sent it back to the node.
+            rest = [u for u in all_relays(repo) if u not in urls]
+            if rest:
+                urls = rest
+                page, answered = nostr.query(urls, [f], timeout)
         if not answered:
             break
         answered_any = True
@@ -367,7 +407,7 @@ def pull(repo, ident, timeout: float = 5.0, deep: bool = False) -> tuple[list[di
         if len(fresh) < 50:  # a relay with more to give sent a full page
             break
         until = min(int(e.get("created_at", 0)) for e in page)
-    remember_relays(repo)
+    remember_relays(repo, answered_any)
     new = take(repo, ident, [x for e in got for x in unwrap(ch, e)])
     if answered_any:
         stamps = [e["created_at"] for e in got if isinstance(e.get("created_at"), int) and e["created_at"] <= started + SLACK]
@@ -381,8 +421,12 @@ def push(repo, events: list[dict], timeout: float = 6.0) -> bool:
     if ch is None or not events:
         return False
     envelopes = wrap(ch, nsec(repo), events)
-    answers = nostr.publish(relays(repo), envelopes, timeout)
-    remember_relays(repo)
+    urls = relays(repo)
+    answers = nostr.publish(urls, envelopes, timeout)
+    rest = [u for u in all_relays(repo) if u not in urls]
+    if not answers and rest:  # (as pull does)
+        answers = nostr.publish(rest, envelopes, timeout)
+    remember_relays(repo, bool(answers))
     out = all(any(a.get(env["id"], "") is None for a in answers.values()) for env in envelopes)
     if out:
         mark(repo, [e["id"] for e in events])

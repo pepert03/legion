@@ -16,6 +16,7 @@ from . import daemon
 from . import live
 from . import locks
 from . import radicle
+from . import timing
 
 LOCK_WAIT = 15  # seconds a command waits for its clone's lock before reading what it has instead (see sync)
 # seconds a command with events of its own waits for their push (see publish). Within the 60 s that Instinct's
@@ -129,7 +130,7 @@ def relay_status(repo) -> list[str]:
     lines = ["This clone sends its events to the relays and reads the others' from them"
              + (" (and nothing else: no Radicle node)." if coordgit.is_relay(repo) else "; git (Radicle) keeps the archive.")]
     urls, failed = live.all_relays(repo), 0
-    nostr._down.clear()  # asked to look: it tries every one now, whatever the last commands found
+    nostr.forget()  # asked to look: it tries every one now, whatever the last commands found
     via = nostr.proxy()
     if via:
         lines.append(f"  (through the proxy {via.split('@')[-1]})")
@@ -142,11 +143,12 @@ def relay_status(repo) -> list[str]:
             failed += 1
             lines.append(f"  {url}: no answer: {nostr.why(url) or 'it connects, but did not answer in time'}")
     if failed == len(urls):
-        lines.append("  None answers: this clone's commands go on through git alone, and try the relays again in "
-                     "half an hour (`legion relay` tries now). The reason is above; an outbound connection to port 443 that allows a WebSocket "
+        lines.append("  None answers: this clone's commands go on through git alone, and try the relays again in a "
+                     "minute, then less and less often, up to half an hour (`legion relay` tries now). The reason "
+                     "is above; an outbound connection to port 443 that allows a WebSocket "
                      "is all a relay needs" + ("." if via else ", and no proxy is set here (HTTPS_PROXY, or git's "
                                                               "http.proxy)."))
-    live.remember_relays(repo)  # what it found is what the next commands go by
+    live.remember_relays(repo, failed < len(urls))  # what it found is what the next commands go by
     last = live.read_at(repo)
     lines.append("A process stays subscribed for this clone: what anyone sends is here within a moment."
                  if live.watched(repo) else
@@ -164,10 +166,16 @@ def live_round(c) -> tuple[bool, bool]:
     Both take a fraction of a second, and neither needs a node, a seed coming to fetch, or a process left behind."""
     read = out = False
     try:
-        if not live.reachable(c.repo):
-            return False, False  # none answered a moment ago: git carries, and the relays are tried again later
+        # A process subscribed for this clone is on the relays right now: they're there, whatever a command
+        # that got no answer in its few seconds found.
+        watched = live.watched(c.repo)
+        if not watched and not live.reachable(c.repo):
+            # None answered a moment ago: git carries, and the relays are tried again later.
+            timing.note(f"the relays are left alone: none answered a moment ago, and they're tried again in "
+                        f"{max(0, live.retry_at(c.repo) - time.time()):.0f} s (`legion relay` tries now)")
+            return False, False
         t0 = time.time()
-        if live.watched(c.repo) or time.time() - getattr(c, "live_read", 0) < JUST_READ:
+        if watched or time.time() - getattr(c, "live_read", 0) < JUST_READ:
             read = True
         else:
             _, read = live.pull(c.repo, c.ident, LIVE_WAIT)
@@ -197,9 +205,8 @@ def live_round(c) -> tuple[bool, bool]:
 
 def timed(what: str, since: float) -> None:
     """With LEGION_TIMING set, how long a step of the sync round took, on stderr: Instinct's agents measured
-    claims of 60 to 120 s from the outside, and nothing said which step they went on."""
-    if os.environ.get("LEGION_TIMING"):
-        print(f"legion: timing: {what} {time.time() - since:.1f} s", file=sys.stderr, flush=True)
+    claims of 60 to 120 s from the outside, and nothing said which step they went on (see timing.py)."""
+    timing.timed(what, since)
 
 
 def keep_fetching(repo) -> None:
@@ -288,17 +295,20 @@ def _sync(c) -> None:
                     pass
                 timed("fetch from the network", t0)
             t0 = time.time()
-            with locks.held(daemon.repo_lock(c.repo), wait=wait) as got:
-                timed("waiting for the clone's lock", t0)
-                t0 = time.time()
-                if relays and not on_radicle:
-                    c.unreachable = []  # nothing comes by git here: the relays brought it above
-                elif got or wait > LOCK_WAIT:
-                    c.unreachable = coordgit.sync(c.repo, c.ident, publish=False)
-                    timed("sync with the node's storage", t0)
-                else:
-                    print("legion: this clone is being synced by another process right now: reading what it "
-                          "has", file=sys.stderr)
+            if relays and not on_radicle:
+                c.unreachable = []  # nothing comes by git here, and nothing to hold the lock for: the relays brought it
+            else:
+                lock = daemon.repo_lock(c.repo)
+                with locks.held(lock, wait=wait, what="a command syncing its clone") as got:
+                    timed("waiting for the clone's lock", t0)
+                    t0 = time.time()
+                    if got or wait > LOCK_WAIT:
+                        c.unreachable = coordgit.sync(c.repo, c.ident, publish=False)
+                        timed("sync with the node's storage", t0)
+                    else:
+                        who = locks.holder(lock)
+                        print("legion: this clone is being synced by another process right now"
+                              + (f" ({who})" if who else "") + ": reading what it has", file=sys.stderr)
             done = True
             if on_radicle:
                 t0 = time.time()
@@ -329,7 +339,11 @@ def _sync(c) -> None:
         # as main (it published a main, or finalized a patch), push again, or the commit would wait for
         # this node's next command, and a founder's `main publish` may have none after it.
         # (with relays, a main this clone lacks comes from them now: see coordgit.need_commit)
-        if coordgit.update_main(c.repo, c.st.main_tip, fetch=relays) and on_radicle:
+        t0 = time.time()
+        moved = coordgit.update_main(c.repo, c.st.main_tip, fetch=relays)
+        if time.time() - t0 >= 1:
+            timed("bringing the project's main", t0)
+        if moved and on_radicle:
             if served:
                 daemon.wake()
             else:

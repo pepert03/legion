@@ -721,11 +721,39 @@ def test_a_task_this_machine_cant_do_isnt_handed_back_and_the_steps_can_be_timed
     monkeypatch.setattr(S, "COOLDOWN", 0)                                # its cooldown over: still not handed back
     monkeypatch.setenv("LEGION_TIMING", "1")
     assert main(["claim"]) == 0 and Ctx(sync=False).st.holder(tids["b"], time.time()).name == "luis#1"
-    assert "legion: timing: claim took" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "legion: timing: claim took" in err
+    # And what no step of the sync names is said too: of muse's claim of 306 s the steps named 89, and of one of
+    # Instinct's 19 s, 0.4. Loading the state, git's calls, and work against waiting (its machine's load was 26).
+    assert "legion: timing: loading the state, " in err and "legion: timing: git was called " in err
+    assert " on the CPU" in err and "the rest it waited" in err
     main(["release", tids["b"], "--notes", "no route"])
     capsys.readouterr()
     assert main(["claim"]) != 0 or Ctx(sync=False).st.holder(tids["a"], time.time()) is None
     assert main(["claim", tids["a"]]) == 0                               # by name, once it can
+
+
+def test_an_event_doesnt_wait_two_minutes_for_the_clones_lock_and_whoever_holds_it_is_named(project, capsys, monkeypatch):
+    """On muse's machine something held a clone's lock through a whole claim: 300 s, most of them the event
+    waiting for the lock in silence, and nothing said who had it."""
+    from legion import ctx, locks, transport
+    from legion.cli import main
+    repo, tids, patch = project
+    as_(repo, "luis")
+    lock = transport.repo_lock(repo)
+    assert locks.holder(lock) == ""
+    monkeypatch.setattr(ctx, "RECORD_WAIT", 1.2)
+    monkeypatch.setenv("LEGION_TIMING", "1")
+    monkeypatch.setenv("LEGION_SYNC", "off")  # (the sync waits for the lock too: here, only the event)
+    before = len(Ctx(sync=False).st.events)
+    with locks.held(lock, what="the sync process copying from the node's storage") as got:
+        assert got and "the sync process copying from the node's storage, for " in locks.holder(lock)
+        started = time.time()
+        assert main(["chat", "recorded all the same"]) == 0
+        assert time.time() - started < 30
+    err = capsys.readouterr().err
+    assert "waiting for the clone's lock, to record (not got: pid " in err and "the sync process copying" in err
+    assert locks.holder(lock) == "" and len(Ctx(sync=False).st.events) == before + 1
 
 
 def test_an_agent_going_round_in_circles_is_told_and_handed_another_task(project, capsys, monkeypatch):

@@ -44,8 +44,7 @@ def repo_lock(repo) -> Path:
     """The lock that keeps the daemon and a command from moving a clone's coord at the same time."""
     key = str(repo)
     if key not in _locks:
-        git_dir = coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
-        _locks[key] = Path(git_dir or Path(repo) / ".git") / "legion-sync.lock"
+        _locks[key] = coordgit.git_dir(repo) / "legion-sync.lock"
     return _locks[key]
 
 
@@ -207,7 +206,7 @@ def sync_one(repo: str, log=print) -> bool:
             return relays
         # The lock only while the coord moves here: commands append to it under the same lock, and held it off
         # for the whole push too (20 s, and minutes for a first one), past the time agents' tools allow them.
-        with held(repo_lock(repo)):
+        with held(repo_lock(repo), what="the sync process copying from the node's storage"):
             coordgit.sync(repo, ident, publish=False)
         publish_aside(repo, ident, log)
         clear_stale_locks(repo, log)
@@ -265,7 +264,7 @@ def cleanup_enabled(repo) -> bool:
     """LEGION_LOCK_CLEANUP=0, or git config legion.lockcleanup false, turns clear_stale_locks off."""
     value = os.environ.get("LEGION_LOCK_CLEANUP")
     if value is None:
-        value = coordgit.run(repo, "config", "--get", "legion.lockcleanup").stdout.decode().strip()
+        value = " ".join(coordgit.setting(repo, "legion.lockcleanup"))
     return value.lower() not in ("0", "false", "no", "off")
 
 
@@ -307,8 +306,7 @@ def clear_stale_locks(repo, log=print) -> list[str]:
     from . import radicle
     if not cleanup_enabled(repo):
         return []
-    stamp = Path(coordgit.run(repo, "rev-parse", "--absolute-git-dir").stdout.decode().strip()
-                 or Path(repo) / ".git") / "legion-locks-checked"
+    stamp = coordgit.git_dir(repo) / "legion-locks-checked"
     try:
         if time.time() - stamp.stat().st_mtime < STALE_LOCK:
             return []

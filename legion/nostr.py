@@ -341,13 +341,33 @@ CONNECT = 10  # seconds to reach a relay; one that doesn't answer is left out of
 GRACE = 0.3
 _pool: dict[str, WS] = {}  # the connections this process keeps, one per relay: a command reads, then writes
 _pool_lock = threading.Lock()
-# relay -> when it last failed or was too slow to wait for, so a command doesn't wait for it twice (live.py keeps
-# it between commands)
+# relay -> when it last failed (it couldn't be reached, it cut, it refused), so a command doesn't wait for it twice
+# (live.py keeps it between commands)
 _down: dict[str, float] = {}
+# relay -> commands in a row in which it wasn't done in time, and LATE of them leave it out like one that failed.
+# Being slower than the fastest isn't failing. A relay not done when the round went on was left out for five
+# minutes at once: each command left out all but the fastest, and when that one had a bad moment none was left and
+# the commands went back to the node for half an hour. In Instinct's sandboxes the relays worked for one command
+# (a claim of 8 s) and not for the next ones (70 s).
+_late: dict[str, int] = {}
+LATE = 3
+_counted: set[str] = set()  # the relays this process already counted as late: once per command
+_waiting: set[str] = set()  # the ones a round went on without, still being waited for: not asked again meanwhile
+_ok: dict[str, float] = {}  # relay -> when it last answered this process
+
+
+def forget() -> None:
+    """What this process found about the relays (a test: the next command, a process of its own)."""
+    for kept in (_down, _late, _counted, _waiting, _ok):
+        kept.clear()
 
 
 class Slow(Exception):
     """The relay answers, but not in the time given."""
+
+
+class Refused(Exception):
+    """The relay answers, and won't serve this."""
 
 
 def _with(url: str, fn):
@@ -394,18 +414,25 @@ def close_all() -> None:
 
 def _each(urls: list[str], fn, timeout: float, grace: float) -> dict:
     """fn(url) for every relay at once. {url: its result} for those done within `timeout`, or within `grace`
-    seconds of the first one that worked: a slow relay doesn't hold a command."""
+    seconds of the first one that worked: a slow relay doesn't hold a command. The round goes on without the
+    others, which end in their own time: one that answers then was only slow."""
     out, done = {}, threading.Event()
 
     def run(u):
         try:
             out[u] = fn(u)
+            _ok[u] = time.time()
             _down.pop(u, None)
+            _late.pop(u, None)
+        except Slow as e:  # it's there, and didn't finish in time: late, which is counted below
+            out[u] = e
         except Exception as e:  # noqa: BLE001 (a relay's trouble is its own)
             out[u] = e
             _down[u] = time.time()
+        _waiting.discard(u)
         done.set()
 
+    urls = [u for u in urls if u not in _waiting]
     threads = [threading.Thread(target=run, args=(u,), daemon=True) for u in urls]
     for t in threads:
         t.start()
@@ -420,8 +447,17 @@ def _each(urls: list[str], fn, timeout: float, grace: float) -> dict:
             break
     got = dict(out)
     for u in urls:
+        if u in got and not isinstance(got[u], Slow):
+            continue
         if u not in got:
-            _down[u] = time.time()  # not in time: the next rounds go on without it for a while
+            _waiting.add(u)
+            if u in out:  # (it ended between the two lines above)
+                _waiting.discard(u)
+        if u not in _counted and u not in _ok:
+            _counted.add(u)
+            _late[u] = _late.get(u, 0) + 1
+        if _late.get(u, 0) >= LATE:
+            _down[u] = time.time()  # never in time, command after command: the next ones go on without it
     return got
 
 
@@ -464,7 +500,7 @@ def query(urls: list[str], filters: list[dict], timeout: float = 6, grace: float
             elif msg[0] == "EOSE":
                 break
             elif msg[0] == "CLOSED":
-                raise Slow(f"the relay refused the request: {msg[2] if len(msg) > 2 else ''}")
+                raise Refused(f"the relay refused the request: {msg[2] if len(msg) > 2 else ''}")
         ws.send(json.dumps(["CLOSE", sub]))
         return got
 

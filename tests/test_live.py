@@ -27,7 +27,7 @@ def relay(monkeypatch, tmp_path):
     monkeypatch.setenv("LEGION_RELAYS", r.url)
     yield r
     nostr.close_all()
-    nostr._down.clear()
+    nostr.forget()
     live._sent.clear()
     live._folders.clear()
     r.close()
@@ -108,13 +108,94 @@ def test_a_relay_that_kept_a_command_waiting_is_left_out_of_the_next_ones(relay,
     monkeypatch.setenv("LEGION_RELAYS", f"{dead} {relay.url}")
     first = record(a, ana, "project.init", project="p", integrators=[ana.author])
     assert live.relays(a) == [dead, relay.url] and live.push(a, [first])
-    nostr._down.clear()  # the next command: a new process, that remembers nothing itself
+    assert until(lambda: dead in nostr._down)  # (refused at once on Linux, after two seconds on Windows)
+    live.remember_relays(a)  # as the command ends
+    nostr.forget()  # the next command: a new process, that remembers nothing itself
     assert live.relays(a) == [relay.url]
     assert live.pull(a, ana)[1]
     assert live.all_relays(a) == [dead, relay.url]  # a process that stays keeps trying it
     monkeypatch.setattr(live, "BENCHED", 0)
-    nostr._down.clear()
+    nostr.forget()
     assert live.relays(a) == [dead, relay.url]  # and after a while the commands do again
+
+
+def test_a_relay_slower_than_the_fastest_isnt_left_out_until_it_is_never_in_time(relay, tmp_path, monkeypatch):
+    """A relay not done when the round went on was left out for five minutes: each command left out all but the
+    fastest, and in Instinct's sandboxes the relays worked for one command and not for the next ones."""
+    import socket
+    a, ana = clone(tmp_path, "ana#1")
+    other = Relay()
+    real = nostr.WS
+
+    def slower(url, timeout=10):
+        time.sleep(1.0 if url == other.url else 0)
+        return real(url, timeout)
+
+    monkeypatch.setattr(nostr, "WS", slower)
+    monkeypatch.setenv("LEGION_RELAYS", f"{other.url} {relay.url}")
+    record(a, ana, "project.init", project="p", integrators=[ana.author])
+    for _ in range(4):  # four commands, each a process of its own
+        assert live.pull(a, ana)[1]
+        assert until(lambda: other.url in nostr._ok, 3)  # it answers, after the round went on: only slow
+        live.remember_relays(a)  # as the command ends
+        nostr.close_all()
+        nostr.forget()
+        assert live.relays(a) == [other.url, relay.url]
+    other.close()
+    silent = socket.socket()  # one that takes the connection and never says a word
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(8)
+    mute = f"ws://127.0.0.1:{silent.getsockname()[1]}"
+    monkeypatch.setattr(nostr, "WS", real)
+    monkeypatch.setenv("LEGION_RELAYS", f"{mute} {relay.url}")
+    for n in range(nostr.LATE):
+        assert live.relays(a) == [mute, relay.url]
+        assert live.pull(a, ana)[1]
+        live.remember_relays(a)
+        nostr.close_all()
+        nostr.forget()
+    assert live.relays(a) == [relay.url]  # never in time, command after command: now it is left out
+    silent.close()
+
+
+def test_when_the_relays_in_use_dont_answer_the_ones_left_out_are_asked_before_going_without(relay, tmp_path, monkeypatch):
+    """The one relay a clone had left had a bad moment: no relay answered, said the command, and the next ones
+    went back to the node for half an hour, with four relays that worked."""
+    a, ana = clone(tmp_path, "ana#1")
+    other = Relay()
+    monkeypatch.setenv("LEGION_RELAYS", f"{relay.url} {other.url}")
+    first = record(a, ana, "project.init", project="p", integrators=[ana.author])
+    nostr._down[relay.url] = time.time()  # the last commands left this one out
+    live.remember_relays(a)
+    nostr.forget()
+    assert live.relays(a) == [other.url]
+    other.close()  # and the only one in use goes
+    assert live.pull(a, ana, 2)[1] and live.reachable(a)
+    nostr.forget()
+    nostr._down[relay.url] = time.time()
+    live.remember_relays(a)
+    nostr.forget()
+    assert live.push(a, [first], 2) and live.reachable(a)
+
+
+def test_when_none_answers_the_relays_are_tried_again_soon_and_then_less_and_less_often(relay, tmp_path, monkeypatch):
+    """Half an hour without the relays at the first command that got no answer: on a machine that was busy for a
+    moment (muse's, with a load of 26), every command of that half hour went through the node."""
+    a, ana = clone(tmp_path, "ana#1")
+    record(a, ana, "project.init", project="p", integrators=[ana.author])
+    monkeypatch.setenv("LEGION_RELAYS", "ws://127.0.0.1:9")  # nobody there
+    assert not live.pull(a, ana, 1)[1] and not live.reachable(a)
+    assert 0 < live.retry_at(a) - time.time() <= live.RETRY_FIRST
+    nostr.forget()
+    assert not live.pull(a, ana, 1)[1]
+    assert live.RETRY_FIRST < live.retry_at(a) - time.time() <= 2 * live.RETRY_FIRST  # twice as long
+    for _ in range(8):
+        nostr.forget()
+        live.pull(a, ana, 0.2)
+    assert live.retry_at(a) - time.time() <= live.ALL_DOWN  # and never more than this
+    monkeypatch.setenv("LEGION_RELAYS", relay.url)
+    nostr.forget()
+    assert live.pull(a, ana)[1] and live.reachable(a) and live.retry_at(a) == 0  # one answer sets it back
 
 
 def test_relays_that_all_take_long_are_all_waited_for_not_only_the_first(relay, monkeypatch):
@@ -723,7 +804,7 @@ def test_when_no_relay_answers_git_carries_as_before_and_the_relays_arent_tried_
     assert cli.main(["status"]) == 0 and time.time() - started < 3  # and no second wait for relays that are down
     # None answered: not five minutes later either (a proxy doesn't change its mind), until `legion relay` looks.
     monkeypatch.setattr(live, "BENCHED", 0)
-    nostr._down.clear()
+    nostr.forget()
     assert not live.reachable(b)
     monkeypatch.setenv("LEGION_RELAYS", team_of.relay_url)
     assert cli.main(["relay"]) == 0 and live.reachable(b)

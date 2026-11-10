@@ -10,6 +10,7 @@ from . import coordgit
 from . import events as E
 from . import locks
 from . import state as S
+from . import timing
 from . import transport
 from .identity import Identity
 
@@ -39,13 +40,14 @@ def need_identity(repo=None) -> Identity:
 
 AGENT_VARS = (("LEGION_AGENT", "legion.agent"), ("LEGION_MODEL", "legion.model"))
 LOCK_WAIT, PUBLISH_WAIT, SETTLED = transport.LOCK_WAIT, transport.PUBLISH_WAIT, transport.SETTLED  # older callers
+RECORD_WAIT, RECORD_TRIES = 30, 5  # seconds an event waits for the clone's lock; tries to append it without it
 
 
 def remember_agent(repo) -> None:
     """Which agent and model work in this repository: kept in its git config, so the agent only has to say it
     once (at join), not in every shell. A variable set in the shell wins, and is remembered for next time."""
     for var, key in AGENT_VARS:
-        saved = subprocess.run(["git", "config", "--get", key], cwd=repo, capture_output=True, text=True).stdout.strip()
+        saved = " ".join(coordgit.setting(repo, key))
         value = os.environ.get(var) or (E.detect_agent() if var == "LEGION_AGENT" else None)
         if value and value != saved:
             subprocess.run(["git", "config", key, value], cwd=repo, capture_output=True)
@@ -95,8 +97,23 @@ class Ctx:
         err = next((e for x, e in trial.ignored if x.get("id") == ev["id"]), None)
         if err:
             raise Fail(f"event rejected: {err}")
-        with locks.held(transport.repo_lock(self.repo)):  # this machine's sync process may be merging into it
-            coordgit.append(self.repo, self.ident, ev)
+        # This machine's sync process may be merging into it. Not two minutes for the lock, in silence: on muse's
+        # machine something held it through a whole claim, and that was most of the claim's 300 s. Without it, the
+        # log may move between reading it and writing it, and the event is appended again to where it is by then.
+        lock, t0 = transport.repo_lock(self.repo), time.time()
+        with locks.held(lock, wait=RECORD_WAIT, what="a command recording an event") as got:
+            if time.time() - t0 >= 1:
+                who = locks.holder(lock)
+                timing.timed("waiting for the clone's lock, to record"
+                             + ("" if got else f" (not got: {who or 'another process holds it'})"), t0)
+            for left in range(RECORD_TRIES, 0, -1):
+                try:
+                    coordgit.append(self.repo, self.ident, ev)
+                    break
+                except coordgit.GitError:
+                    if got or left == 1:
+                        raise
+                    time.sleep(0.3)
         self.st = trial
         EMITTED.append(ev)
         # The receipt, before anything goes out: an agent whose tool cut the command off while it published used

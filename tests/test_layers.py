@@ -8,7 +8,7 @@ from pathlib import Path
 import legion
 
 NETWORK = {"radicle", "tunnel", "reach", "netcheck", "bridge", "daemon", "nostr", "live"}
-CORE = ["state", "events", "identity", "trust", "ctx", "integrator", "viz", "locks", "inbox", "harness"]
+CORE = ["state", "events", "identity", "trust", "ctx", "integrator", "viz", "locks", "inbox", "harness", "timing"]
 
 
 def imports(module: str) -> set[str]:

@@ -500,3 +500,28 @@ Arreglos que salieron de ahí:
 - **Un commit que nadie tiene** no se vuelve a pedir hasta pasado un minuto.
 
 **La suite completa** tarda 74 s dentro de WSL con 12 procesos, frente a 7–11 minutos en Windows. Tres tests fallan en Linux con Python 3.12, y fallaban igual antes de este trabajo.
+
+### 10.6 Segunda vuelta (10 de noviembre, 01:00–02:00)
+
+Con `2fd329e` desplegado, Instinct y Muse midieron otra vez:
+
+| Dónde | Qué pasó |
+|---|---|
+| Instinct `b`, `e` | `claim` 8,6 y 7,8 s, `release` 5,3 s. Los relays, 0,1–1,3 s |
+| Instinct `c`, y `e` en los comandos siguientes | Los relays dejan de usarse tras un comando bueno: `claim` y `release` de 67 s otra vez, por el nodo |
+| Instinct `a` | `claim` 19 s y `release` 13 s, de los que el desglose nombraba 0,4 |
+| Muse | `claim` 306 s con la flota en marcha (carga 26): ninguna fase de relays, dos esperas de 15 s por el candado del clon, y 217 s que ningún paso nombraba |
+
+Tres causas, las tres en legion:
+
+1. **Ser más lento que el más rápido contaba como fallar.** Un relay que no había terminado cuando la ronda seguía sin él quedaba apartado cinco minutos. Cada comando apartaba a todos menos al más rápido; cuando ese tenía un mal momento no quedaba ninguno, se apuntaba «no respondió ninguno» y los comandos volvían al nodo durante media hora, con cuatro relays que funcionaban.
+2. **El desglose solo nombraba los pasos de red.** Cargar Python, cargar el estado, las llamadas a git y la espera por el candado para registrar el evento (hasta 120 s, en silencio) no aparecían. En una máquina con carga 26 todo eso se multiplica por la carga.
+3. **Veinte procesos de git por comando**, de los que diez preguntaban lo mismo: dónde está el directorio de git y qué dice la configuración.
+
+Arreglos:
+- **Un relay lento no se aparta.** Solo el que falla, o el que no llega a tiempo tres comandos seguidos sin contestar nunca. Si no contesta ninguno de los que se usan, se pregunta a los apartados antes de darse por vencido. Si no contesta ninguno, se reintenta al minuto, luego a los 2, 4, 8… hasta media hora, y una respuesta lo pone a cero.
+- **`LEGION_TIMING=1` lo cuenta todo:** arranque, cargas del estado, llamadas a git, lo que no tiene nombre, y cuánto del total fue CPU propia frente a espera, con la carga de la máquina.
+- **El candado dice quién lo tiene** (pid, para qué y desde cuándo), y un evento lo espera 30 s, no 120.
+- **`status` hace 10 llamadas a git en vez de 20**: los dos directorios en una, toda la configuración en una, el listado del log una vez por commit, y los borrados de ramas juzgadas en lote.
+
+Sin medir todavía en Instinct y Muse.

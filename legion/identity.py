@@ -78,8 +78,8 @@ class Identity:
 
 
 def bound_id(repo) -> str | None:
-    p = subprocess.run(["git", "config", "--get", "legion.identity"], cwd=repo, capture_output=True, text=True)
-    return p.stdout.strip() or None if p.returncode == 0 else None
+    from .coordgit import setting  # (here: coordgit uses this module)
+    return (setting(repo, "legion.identity") or [None])[-1]
 
 
 def bind(repo, ident: Identity) -> None:

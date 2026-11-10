@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from . import events as E
+from . import timing
 from .identity import Identity
 
 REF = "refs/heads/coord"
@@ -30,7 +31,11 @@ class GitError(RuntimeError):
 
 
 def run(repo, *args, input: bytes | None = None, env=None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=repo, input=input, capture_output=True, env=env)
+    t0 = time.time()
+    try:
+        return subprocess.run(["git", *args], cwd=repo, input=input, capture_output=True, env=env)
+    finally:
+        timing.add(timing.GIT, t0)
 
 
 def git(repo, *args, input: bytes | None = None, env=None, binary=False):
@@ -59,15 +64,27 @@ def is_ancestor(repo, a: str, b: str) -> bool:
     return run(repo, "merge-base", "--is-ancestor", a, b).returncode == 0
 
 
+# (repo, commit) -> its files. A commit's tree doesn't change, and one command listed the same 27,000 files twice
+# (to load the state, and to read the events it lacked), a tenth of a second each on a machine with nothing to do.
+_files: dict[tuple, dict] = {}
+
+
 def list_files(repo, commit: str | None) -> dict[str, str]:
     if not commit:
         return {}
-    files = {}
-    for line in git(repo, "ls-tree", "-r", commit).splitlines():
-        meta, path = line.split("\t", 1)
-        if path.startswith("events/"):
-            files[path[len("events/"):]] = meta.split()[2]
-    return files
+    key = (str(repo), commit)
+    files = _files.get(key)
+    if files is None:
+        files = {}
+        for line in git(repo, "ls-tree", "-r", commit).splitlines():
+            meta, path = line.split("\t", 1)
+            if path.startswith("events/"):
+                files[path[len("events/"):]] = meta.split()[2]
+        if len(commit) in (40, 64) and all(ch in "0123456789abcdef" for ch in commit):  # not a name, which moves
+            if len(_files) >= 3:
+                _files.pop(next(iter(_files)))
+            _files[key] = files
+    return dict(files)
 
 
 def read_blobs(repo, blobs: list[str]) -> dict[str, dict | None]:
@@ -147,7 +164,7 @@ def _stores(repo) -> tuple[_Store, _Store]:
     """(events read so far, blobs whose signature checked out) for this repository."""
     key = str(Path(repo).resolve())
     if key not in _STORES:
-        d = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        d = common_dir(repo)
         _STORES[key] = (_Store(d / "legion-events.cache", dict), _Store(d / "legion-verified.cache", set))
     events, verified = _STORES[key]
     return events, verified
@@ -224,6 +241,14 @@ def _keep(repo, key: str, kept: tuple) -> None:
 
 
 def state(repo, ref: str = REF, extra: list[dict] = ()):
+    t0 = time.time()
+    try:
+        return _state(repo, ref, extra)
+    finally:
+        timing.add(timing.STATE, t0)
+
+
+def _state(repo, ref: str, extra: list[dict]):
     from . import state as S
     if ref != REF:
         return build_state(repo, read_pairs(repo, ref), extra)
@@ -351,33 +376,54 @@ FETCH_TIMEOUT = 30
 
 
 _dirs: dict[str, Path] = {}
-_settings: dict[tuple, tuple] = {}
+_git_dirs: dict[str, Path] = {}
+_settings: dict[str, tuple] = {}
 
 
 def common_dir(repo) -> Path:
     """The repository's .git (the one its worktrees share), asked of git once per process."""
     key = str(repo)
     if key not in _dirs:
-        _dirs[key] = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        # Both of its directories in one call. A command asked for one or the other six times, a process each:
+        # 20 git calls for a `status`, a second where nothing else runs and a minute on muse's machine (a load
+        # of 26), which is where a claim's time went once the network's part was fast.
+        out = git(repo, "rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir").splitlines()
+        _git_dirs[key], _dirs[key] = Path(out[0]), Path(out[-1])
     return _dirs[key]
 
 
+def git_dir(repo) -> Path:
+    """This worktree's own git directory (common_dir is the one its worktrees share), or .git where git can't say."""
+    try:
+        common_dir(repo)
+        return _git_dirs[str(repo)]
+    except (GitError, IndexError, KeyError):
+        return Path(repo) / ".git"
+
+
 def setting(repo, key: str) -> list[str]:
-    """The values of a git setting of this clone. Asked of git again only when the clone's config file changes:
-    how a clone is carried (legion.transport) was asked a dozen times a command, a process each, which on
-    Windows was a third of a second of every command."""
+    """The values of a git setting of this clone. All of them are asked of git in one call, and again only when
+    the clone's config file changes: how a clone is carried (legion.transport) was asked a dozen times a command,
+    a process each, and then each setting once (the transport, the relays, the proxy, the agent, the identity)."""
     try:
         s = (common_dir(repo) / "config").stat()
-        stamp = (s.st_mtime_ns, s.st_size)
+        stamp = (s.st_mtime_ns, s.st_size, s.st_ino)  # (git writes a new file each time: two in one tick differ here)
     except (OSError, GitError):
         stamp = None
-    kept = _settings.get((str(repo), key))
-    if kept and stamp is not None and kept[0] == stamp:
-        return kept[1]
-    p = run(repo, "config", "--get-all", key)
-    values = p.stdout.decode().split() if p.returncode == 0 else []
-    _settings[(str(repo), key)] = (stamp, values)
-    return values
+    kept = _settings.get(str(repo))
+    if not kept or stamp is None or kept[0] != stamp:
+        p = run(repo, "config", "--list", "-z")
+        found: dict[str, list[str]] = {}
+        if p.returncode == 0:
+            for item in p.stdout.decode("utf-8", "replace").split("\0"):
+                name, _, value = item.partition("\n")
+                if name:
+                    found.setdefault(name, []).extend(value.split())
+        kept = _settings[str(repo)] = (stamp, found)
+    # as git lists them: the section and the variable in lower case, what's between them as written
+    section, _, rest = key.partition(".")
+    between, _, variable = rest.rpartition(".")
+    return list(kept[1].get(f"{section.lower()}.{between + '.' if between else ''}{variable.lower()}", []))
 
 
 def is_radicle(repo) -> bool:
@@ -570,8 +616,10 @@ def superseded(pairs) -> set[str]:
 def prune_patches(repo, judged: set[str]) -> None:
     from . import radicle
     radicle.forget_judged(repo, {r for r in judged if r.startswith(PATCHES)})  # first, so no sync brings them back
-    for ref in git(repo, "for-each-ref", "--format=%(refname)", PATCHES).splitlines():
-        if ref in judged:
+    gone = [ref for ref in git(repo, "for-each-ref", "--format=%(refname)", PATCHES).splitlines() if ref in judged]
+    # In one git call: thirty patches judged since the last command were thirty processes, a second and a half.
+    if gone and run(repo, "update-ref", "--stdin", input="".join(f"delete {ref}\n" for ref in gone).encode()).returncode:
+        for ref in gone:
             run(repo, "update-ref", "-d", ref)
 
 

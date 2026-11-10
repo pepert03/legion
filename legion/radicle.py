@@ -609,9 +609,8 @@ def network_sync(repo, force: bool = False, quick: bool = False) -> bool:
 # NETWORK_SYNC_EVERY seconds, and leaves its outcome in .git/legion-netsync.json for the next command to read.
 
 def _netsync_file(repo, name: str = "netsync") -> Path:
-    git_dir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=repo, capture_output=True,
-                             text=True).stdout.strip()
-    return Path(git_dir or Path(repo) / ".git") / f"legion-{name}.json"
+    from .coordgit import git_dir
+    return git_dir(repo) / f"legion-{name}.json"
 
 
 def netsync_status(repo, name: str = "netsync") -> dict:
@@ -699,9 +698,10 @@ def _kick(repo, name: str, stale: float = 120) -> None:
 
 def timed(what: str, since: float) -> None:
     """With LEGION_TIMING set, how long a step took, on stderr (see transport.timed): instinct's `a` ran
-    `netsync --publish` twice to its tools' limit of 120 s, and nothing said where it stood."""
-    if os.environ.get("LEGION_TIMING"):
-        print(f"legion: timing: {what} {time.time() - since:.1f} s", file=sys.stderr, flush=True)
+    `netsync --publish` twice to its tools' limit of 120 s, and nothing said where it stood. (A detail of a
+    step transport names: see timing.py.)"""
+    from . import timing
+    timing.timed(what, since, part=True)
 
 
 def _rounds(repo, name: str, work) -> None:
@@ -1445,9 +1445,8 @@ def _fetch(repo, specs: list[str], held: dict[str, str]) -> None:
 
 
 def _judged_file(repo) -> Path:
-    d = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo,
-                       capture_output=True, text=True).stdout.strip()
-    return Path(d) / "legion-judged"
+    from .coordgit import common_dir
+    return common_dir(repo) / "legion-judged"
 
 
 def judged(repo) -> set[str]:
