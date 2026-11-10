@@ -309,6 +309,29 @@ def test_a_first_read_of_a_long_log_takes_every_page(relay, tmp_path, monkeypatc
     assert len(new) == 150 and len(live.local_ids(b)) == 150 and relay.limit == 60
 
 
+def test_a_node_that_was_off_comes_back_to_everything_not_to_what_a_relay_gives_at_once(relay, tmp_path, monkeypatch):
+    """A subscription brings, of what was published before it, as much as a relay gives at once: jose's laptop,
+    off for the night, would come back to the last 500 events, move its mark to now and never ask for the rest."""
+    a, ana = clone(tmp_path, "ana#1")
+    b, luis = clone(tmp_path, "luis#1")
+    monkeypatch.setattr(live, "MAX_PAYLOAD", 1)  # an envelope per event
+    monkeypatch.setattr(live, "PAGE", 60)
+    relay.limit = 60
+    events, now = [E.create(ana, "project.init", 1, project="p", integrators=[ana.author])], time.time()
+    events += [E.create(ana, "hub.message", i + 2, text=f"m{i}") for i in range(149)]
+    ch, key = live.channel(a), live.nsec(a)
+    envelopes = [nostr.event(key, live.KIND, [["t", ch.tag]], ch.seal(json.dumps({"e": [ev]}).encode()),
+                             created_at=now - 3 * i) for i, ev in enumerate(events)]
+    nostr.publish([relay.url], envelopes, timeout=60)
+    assert until(lambda: len(relay.events) == 150, 60)
+    live.set_cursor(b, now - 3600)  # when it was last on: all of that was published since
+    got = []
+    w = live.Watcher(b, luis, on_new=got.extend)
+    assert until(lambda: len(live.local_ids(b)) == 150, 40) and len(got) == 150
+    assert until(lambda: w.caught_up and live.cursor(b) > now - 60)  # and only then is its mark at now
+    w.close()
+
+
 # --- one agent to another ---------------------------------------------------------------------------------
 
 

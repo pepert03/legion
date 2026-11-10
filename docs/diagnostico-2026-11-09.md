@@ -536,3 +536,19 @@ Con `ebe4d72`, Instinct midió `claim` 6,7 s y `release` 9,2 s en `a`, 7,3 y 1,8
 **Verificar con git 2.34.** `verify` exigía git 2.38 por `merge-tree --write-tree`, y Ubuntu 22.04 trae el 2.34: en las sandboxes de Instinct un parche esperó sin que nadie pudiera verificarlo. Con un git antiguo se usa ahora el merge de tres vías de siempre, que da el mismo árbol cuando los dos saben hacerlo; donde no sabe, dice que hace falta el git nuevo en vez de llamarlo conflicto. Lo que entra en main lo siguen haciendo solo los nodos con git 2.38.
 
 **El daemon de jose muere con la app.** Murió a las 23:01 del día 9 y a las 02:19 del 10, las dos veces al cerrarse la sesión desde la que se arrancó. Mientras está caído, el clon de jose no recibe lo que llega solo por Radicle (1.094 eventos en siete horas) y nadie lo ofrece a los relays. Sin resolver: hace falta arrancarlo fuera de la app.
+
+### 10.8 Un nodo que se apaga (10 de noviembre, 11:30)
+
+El PC de jose es un portátil: se apaga, y con él su daemon. Qué depende de un nodo que se queda, y qué pasa sin él:
+
+| Tarea | Sin ningún nodo que se quede |
+|---|---|
+| Que los eventos lleguen a todos | No hace falta: cada comando lee y escribe en los relays |
+| Que lleguen los commits | No hace falta: quien publica un evento sube el commit que nombra |
+| Llevar a los relays lo que solo llegó por git | Solo importa si un nodo no usa los relays. Su autor lo reenvía con su siguiente comando, si no han pasado 6 h |
+| Llevar a Radicle lo que solo está en los relays | Nadie lo hace: el archivo de Radicle se queda atrás hasta que vuelve un nodo con daemon |
+| Verificar y meter parches en main | Lo hace cualquier nodo de confianza que esté encendido, con Lean; meter en main pide git 2.38 |
+
+**Lo arreglado:** un nodo que vuelve tras horas apagado lee en páginas todo lo publicado desde que se fue, antes de dar su marca por puesta al día. Una suscripción trae, de lo anterior, solo lo que un relay da de una vez (500 eventos o menos): el portátil habría vuelto a los últimos 500 y perdido el resto. Además repite esa lectura cada cinco minutos y siempre que se queda sin ningún relay.
+
+**Lo que queda como riesgo:** los relays guardan hoy todo desde el principio (13 h, comprobado en cuatro de los cinco), pero no sé cuántos días conservan. Si todos los nodos con daemon pasan apagados más tiempo del que los relays guardan, un nodo que vuelve se queda con un hueco. La copia entera del log en los relays (14 MB hoy, 355 trozos por relay) existe para proyectos sin Radicle y no se publica en este.

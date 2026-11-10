@@ -377,13 +377,13 @@ def take(repo, ident, events: list[dict]) -> list[dict]:
 # --- a command's round ------------------------------------------------------------------------------------
 
 
-def pull(repo, ident, timeout: float = 5.0, deep: bool = False) -> tuple[list[dict], bool]:
-    """Read from the relays what was published since the last read (`deep`: everything they hold). (The events
-    that were new here, whether a relay answered.)"""
+def pull(repo, ident, timeout: float = 5.0, deep: bool = False, since: float | None = None) -> tuple[list[dict], bool]:
+    """Read from the relays what was published since the last read, or since `since` (`deep`: everything they
+    hold), in pages, however much it is. (The events that were new here, whether a relay answered.)"""
     ch = channel(repo)
     if ch is None:
         return [], False
-    urls, last, started = relays(repo), cursor(repo), time.time()
+    urls, last, started = relays(repo), since or cursor(repo), time.time()
     since = 0 if deep else max(0, int((last or started - WINDOW) - SLACK))
     got, seen, until, answered_any = [], set(), None, False
     for _ in range(MAX_PAGES):
@@ -712,6 +712,9 @@ def offer(repo, st, events: list[dict]) -> None:
 # --- staying subscribed -----------------------------------------------------------------------------------
 
 
+CHECK = 300  # seconds between the reads in pages of a process that stays subscribed (see Watcher._catch_up)
+
+
 class Watcher:
     """Stays subscribed for a clone: every event published reaches its log within a moment, and `on_new(events)`
     is told. With `serve`, it also answers other nodes' requests for commits this clone holds (see want)."""
@@ -720,6 +723,8 @@ class Watcher:
         self.repo, self.ident, self.on_new, self.serve = repo, ident, on_new, serve
         self.ch = channel(repo)
         self.stop, self.q, self.up = threading.Event(), queue.Queue(), set()
+        # Up to when this clone surely has everything, which only a read in pages moves on (see _catch_up).
+        self.whole, self.caught_up, self.looked = cursor(repo) or 0.0, False, 0.0
         self.asked: dict[str, float] = {}
         self.threads = nostr.listen(all_relays(repo), self._filters, lambda ev, url: self.q.put(ev), self.stop,
                                     self._state)
@@ -733,6 +738,27 @@ class Watcher:
 
     def _state(self, url: str, connected: bool) -> None:
         (self.up.add if connected else self.up.discard)(url)
+        if not self.up:
+            self.caught_up = False  # every relay went (the network, or the machine slept): see _catch_up
+
+    def _catch_up(self) -> None:
+        """Read in pages everything published since this clone last had it all. A subscription brings what's
+        published from now on and, of what was before, as much as a relay gives at once (500 events, or fewer):
+        a machine that was off for the night came back to the last 500, moved its mark to now and never asked for
+        the rest. jose's is a laptop. Done as it starts, whenever every relay had gone, and every CHECK seconds:
+        whatever a subscription missed, for whatever reason, is here by the next one."""
+        started = self.looked = time.time()
+        try:
+            new, answered = pull(self.repo, self.ident, 15, since=self.whole or None)
+        except Exception as e:  # noqa: BLE001
+            print(f"legion: live: {str(e).strip()[-200:]}", flush=True)
+            return
+        if answered:
+            self.whole, self.caught_up = started, True
+            if new and self.on_new:
+                self.on_new(new)
+            if new and self.serve:
+                self._into_git(new)
 
     def connected(self) -> bool:
         return bool(self.up)
@@ -748,6 +774,9 @@ class Watcher:
                     batch.append(self.q.get_nowait())
             except queue.Empty:
                 pass
+            if self.up and (not self.caught_up or time.time() - self.looked > CHECK):
+                if self.caught_up or time.time() - self.looked > 5:  # (not at every turn while no relay answers)
+                    self._catch_up()
             if self.up and time.time() - beat > 5:
                 beat = time.time()
                 try:
@@ -765,7 +794,7 @@ class Watcher:
                 new = take(self.repo, self.ident, [x for e in stored for x in unwrap(self.ch, e)])
                 stamps = [e["created_at"] for e in stored
                           if isinstance(e.get("created_at"), int) and e["created_at"] <= time.time() + SLACK]
-                if stamps:
+                if stamps and self.caught_up:  # (until then the mark stays where the read in pages starts)
                     set_cursor(self.repo, max(stamps))
                 if new and self.on_new:
                     self.on_new(new)
