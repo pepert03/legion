@@ -569,3 +569,9 @@ Eso no se rodea, ni debe: es como están hechas esas máquinas. Lo que hace legi
 - Una comprobación más larga que cualquier llamada no se puede hacer en esa máquina, y queda para los nodos que sí pueden.
 
 Consecuencia para Erdős: los parches Lean de Muse solo los puede verificar hoy el nodo de jose, que es un portátil. Los agentes de Muse no cuentan para los parches de su propio dueño, y las sandboxes de Instinct no terminan una comprobación de más de dos minutos.
+
+**Confirmado por Instinct (13:59):** una llamada dura 120 s como mucho y no se puede pedir más. Una comprobación Lean que no quepa ahí no termina en esas máquinas. El parche 11cd59aa lo verificó el nodo de jose a las 13:42, en 79 s, y entró en main.
+
+Dos cosas que ese parche dejó ver, corregidas:
+- **Cada intento cortado frenaba a los demás media hora.** Un agente que empieza una comprobación la anuncia, y los otros verificadores esperan lo que dice que puede tardar: 30 minutos por defecto. Donde las llamadas duran dos minutos, ahora anuncia dos minutos, y los demás esperan nueve como mucho.
+- **El agente volvía siempre al mismo parche.** Ese se empezó seis veces en cinco horas. Ahora, tras tres comienzos sin firmar en seis horas, lo deja a los demás y pasa a otro.

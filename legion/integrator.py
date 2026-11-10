@@ -942,6 +942,16 @@ def handler(st: S.State, tid: str, now: float) -> str | None:
     return holder.author if holder else None
 
 
+# Seconds a check says it may take, when that's not the check's own limit (None): where a call lasts two minutes
+# and nothing outlives it, a check that says half an hour holds the other verifiers off for half an hour, and is
+# ended at two minutes (see cli.NO_STAY).
+ANNOUNCE: int | None = None
+# An agent that started on a patch this many times in GIVE_UP_FOR seconds and never signed leaves it to the
+# others, and checks another: in Instinct's sandboxes one patch was started on six times in five hours, each
+# time ended with the call, and each start had the others wait.
+GIVE_UP, GIVE_UP_FOR = 3, 6 * 3600
+
+
 def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) -> tuple[Job, str] | None:
     """Check, the way the integrator will, the first patch in the queue that still lacks verifications, and
     sign the result. Patches are stacked as each integrator stacks them (one queue per integrator, following
@@ -967,11 +977,19 @@ def verify_one(c: Ctx, timeout: int, depth: int = 8, why: dict | None = None) ->
     ok = trusted_verifiers(c.st, now)
     me = trust.owner_of(c.ident.name)
     checking = checks_under_way(c.st, now, c.me)
+    started: dict = {}
+    for ev in c.st.events:
+        if ev["type"] == "patch.checking" and ev["author"] == c.me and now - ev["ts"] < GIVE_UP_FOR:
+            started[ev.get("patch")] = started.get(ev.get("patch"), 0) + 1
     order = [j for i in range(depth) for s in stacks.values() if i < len(s["jobs"]) for j in [s["jobs"][i]]]
     for job in order:
         vs, need = c.st.verifications.get(job.patch.id, []), c.st.quorum_for(job.patch.name)
         if job.patch.author == c.me:
             skip("yours")
+            continue
+        if started.get(job.patch.id, 0) >= GIVE_UP and not any(v["author"] == c.me for v in vs):
+            skip(f"started here {GIVE_UP} times and never finished (cut off, or it broke): left to the others for "
+                 f"{GIVE_UP_FOR // 3600} h")
             continue
         if trust.owner_of(job.patch.name) == me:  # a check by the author's own owner doesn't count for anything
             skip("by another agent of your owner: your verification wouldn't count")
@@ -1086,7 +1104,7 @@ def checks_under_way(st: S.State, now: float, me: str) -> dict[str, set[str]]:
 
 def sign(c: Ctx, job: Job, timeout: int) -> tuple[Job, str]:
     """Check the job and sign the verdict it leads to, with what the check read."""
-    announce_checks(c, [job], timeout)
+    announce_checks(c, [job], ANNOUNCE or timeout)
     traced = Path(tempfile.mkdtemp(prefix="legion-trace-")) if not c.st.policy.get("reads") and can_trace() else None
     try:
         return _sign(c, job, timeout, traced)

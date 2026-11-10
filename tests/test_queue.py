@@ -1096,6 +1096,30 @@ def test_where_no_process_outlives_its_call_verify_says_so_and_checks_in_the_cal
     assert [v["outcome"] for v in st.verifications[st.patches_for(tids["a"])[0].id]] == ["pass"]
     assert main(["verify", "--background"]) == 0 and "doesn't outlive the call" in capsys.readouterr().out
     assert main(["verify", "--status"]) == 0 and "still running" not in capsys.readouterr().out
+    # The check it ran there said it might take two minutes, not half an hour: the others don't wait long for it.
+    said = [e for e in st.events if e["type"] == "patch.checking"]
+    assert said[-1]["timeout"] == cli.NO_STAY_ANNOUNCE and integrator.abandoned_after(said[-1]) < 600
+    monkeypatch.setattr(integrator, "ANNOUNCE", None)
+
+
+def test_a_patch_started_on_three_times_and_never_finished_is_left_to_the_others(project, monkeypatch):
+    """In Instinct's sandboxes one patch was started on six times in five hours, each time ended with the call at
+    two minutes: the agent went back to the same patch every time, and each start had the others wait."""
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    c = as_(repo, "luis")
+    pid = c.st.patches_for(tids["a"])[0].id
+    for _ in range(integrator.GIVE_UP):  # each time the call ended before the check did
+        c.emit("patch.checking", task=tids["a"], patch=pid, timeout=120)
+    why = {}
+    assert integrator.verify_one(c, 60, why=why) is None
+    assert any("never finished" in reason for reason in why)
+    job, outcome = integrator.verify_one(as_(repo, "marta"), 60)  # another agent checks it meanwhile
+    assert (job.task.key, outcome) == ("a", "pass")
+    monkeypatch.setattr(integrator, "GIVE_UP_FOR", 0)  # and hours later it may try again
+    patch("b", "ok\n")
+    assert integrator.verify_one(as_(repo, "luis"), 60) is not None
 
 
 def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, monkeypatch, capsys):

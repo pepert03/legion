@@ -1227,6 +1227,7 @@ NO_STAY = ("On this machine a process doesn't outlive the call that starts it: t
            "check had built stays for the next try; a check longer than any call can't be done on this machine, "
            "and is left to the nodes that can.")
 NO_STAY_FOR = 86400  # seconds it goes on checking in the call itself, before trying a process of its own again
+NO_STAY_ANNOUNCE = 120  # seconds a check there says it may take (a call's two minutes): see integrator.ANNOUNCE
 
 
 def verify_pid(log: Path) -> Path:
@@ -1312,6 +1313,7 @@ def cmd_verify(args):
                 return 0
             print(f"legion: {NO_STAY}", file=sys.stderr, flush=True)
             log.write_text("", encoding="utf-8")  # (the one that was ended has been told of)
+            integrator.ANNOUNCE = NO_STAY_ANNOUNCE  # it may well be ended again: the others don't wait long for it
             return _verify(args)
         if not running:
             log.write_text("", encoding="utf-8")
