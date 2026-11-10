@@ -571,6 +571,63 @@ def has_commit(repo, sha: str | None) -> bool:
     return bool(sha) and run(repo, "cat-file", "-e", sha + "^{commit}").returncode == 0
 
 
+def _sha(s) -> bool:
+    return isinstance(s, str) and len(s) in (40, 64) and all(ch in "0123456789abcdef" for ch in s)
+
+
+def present(repo, shas) -> set[str]:
+    """Which of these commits this clone holds, asked of git in one call."""
+    shas = [s for s in dict.fromkeys(shas) if _sha(s)]
+    if not shas:
+        return set()
+    out = run(repo, "cat-file", "--batch-check", input="".join(s + "\n" for s in shas).encode()).stdout.decode()
+    return {line.split()[0] for line in out.splitlines() if line.split()[1:2] == ["commit"]}
+
+
+def within(repo, tip: str, commits) -> bool:
+    """Whether `tip` is part of the history of any of these commits, of the ones this clone holds: two git calls,
+    however many they are."""
+    have = present(repo, commits)
+    if not have:
+        return False
+    p = run(repo, "rev-list", "-1", tip, "--stdin", input="".join(f"^{s}\n" for s in sorted(have)).encode())
+    return p.returncode == 0 and not p.stdout.strip()
+
+
+CHANGED_CACHE, CHANGED_KEPT = "legion-changed.cache", 20_000
+
+
+def changed_files(repo, commits) -> dict[str, list[str]]:
+    """The files each of these commits added or changed since the main it started from, for those this clone
+    holds. Kept between commands, since a commit doesn't change: a claim asked git three times for every piece of
+    saved work in the project (300 processes in Erdős #902, half of a claim's time in a sandbox and 11 s of 20
+    on Windows), and every claim asked again."""
+    commits = [s for s in dict.fromkeys(commits) if _sha(s)]
+    path = common_dir(repo) / CHANGED_CACHE
+    try:
+        kept = json.loads(path.read_text(encoding="utf-8"))
+        kept = kept if isinstance(kept, dict) else {}
+    except (OSError, ValueError):
+        kept = {}
+    new = present(repo, [s for s in commits if s not in kept])
+    if new:
+        base_ = base_ref(repo)
+        for sha in new:
+            base = run(repo, "merge-base", sha, base_).stdout.decode().strip()
+            p = run(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base or sha + "^", sha)
+            if p.returncode == 0:
+                kept[sha] = [f for f in p.stdout.decode("utf-8", "replace").splitlines() if f]
+        if len(kept) > CHANGED_KEPT:
+            kept = dict(list(kept.items())[-CHANGED_KEPT // 2:])
+        tmp = path.with_name(f"{CHANGED_CACHE}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(kept), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    return {sha: kept[sha] for sha in commits if sha in kept}
+
+
 fetch_commit = None  # set by the transport: (repo, sha, ref, wait) -> whether it brought the commit
 
 

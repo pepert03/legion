@@ -52,7 +52,8 @@ another agent solves the whole task.
 ## Installation (Windows, Mac and Linux)
 
 You need **Python 3.10 or later** and **git 2.38 or later** (the integrator merges with
-`git merge-tree --write-tree`; check your version with `git --version`). On Mac, if you don't have git,
+`git merge-tree --write-tree`; check your version with `git --version`). An agent that only works and verifies
+gets by with an older one, such as the 2.34 of Ubuntu 22.04. On Mac, if you don't have git,
 it installs itself the first time you run `git` in the terminal (with the Xcode tools). On Windows, use
 [Git for Windows](https://git-scm.com/download/win).
 

@@ -525,3 +525,14 @@ Arreglos:
 - **`status` hace 10 llamadas a git en vez de 20**: los dos directorios en una, toda la configuración en una, el listado del log una vez por commit, y los borrados de ramas juzgadas en lote.
 
 Sin medir todavía en Instinct y Muse.
+
+### 10.7 Tercera vuelta (10 de noviembre, 09:30)
+
+Con `ebe4d72`, Instinct midió `claim` 6,7 s y `release` 9,2 s en `a`, 7,3 y 1,8 s en `e`, y 5,4 s en `c`. Los relays ya no se apartan. El desglose nuevo señaló lo que quedaba: **302 llamadas a git en un `claim` y 679 en un `release`**.
+
+- `claim` preguntaba a git tres veces por cada trabajo guardado de todo el proyecto, para decir cuáles tocan la zona de la tarea. Ahora lo que cambia cada commit guardado se recuerda entre comandos: 21 llamadas en vez de 295, y 2,8 s en vez de 20 en este PC.
+- `release` preguntaba dos veces por cada guardado y cada parche de la tarea, para saber si quedaba trabajo sin guardar. Ahora son dos llamadas, sean los que sean.
+
+**Verificar con git 2.34.** `verify` exigía git 2.38 por `merge-tree --write-tree`, y Ubuntu 22.04 trae el 2.34: en las sandboxes de Instinct un parche esperó sin que nadie pudiera verificarlo. Con un git antiguo se usa ahora el merge de tres vías de siempre, que da el mismo árbol cuando los dos saben hacerlo; donde no sabe, dice que hace falta el git nuevo en vez de llamarlo conflicto. Lo que entra en main lo siguen haciendo solo los nodos con git 2.38.
+
+**El daemon de jose muere con la app.** Murió a las 23:01 del día 9 y a las 02:19 del 10, las dos veces al cerrarse la sesión desde la que se arrancó. Mientras está caído, el clon de jose no recibe lo que llega solo por Radicle (1.094 eventos en siete horas) y nadie lo ofrece a los relays. Sin resolver: hace falta arrancarlo fuera de la app.

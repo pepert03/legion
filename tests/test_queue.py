@@ -344,6 +344,53 @@ def test_open_mode_one_owner_verifies_and_another_finalizes(project):
     assert git(repo, "log", "-1", "--format=%an %ad", "--date=iso", st.main_tip).startswith("legion 2000-01-01")
 
 
+def test_a_git_older_than_2_38_verifies_too_and_merges_to_the_same_tree(project, tmp_path, monkeypatch):
+    """Ubuntu 22.04 ships git 2.34, with no `merge-tree --write-tree`: in Instinct's sandboxes a patch waited
+    with nobody able to verify it, the one machine with a newer git having set it aside."""
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    monkeypatch.setattr(integrator, "_git_version", [(2, 34)])
+    job, outcome = integrator.verify_one(as_(repo, "luis"), 60)
+    assert (job.task.key, outcome) == ("a", "pass")
+    monkeypatch.setattr(integrator, "_git_version", [])
+    assert integrator.finalize(as_(repo, "marta"), [].append) == 1  # the tree it signed is the one everyone merges
+    st = Ctx(sync=False).st
+    assert st.patches_for(tids["a"])[0].verdict == "accepted" and runs(repo, "0") == 0  # nobody checked it twice
+
+    # A merge with work on both sides: lines of one file changed by each, files added, changed and removed.
+    r = tmp_path / "m"
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    commit = lambda msg: git(r, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qam", msg)  # noqa: E731
+    (r / "d").mkdir()
+    for name, text in (("f.txt", "".join(f"line {i}\n" for i in range(12))), ("g.txt", "g\n"), ("h.txt", "h\n"),
+                       ("d/x.txt", "x\n")):
+        (r / name).write_text(text)
+    git(r, "add", "-A")
+    commit("base")
+    for branch, edits in (("ours", {"f.txt": ("line 0\n", "line zero\n"), "a.txt": None, "h.txt": "gone"}),
+                          ("theirs", {"f.txt": ("line 11\n", "line eleven\n"), "g.txt": ("g\n", "g2\n"), "d/y.txt": None}),
+                          ("clash", {"f.txt": ("line 0\n", "line nought\n")})):
+        git(r, "checkout", "-q", "-b", branch, "main")
+        for name, edit in edits.items():
+            if edit == "gone":
+                (r / name).unlink()
+            elif edit is None:
+                (r / name).write_text("new\n")
+            else:
+                (r / name).write_text((r / name).read_text().replace(*edit))
+        git(r, "add", "-A")
+        commit(branch)
+    ours, theirs, clash = (git(r, "rev-parse", b) for b in ("ours", "theirs", "clash"))
+    newer = integrator.merge_tree(r, ours, theirs)
+    assert newer and integrator.merge_tree(r, ours, clash) is None
+    monkeypatch.setenv("LEGION_OLD_MERGE", "1")
+    assert integrator.merge_tree(r, ours, theirs) == newer
+    assert set(git(r, "ls-tree", "-r", "--name-only", newer).split()) == {"a.txt", "d/x.txt", "d/y.txt", "f.txt", "g.txt"}
+    with pytest.raises(coordgit.GitError, match="needs git 2.38"):  # it doesn't call it a conflict: a newer git may merge it
+        integrator.merge_tree(r, ours, clash)
+
+
 def test_open_mode_a_verification_survives_main_moving_elsewhere(project):
     repo, tids, patch = project
     open_mode(repo, reads="python check.py --reads")

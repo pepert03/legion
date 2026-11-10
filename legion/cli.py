@@ -1046,22 +1046,18 @@ def carry_on(c: Ctx, t: S.Task, ref: str) -> str:
 
 def zone_files(c: Ctx, commit: str, zone: list) -> list[str]:
     """The files a saved commit changed, compared to the main it started from, that lie inside a zone."""
-    base = coordgit.run(c.repo, "merge-base", commit, coordgit.base_ref(c.repo)).stdout.decode().strip()
-    changed = git(c.repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base or commit + "^", commit)
-    return [f for f in changed.splitlines() if f and S.in_zone(f, zone)]
+    return [f for f in coordgit.changed_files(c.repo, [commit]).get(commit, []) if S.in_zone(f, zone)]
 
 
 def elsewhere(c: Ctx, t: S.Task) -> list[tuple[dict, list[str]]]:
     """Saved work on other tasks that touches this task's zone: what `start --from` can bring in."""
+    saves = [w for tid in c.st.saved if tid != t.id and not c.st.done(tid) for w in c.st.saves(tid)]
+    changed = coordgit.changed_files(c.repo, [w["commit"] for w in saves])  # (one git call, not three per save)
     found = []
-    for tid, ws in c.st.saved.items():
-        if tid == t.id or c.st.done(tid):
-            continue
-        for w in c.st.saves(tid):
-            if coordgit.has_commit(c.repo, w["commit"]):
-                files = zone_files(c, w["commit"], t.zone)
-                if files:
-                    found.append((w, files))
+    for w in saves:
+        files = [f for f in changed.get(w["commit"], []) if S.in_zone(f, t.zone)]
+        if files:
+            found.append((w, files))
     return found
 
 
@@ -1253,7 +1249,6 @@ def cmd_verify(args):
 
 
 def _verify(args):
-    need_git_merge_tree()
     c = Ctx()
     now = time.time()
     by_agent, _ = trust.compute(c.st, now)
@@ -1261,12 +1256,15 @@ def _verify(args):
     counts = c.me in integrator.trusted_verifiers(c.st, now)
     log = lambda m: print(m, flush=True)  # noqa: E731
     open_mode = c.st.policy["mode"] == "open"
-    if open_mode:  # no integrator: first finalize what the others already verified
+    # A git older than 2.38 verifies (see integrator.merge_tree) and leaves what goes into main to the nodes that
+    # merge as everyone does: a main is one tree for all.
+    finalizes = open_mode and integrator.git_at_least(2, 38)
+    if finalizes:  # no integrator: first finalize what the others already verified
         integrator.finalize(c, log, timeout=args.timeout)
     why = {}
     try:
         done = integrator.verify_one(c, args.timeout, why=why)
-        if open_mode and done:
+        if finalizes and done:
             integrator.finalize(c, log, timeout=args.timeout)  # this verification may be the one that was missing
     except Fail as e:
         if "already verified on that tree" not in str(e):
@@ -2044,8 +2042,8 @@ def unsaved(c: Ctx, t: S.Task) -> bool:
     if not tip or coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, coordgit.base_ref(c.repo)).returncode == 0:
         return False
     published = [w["commit"] for w in c.st.saved[t.id]] + [p.commit for p in c.st.patches_for(t.id)]
-    return not any(coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, x).returncode == 0
-                   for x in published if coordgit.has_commit(c.repo, x))
+    # (two git calls: it was two for each save and patch of the task, 679 for a release of upper-constant)
+    return not coordgit.within(c.repo, tip, published)
 
 
 def built_on(c: Ctx, t: S.Task) -> list:

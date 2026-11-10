@@ -169,6 +169,57 @@ def reject(reason: str, code: str):
     return "rejected", {"reason": reason, "code": code}
 
 
+_git_version: list = []
+
+
+def git_at_least(major: int, minor: int) -> bool:
+    if not _git_version:
+        found = re.search(r"(\d+)\.(\d+)", subprocess.run(["git", "--version"], capture_output=True, text=True).stdout)
+        _git_version.append((int(found[1]), int(found[2])) if found else (0, 0))
+    return _git_version[0] >= (major, minor)
+
+
+def merge_tree(repo, head: str, commit: str) -> str | None:
+    """The tree of merging `commit` into `head`, on git objects alone, or None when they conflict.
+
+    `git merge-tree --write-tree` does it, since git 2.38. Ubuntu 22.04 ships 2.34, and so do Instinct's
+    sandboxes: a patch waited there with nobody able to verify it, the one machine with a newer git having set it
+    aside because it hung serving packs. With an older git, the three-way merge of git's older tools, in an
+    index and a folder of its own: file by file, with no rename detection and one common ancestor. Where that
+    one can't merge it says so as an error, not as a conflict: the newer git may well merge it, and a
+    verification is judged against the tree it names (see matches), so a tree that came out different counts
+    for nothing rather than for a wrong main."""
+    if git_at_least(2, 38) and not os.environ.get("LEGION_OLD_MERGE"):
+        m = run(repo, "merge-tree", "--write-tree", head, commit)
+        if m.returncode == 1:
+            return None
+        if m.returncode:
+            raise coordgit.GitError(f"git merge-tree failed: {m.stderr.decode('utf-8', 'replace').strip()}")
+        return m.stdout.decode().split()[0]
+    older = ("this merge needs git 2.38 or later (this is an older one, which merges file by file): install a "
+             "newer git, or leave this patch to a node that has it")
+    bases = git(repo, "merge-base", "--all", head, commit).split()
+    if len(bases) != 1:
+        raise coordgit.GitError(older)
+    with tempfile.TemporaryDirectory(prefix="legion-merge-") as tmp:
+        work = Path(tmp) / "w"
+        work.mkdir()
+        env = dict(os.environ, GIT_DIR=str(coordgit.git_dir(repo)), GIT_WORK_TREE=str(work),
+                   GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        read = subprocess.run(["git", "read-tree", "-i", "-m", "--aggressive", bases[0], head, commit], cwd=work,
+                              env=env, capture_output=True)
+        if read.returncode:
+            raise coordgit.GitError(f"git read-tree failed: {read.stderr.decode('utf-8', 'replace').strip()}")
+        each = subprocess.run(["git", "merge-index", "-o", "-q", "git-merge-one-file", "-a"], cwd=work, env=env,
+                              capture_output=True)
+        if each.returncode:
+            raise coordgit.GitError(older)
+        tree = subprocess.run(["git", "write-tree"], cwd=work, env=env, capture_output=True)
+        if tree.returncode:
+            raise coordgit.GitError(older)
+        return tree.stdout.decode().strip()
+
+
 def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, onto: str | None = None):
     """Fetch the commit, check it only touches `allowed`, and merge it into main (or into `onto`, a main with
     the patches ahead of it in the queue already merged) without any worktree.
@@ -193,12 +244,9 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     # The merge runs on git objects (no worktree, no stash) and commands run on a plain copy of the files
     # in a short temporary path, so Windows' 260-character limit never gets in the way.
     # No container yet: with code from strangers this needs a sandbox.
-    m = run(repo, "merge-tree", "--write-tree", head, commit)
-    if m.returncode == 1:
+    tree = merge_tree(repo, head, commit)
+    if tree is None:
         return reject(f"conflicts with main: update your branch from {main}", "conflict")
-    if m.returncode:
-        raise coordgit.GitError(f"git merge-tree failed: {m.stderr.decode('utf-8', 'replace').strip()}")
-    tree = m.stdout.decode().split()[0]
     # What the patch changes is what merging it changes in main: a branch built on a dependency's patch carries
     # that patch too, and once it's in main it isn't this patch's change.
     files = [f for f in git(repo, "diff", "--name-only", head, tree).splitlines() if f]
