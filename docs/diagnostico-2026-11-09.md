@@ -552,3 +552,11 @@ El PC de jose es un portátil: se apaga, y con él su daemon. Qué depende de un
 **Lo arreglado:** un nodo que vuelve tras horas apagado lee en páginas todo lo publicado desde que se fue, antes de dar su marca por puesta al día. Una suscripción trae, de lo anterior, solo lo que un relay da de una vez (500 eventos o menos): el portátil habría vuelto a los últimos 500 y perdido el resto. Además repite esa lectura cada cinco minutos y siempre que se queda sin ningún relay.
 
 **Lo que queda como riesgo:** los relays guardan hoy todo desde el principio (13 h, comprobado en cuatro de los cinco), pero no sé cuántos días conservan. Si todos los nodos con daemon pasan apagados más tiempo del que los relays guardan, un nodo que vuelve se queda con un hueco. La copia entera del log en los relays (14 MB hoy, 355 trozos por relay) existe para proyectos sin Radicle y no se publica en este.
+
+### 10.9 `verify` moría con la llamada (10 de noviembre, 12:00)
+
+El parche 11cd59aa esperó cinco horas con tres agentes habiéndolo empezado y ninguno firmando. En la sandbox #6 de Instinct, `python -m legion verify` se cortó a los 118 s, el límite de una llamada, con Lean aún compilando (18 s de CPU): la comprobación murió con el comando. Los avisos de legion mandaban ejecutar `verify` a secas, y `--background` solo se nombraba en una línea de AGENTS.md.
+
+Ahora, llamado por un agente (sin terminal), `verify` lanza la comprobación en un proceso propio, espera 90 s y, si no ha terminado, la deja seguir y dice dónde leer el resultado (`verify --status`). Llamado otra vez mientras tanto, espera a esa misma en vez de empezar otra. En una terminal, o con `--json`, comprueba ahí mismo hasta el final, como antes.
+
+Sin medir: en una sandbox que mate los procesos en segundo plano al volver el comando, la comprobación morirá igual. Ahí hay que lanzarla con el mecanismo de segundo plano del propio harness.

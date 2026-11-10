@@ -8,6 +8,7 @@ def no_daemon(monkeypatch, tmp_path):
     identity."""
     from legion import coordgit, ctx, radicle
     monkeypatch.setenv("LEGION_NO_DAEMON", "1")
+    monkeypatch.setenv("LEGION_VERIFY_INLINE", "1")  # `verify` checks here, not in a process of its own (see cmd_verify)
     # A home of its own for every test: left at the person's, a test read the machine's real sync process from it
     # (and, playing Linux on Windows, killed it: see radicle.pid_alive) and kept its identities there.
     monkeypatch.setenv("LEGION_HOME", str(tmp_path / "legion-home"))

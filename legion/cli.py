@@ -1210,14 +1210,45 @@ def verify_log(repo, ident) -> Path:
 
 
 VERIFY_DONE = "legion: verify finished"
+# Seconds `verify` waits for its check, which runs in a process of its own, before leaving it to finish by
+# itself. Under the two minutes that agents' tools give a command: in Instinct's sandboxes `verify` was cut off at
+# 118 s with Lean still compiling, the check died with it, and a patch waited five hours with three agents having
+# started on it and none signing.
+VERIFY_WAIT = 90
+
+
+def follow_verify(log: Path, wait: float) -> int:
+    """Say what the check running in a process of its own says, as it says it, for up to `wait` seconds: its exit
+    code when it ends in that time, and otherwise where to read how it went."""
+    shown, end = 0, time.time() + wait
+    while True:
+        text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+        done = VERIFY_DONE in text
+        said = text.split(VERIFY_DONE)[0] if done else text
+        if len(said) > shown:
+            sys.stdout.write(said[shown:])
+            sys.stdout.flush()
+            shown = len(said)
+        if done:
+            code = re.search(re.escape(VERIFY_DONE) + r" \(exit (\d+)\)", text)
+            return int(code[1]) if code else 0
+        if time.time() >= end:
+            print("\nThe check is still running, in a process of its own (a Lean check takes minutes, longer than "
+                  "an agent's tools let a command run): carry on with your work, and read how it went in a few "
+                  "minutes with `python -m legion verify --status`.")
+            return 0
+        time.sleep(0.5)
 
 
 def cmd_verify(args):
     """Check one patch the integrator will review, the way it will, and sign the result: with enough of these
     from trusted people it accepts the patch without checking it itself. A Lean check takes minutes, longer than
-    many agents' tools let a command run: --background runs it in a process of its own, --status reads how it
-    went."""
-    if args.background or args.status:
+    many agents' tools let a command run, so the check runs in a process of its own: `verify` waits VERIFY_WAIT
+    seconds for it and then leaves it to finish (--status reads how it went; --background doesn't wait at all).
+    At a terminal, or for a program (--json), it runs here, to the end."""
+    aside = (not (args.background or args.status or args.record or getattr(args, "json", False))
+             and not (sys.stdin and sys.stdin.isatty()) and not os.environ.get("LEGION_VERIFY_INLINE"))
+    if args.background or args.status or aside:
         repo = repo_root()
         log = verify_log(repo, need_identity(repo))
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
@@ -1227,13 +1258,17 @@ def cmd_verify(args):
             if running:
                 print(f"\n(still running, started {time.ctime(log.stat().st_ctime)}: check again in a few minutes)")
             return 0
-        if running and time.time() - log.stat().st_mtime < args.timeout + 600:
+        running = running and time.time() - log.stat().st_mtime < args.timeout + 600
+        if running and not aside:
             print("A verification is already running in the background: `python -m legion verify --status`.")
             return 0
-        log.write_text("", encoding="utf-8")
-        from .radicle import spawn_detached
-        spawn_detached([sys.executable, "-m", "legion", "verify", "--timeout", str(args.timeout), "--record"], repo,
-                       log=log)
+        if not running:
+            log.write_text("", encoding="utf-8")
+            from .radicle import spawn_detached
+            spawn_detached([sys.executable, "-m", "legion", "verify", "--timeout", str(args.timeout), "--record"],
+                           repo, log=log)
+        if aside:  # (one already running: it waits for that one)
+            return follow_verify(log, float(os.environ.get("LEGION_VERIFY_WAIT") or VERIFY_WAIT))
         print("Verifying in the background: carry on with your work, and read the result in a few minutes with "
               "`python -m legion verify --status`.")
         return 0

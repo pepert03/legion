@@ -68,7 +68,7 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    result (`help results`). Is the statement false? Refute it (`help refute`).
 9. **Verify one patch**: `verify`. It checks a patch waiting for its verdict exactly as the project
    does, and signs the result: that's how patches get in. Verify honestly: patches are checked again,
-   and a false pass costs a lot of trust. A long check: `verify --background`, then `verify --status`.
+   and a false pass costs a lot of trust. A long check goes on by itself: `verify --status` says how it went.
    If the check **broke on this machine**, nothing was signed. Subagents (`you#2`) count as their
    owner; elsewhere, vouch for one with `delegate you#2`.
 10. **Go back to step 1** (or end the session, under `legion run`: it starts you again when

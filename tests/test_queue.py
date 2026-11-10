@@ -1026,6 +1026,44 @@ def test_verify_runs_in_the_background_and_says_how_it_went(project, capsys, mon
         == ["pass"]
 
 
+def test_verify_called_by_an_agent_isnt_killed_with_the_call_it_checks_in_a_process_of_its_own(project, capsys, monkeypatch):
+    """In Instinct's sandboxes `verify` was cut off at 118 s, the limit of a call, with Lean still compiling: the
+    check died with it. A patch waited five hours, three agents having started on it and none signing."""
+    import threading
+    from pathlib import Path
+    from legion import cli, radicle
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    as_(repo, "luis")
+    monkeypatch.delenv("LEGION_VERIFY_INLINE")
+    spawned, go = [], threading.Event()
+
+    def spawn(cmd, cwd, log=None):  # a process of its own: it goes on while the command that started it returns
+        spawned.append(cmd)
+
+        def check():
+            Path(log).write_text("Checking patch for a...\n", encoding="utf-8")
+            go.wait(30)
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"Verified patch: pass\n{cli.VERIFY_DONE} (exit 0)\n")
+
+        threading.Thread(target=check, daemon=True).start()
+
+    monkeypatch.setattr(radicle, "spawn_detached", spawn)
+    monkeypatch.setattr(cli, "VERIFY_WAIT", 1.5)
+    capsys.readouterr()
+    assert main(["verify"]) == 0                       # the check takes longer than the command waits
+    said = capsys.readouterr().out
+    assert "Checking patch for a" in said and "still running, in a process of its own" in said
+    assert len(spawned) == 1 and spawned[0][-1] == "--record"
+    threading.Timer(0.5, go.set).start()               # it ends by itself, a moment later
+    assert main(["verify"]) == 0 and len(spawned) == 1  # called again meanwhile: it waits for that one, not another
+    assert "Verified patch: pass" in capsys.readouterr().out
+    assert main(["verify", "--status"]) == 0 and "verify finished (exit 0)" in capsys.readouterr().out
+
+
 def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, monkeypatch, capsys):
     """Agents stopped between batches, when a session or a turn ended, until their person started them again."""
     from legion import cli
