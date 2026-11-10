@@ -1217,6 +1217,46 @@ VERIFY_DONE = "legion: verify finished"
 VERIFY_WAIT = 90
 
 
+# Instinct's sandboxes end every process a call leaves behind, a second or two after the call returns, nohup or
+# not: a check left in a process of its own died there each time, and `--status` went on saying "still running",
+# with no process behind it. Nothing gets around that, and nothing should: it is how those machines are kept. A
+# check there runs in the call itself, and ends if the call lasts as long as it does.
+NO_STAY = ("On this machine a process doesn't outlive the call that starts it: the last check, left in a process "
+           "of its own, was ended before it finished, and nothing was signed. `python -m legion verify` checks "
+           "here from now on, in the call itself: give it the longest time your tools allow a command. What the "
+           "check had built stays for the next try; a check longer than any call can't be done on this machine, "
+           "and is left to the nodes that can.")
+NO_STAY_FOR = 86400  # seconds it goes on checking in the call itself, before trying a process of its own again
+
+
+def verify_pid(log: Path) -> Path:
+    return log.with_suffix(".pid")
+
+
+def verify_here(log: Path) -> Path:
+    return log.with_suffix(".here")
+
+
+def verify_alive(log: Path, timeout: float) -> bool:
+    """Whether the check this log is of still runs: its process lives, and it hasn't gone past its time."""
+    if time.time() - log.stat().st_mtime >= timeout + 600:
+        return False
+    try:
+        pid = int(verify_pid(log).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True  # no process noted (an older legion's): its age decides, as before
+    from .radicle import pid_alive
+    return pid_alive(pid, "legion")
+
+
+def stays_not(log: Path) -> bool:
+    """A check left in a process of its own was ended on this machine in the last NO_STAY_FOR seconds."""
+    try:
+        return time.time() - float(verify_here(log).read_text(encoding="utf-8")) < NO_STAY_FOR
+    except (OSError, ValueError):
+        return False
+
+
 def follow_verify(log: Path, wait: float) -> int:
     """Say what the check running in a process of its own says, as it says it, for up to `wait` seconds: its exit
     code when it ends in that time, and otherwise where to read how it went."""
@@ -1252,21 +1292,36 @@ def cmd_verify(args):
         repo = repo_root()
         log = verify_log(repo, need_identity(repo))
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
-        running = bool(text) and VERIFY_DONE not in text
+        unfinished = bool(text) and VERIFY_DONE not in text
+        running = unfinished and verify_alive(log, args.timeout)
+        if unfinished and not running:
+            verify_here(log).write_text(str(time.time()), encoding="utf-8")  # it was ended: see NO_STAY
         if args.status:
             print(text.strip() or "No verification run in the background yet: `python -m legion verify --background`.")
             if running:
                 print(f"\n(still running, started {time.ctime(log.stat().st_ctime)}: check again in a few minutes)")
+            elif unfinished:
+                print(f"\n{NO_STAY}")
             return 0
-        running = running and time.time() - log.stat().st_mtime < args.timeout + 600
         if running and not aside:
             print("A verification is already running in the background: `python -m legion verify --status`.")
             return 0
+        if not running and stays_not(log):
+            if not aside:
+                print(NO_STAY)
+                return 0
+            print(f"legion: {NO_STAY}", file=sys.stderr, flush=True)
+            log.write_text("", encoding="utf-8")  # (the one that was ended has been told of)
+            return _verify(args)
         if not running:
             log.write_text("", encoding="utf-8")
             from .radicle import spawn_detached
-            spawn_detached([sys.executable, "-m", "legion", "verify", "--timeout", str(args.timeout), "--record"],
-                           repo, log=log)
+            p = spawn_detached([sys.executable, "-m", "legion", "verify", "--timeout", str(args.timeout), "--record"],
+                               repo, log=log)
+            try:  # which process it is, so that one a sandbox ended isn't taken for running
+                verify_pid(log).write_text(str(getattr(p, "pid", "") or ""), encoding="utf-8")
+            except OSError:
+                pass
         if aside:  # (one already running: it waits for that one)
             return follow_verify(log, float(os.environ.get("LEGION_VERIFY_WAIT") or VERIFY_WAIT))
         print("Verifying in the background: carry on with your work, and read the result in a few minutes with "

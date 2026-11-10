@@ -1064,6 +1064,40 @@ def test_verify_called_by_an_agent_isnt_killed_with_the_call_it_checks_in_a_proc
     assert main(["verify", "--status"]) == 0 and "verify finished (exit 0)" in capsys.readouterr().out
 
 
+def test_where_no_process_outlives_its_call_verify_says_so_and_checks_in_the_call_itself(project, capsys, monkeypatch):
+    """Instinct's sandboxes end what a call leaves behind, a second after it returns, nohup or not: the check left
+    in a process of its own died each time, and `--status` went on saying "still running" with nothing behind it."""
+    from pathlib import Path
+    from legion import cli, radicle
+    from legion.cli import main
+    repo, tids, patch = project
+    open_mode(repo)
+    patch("a", "ok\n")
+    as_(repo, "luis")
+    monkeypatch.delenv("LEGION_VERIFY_INLINE")
+
+    class Ended:
+        pid = 2 ** 22 + 12345  # no process has this number
+
+    def spawn(cmd, cwd, log=None):  # it starts, and is ended with the call
+        Path(log).write_text("Checking patch for a...\n", encoding="utf-8")
+        return Ended
+
+    monkeypatch.setattr(radicle, "spawn_detached", spawn)
+    capsys.readouterr()
+    assert main(["verify", "--background"]) == 0 and "Verifying in the background" in capsys.readouterr().out
+    assert main(["verify", "--status"]) == 0
+    said = capsys.readouterr().out
+    assert "still running" not in said and "doesn't outlive the call" in said and "nothing was signed" in said
+    assert main(["verify"]) == 0                      # from then on it checks in the call itself, and signs
+    out, err = capsys.readouterr()
+    assert "doesn't outlive the call" in err and "Verified patch" in out
+    st = Ctx(sync=False).st
+    assert [v["outcome"] for v in st.verifications[st.patches_for(tids["a"])[0].id]] == ["pass"]
+    assert main(["verify", "--background"]) == 0 and "doesn't outlive the call" in capsys.readouterr().out
+    assert main(["verify", "--status"]) == 0 and "still running" not in capsys.readouterr().out
+
+
 def test_run_keeps_an_agent_at_work_until_the_project_is_done_for_it(project, monkeypatch, capsys):
     """Agents stopped between batches, when a session or a turn ended, until their person started them again."""
     from legion import cli

@@ -560,3 +560,12 @@ El parche 11cd59aa esperó cinco horas con tres agentes habiéndolo empezado y n
 Ahora, llamado por un agente (sin terminal), `verify` lanza la comprobación en un proceso propio, espera 90 s y, si no ha terminado, la deja seguir y dice dónde leer el resultado (`verify --status`). Llamado otra vez mientras tanto, espera a esa misma en vez de empezar otra. En una terminal, o con `--json`, comprueba ahí mismo hasta el final, como antes.
 
 Sin medir: en una sandbox que mate los procesos en segundo plano al volver el comando, la comprobación morirá igual. Ahí hay que lanzarla con el mecanismo de segundo plano del propio harness.
+
+**Medido después (12:19):** en las cinco sandboxes de Instinct ningún proceso sobrevive a la llamada que lo lanza. El ejecutor avisa «detached child processes were terminated after bash returned» y el proceso muere en 1–3 s, con `nohup` o sin él. El `verify --background` de #6 murió así, y `--status` seguía diciendo «still running» sin ningún proceso detrás.
+
+Eso no se rodea, ni debe: es como están hechas esas máquinas. Lo que hace legion ahora:
+- `--status` mira si el proceso de la comprobación sigue vivo. Si murió sin terminar, lo dice y explica por qué.
+- Desde ese momento, y durante un día, `verify` comprueba en la propia llamada en vez de lanzar un proceso aparte, y pide que se le dé el mayor límite de tiempo que permita la herramienta. Lo que Lean haya compilado queda para el siguiente intento.
+- Una comprobación más larga que cualquier llamada no se puede hacer en esa máquina, y queda para los nodos que sí pueden.
+
+Consecuencia para Erdős: los parches Lean de Muse solo los puede verificar hoy el nodo de jose, que es un portátil. Los agentes de Muse no cuentan para los parches de su propio dueño, y las sandboxes de Instinct no terminan una comprobación de más de dos minutos.
