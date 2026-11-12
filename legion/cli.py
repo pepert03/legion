@@ -2096,7 +2096,9 @@ def cmd_save(args):
     t = c.task(args.task)
     repo = c.repo
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
-        raise Fail("you have uncommitted changes: commit what you want to save (`git commit -am \"...\"`), then save", 5)
+        raise Fail("you have uncommitted changes: commit what you want to save (`git add <files>`, the new ones "
+                   "too, then `git commit -m \"...\"`), then save", 5)
+    left = new_files(repo, t.zone, "the save", args.leave_untracked)
     coordgit.refresh_base(repo)
     main = coordgit.base_ref(repo)
     files = [f for f in git(repo, "diff", "--name-only", git(repo, "merge-base", "HEAD", main), "HEAD").splitlines() if f]
@@ -2113,6 +2115,11 @@ def cmd_save(args):
         raise Fail(f"you touch files outside the zone ({', '.join(t.zone)}): {', '.join(outside)}. Move that work "
                    "into the zone, or publish it where it belongs (a result, or a save on its own task)", 5)
     head = git(repo, "rev-parse", "HEAD")
+    base = adds_nothing_to(c, t, main, head, files)
+    if base:
+        raise Fail(f"your branch adds nothing to {base['name']}'s saved work ({base['id'][:8]}), which it was built "
+                   "on: there's nothing of yours to save. Commit your work (`git add <files>`, the new ones too, "
+                   "then `git commit -m \"...\"`), then save", 5)
     mine = [w for w in c.st.saved[t.id] if w["author"] == c.me]
     if mine and mine[-1]["commit"] == head:
         print(f"Already saved: {mine[-1]['id'][:8]} is this commit.")
@@ -2122,9 +2129,68 @@ def cmd_save(args):
     coordgit.publish_patch(repo, branch)
     ev = c.emit("work.saved", task=t.id, commit=head, branch=branch, notes=args.notes or "")
     c.sync()
+    not_in("the save", left)
     out(args, {"saved": ev["id"], "branch": branch, "files": files},
         f"Saved {len(files)} file(s) on {t.key} as {ev['id'][:8]} (commit {head[:8]}). Whoever takes the task "
         f"next sees it and can build on it: `python -m legion start {t.id} --from {ev['id'][:8]}`.")
+
+
+def untracked(repo) -> list[str]:
+    """The files in this clone that no commit holds: new, never added, and not ignored by git."""
+    return [f for f in git(repo, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if f.strip()]
+
+
+def new_files(repo, zone: list, what: str, leave: bool = False) -> list[str]:
+    """The new files a save or a patch, made of commits, goes without (see untracked). Inside the zone they are
+    the work itself, so it's refused until they are added, or left out on purpose (`leave`); the rest couldn't go
+    in anyway, and get a line once it's published (see not_in). In Erdős #902 a save went out without the module
+    its report said it added: the file was new, `git commit -am` doesn't add those, and save looked at the files
+    git tracked only."""
+    new = untracked(repo)
+    inside = [f for f in new if S.in_zone(f, zone)]
+    if inside and not leave:
+        raise Fail(f"you have new files in the zone that no commit holds, and {what} would go without them: "
+                   f"{some(inside)}. Add them (`git add <files>`, then `git commit -m \"...\"`), or leave them out "
+                   "on purpose with --leave-untracked", 5)
+    return inside + [f for f in new if f not in inside]
+
+
+LEAVE_UNTRACKED = "publish it without the new files in the zone that no commit holds (it's refused otherwise)"
+
+
+def not_in(what: str, files: list[str], why: str = "no commit holds them") -> None:
+    """Say which new files stayed out of what was just published, so nobody takes them for published."""
+    if files:
+        print(f"legion: not in {what}, since {why}: {some(files)}.", file=sys.stderr)
+
+
+def some(files: list[str], most: int = 8) -> str:
+    return ", ".join(files[:most]) + (f" and {len(files) - most} more" if len(files) > most else "")
+
+
+def adds_nothing_to(c: Ctx, t: S.Task, main: str, head: str, files: list[str]) -> dict | None:
+    """Someone else's saved work on the task that this branch was built on and adds nothing to: HEAD is its
+    commit, or only merges it with a later main (what `start --from` makes), every file the branch changes being
+    just as that save has it. Saving it again would point at their work under this agent's name: in Erdős #902 one
+    did, and the work it reported was in no commit. (No git call unless others saved here; then one, or two.)"""
+    theirs = {w["commit"]: w for w in c.st.saved[t.id] if w["author"] != c.me}
+    if head in theirs or not theirs:
+        return theirs.get(head)
+    rows = git(c.repo, "rev-list", "--topo-order", "--parents", "HEAD", "--not", main).splitlines()
+    parents = {row.split()[0]: row.split()[1:] for row in rows}  # the branch's commits that main doesn't have
+    sha = next((x for x in parents if x in theirs), None)  # the latest of their saves this branch holds
+    if not sha:
+        return None
+    held, todo = set(), [sha]  # that save's own history
+    while todo:
+        x = todo.pop()
+        if x in parents and x not in held:
+            held.add(x)
+            todo += parents[x]
+    if any(len(ps) < 2 for x, ps in parents.items() if x not in held):
+        return None  # a commit on top of it that isn't a merge: this branch's own work
+    differ = set(git(c.repo, "diff", "--name-only", sha, "HEAD").splitlines())
+    return None if differ & set(files) else theirs[sha]
 
 
 def unsaved(c: Ctx, t: S.Task) -> bool:
@@ -2200,9 +2266,12 @@ def cmd_submit(args):
     base = git(repo, "merge-base", "HEAD", main)
     files = [f for f in git(repo, "diff", "--name-only", base, "HEAD").splitlines() if f]
     on = built_on(c, t)  # written ahead, on work in review: it's checked once that work is accepted
+    left = []
     if not args.no_check:
         if git(repo, "status", "--porcelain", "--untracked-files=no"):
             raise Fail("you have uncommitted changes: commit before submitting", 5)
+        # (the check below runs in this clone, where those files are: it would pass here and fail at the verifiers)
+        left = new_files(repo, t.zone, "the patch", args.leave_untracked)
         in_main = git(repo, "rev-parse", "HEAD") == base  # HEAD is in main: its merge base with main is itself
         if not files and not (in_main and not c.st.done(t.id)):
             raise Fail(f"your branch changes nothing compared to {main}", 5)
@@ -2233,6 +2302,7 @@ def cmd_submit(args):
     c.sync()
     waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
                           + [c.st.tasks[p.task].key for p in on])
+    not_in("the patch", left)
     out(args, {"patch": ev["id"], "branch": branch, "on": [p.id for p in on]},
         f"Patch {ev['id'][:8]} submitted for {t.key} (branch {branch}). "
         + (f"It's built on work still in review ({', '.join(waits)}): it's checked once that is accepted. Don't "
@@ -2300,6 +2370,9 @@ def cmd_result(args):
                text=f"Replicate {t.key}/{key} ({args.title}): rerun its companions ({', '.join(extra)}), or better, "
                     "compute it your own way, and say exactly what you get.")
         c.sync()
+    # (a result is the files named, as they are here, whether a commit holds them or not: only the rest stay out)
+    not_in("the result", [f for f in untracked(repo) if f.startswith(root) and f not in files + extra],
+           "you didn't name them")
     out(args, {"result": rid, "key": f"{t.key}/{key}", "patch": ev["id"], "branch": branch, "files": files,
                "extra": extra},
         f"Result {t.key}/{key} published ({rid}). It's checked like a patch, goes into main, and shows under "
@@ -2350,6 +2423,7 @@ def cmd_sketch(args):
     tests_dir = S.sketch_dir(t.id)
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
         raise Fail("you have uncommitted changes: commit the scaffold before proposing the sketch", 5)
+    left = new_files(repo, t.zone + [tests_dir], "the sketch", args.leave_untracked)
     if not any(S.in_zone(f, [tests_dir]) for f in files):
         raise Fail(f"the commit must include the subtasks' tests in {tests_dir}/", 5)
     outside = [f for f in files if not S.in_zone(f, t.zone + [tests_dir])]
@@ -2363,6 +2437,7 @@ def cmd_sketch(args):
                 commit=git(repo, "rev-parse", "HEAD"), branch=branch)
     c.sync()
     keys = ", ".join(f"{t.key}/{ch['key']}" for ch in children)
+    not_in("the sketch", left)
     out(args, {"sketch": ev["id"], "branch": branch},
         f"Sketch {ev['id'][:8]} proposed for {t.key}: {keys}. Once the integrator accepts it, the subtasks\n"
         "are open to anyone (you included) and your claim on the parent task is no longer needed.")
@@ -2395,6 +2470,7 @@ def cmd_path(args):
     files = [f for f in git(repo, "diff", "--name-only", base, "HEAD").splitlines() if f]
     tests_dir = S.sketch_dir(t.id)
     commit = branch = None
+    left = new_files(repo, t.zone + [tests_dir], "the path", args.leave_untracked)
     if files:  # the path brings files: the subtasks' tests, statements, scaffolding
         if git(repo, "status", "--porcelain", "--untracked-files=no"):
             raise Fail("you have uncommitted changes: commit what the path brings before proposing it", 5)
@@ -2410,6 +2486,7 @@ def cmd_path(args):
                 **({"ideas": ideas} if ideas else {}), **({"questions": questions} if questions else {}))
     c.sync()
     keys = ", ".join(f"{t.key}/{ch['key']}" for ch in children)
+    not_in("the path", left)
     out(args, {"path": ev["id"], "branch": branch},
         f"Path {ev['id'][:8]} proposed for {t.key}: {keys}. Once the integrator accepts it, the subtasks are open\n"
         f"to anyone. {t.key} itself stays as it is, and still needs its own acceptance command to pass.\n"
@@ -3406,6 +3483,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("save", help="publish your unfinished work on a task, so whoever takes it next builds on it")
     s.add_argument("task")
     s.add_argument("--notes", help="what's done and what's left (2000 characters at most)")
+    s.add_argument("--leave-untracked", action="store_true", help=LEAVE_UNTRACKED)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_save)
 
@@ -3646,6 +3724,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--refutes", action="store_true", help="it proves the task's statement false: checked with the "
                    "task's refute command instead of its acceptance command")
     s.add_argument("--no-check", action="store_true", help="don't check the zone or acceptance before submitting")
+    s.add_argument("--leave-untracked", action="store_true", help=LEAVE_UNTRACKED)
     s.add_argument("--timeout", type=int, default=600)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_submit)
@@ -3666,6 +3745,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("sketch", help="propose splitting your task into subtasks")
     s.add_argument("task")
     s.add_argument("file", help="JSON with the subtasks (see `legion help sketch`)")
+    s.add_argument("--leave-untracked", action="store_true", help=LEAVE_UNTRACKED)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_sketch)
 
@@ -3675,6 +3755,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ideas", nargs="+", default=[], metavar="IDEA", help="the ideas on the task it turns into subtasks")
     s.add_argument("--questions", nargs="+", default=[], metavar="QUESTION",
                    help="the questions on the task its subtasks settle")
+    s.add_argument("--leave-untracked", action="store_true", help=LEAVE_UNTRACKED)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_path)
 

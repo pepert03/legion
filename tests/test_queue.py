@@ -576,6 +576,153 @@ def test_saved_work_on_another_task_brings_only_this_zone(project, capsys):
     assert git(repo, "diff", "--name-only", "legion/main", "HEAD") == "b.txt"
 
 
+def folder_task():
+    """A task whose zone is a folder, where an agent writes new files, as a Lean module is: mod/."""
+    return S.task_id(make_project.add(make_project.people["boss"], "task.created", key="mod", title="mod",
+                                      zone=["mod/"], accept="python check.py mod/first"))
+
+
+def commit_files(repo, *files):
+    git(repo, "add", *files)
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "work")
+
+
+def test_a_save_is_refused_while_new_files_of_the_zone_are_in_no_commit(project, capsys):
+    """In Erdős #902 an agent built on a save, wrote a new module, saved and reported it: the save pointed at the
+    very commit it was built on, and the module was in none. `git commit -am` doesn't add new files, and save
+    looked at the files git tracked only."""
+    from legion.cli import main
+    repo, tids, patch = project
+    tid = folder_task()
+    as_(repo, "luis")
+    main(["claim", tid])
+    main(["start", tid])
+    (repo / "mod").mkdir()
+    (repo / "mod" / "first.txt").write_text("ok\n")
+    capsys.readouterr()
+    assert main(["save", tid]) == 5                                     # its only work is a file never added
+    assert "mod/first.txt" in capsys.readouterr().err
+    commit_files(repo, "mod/first.txt")
+    assert main(["save", tid, "--notes", "first is done"]) == 0
+    main(["release", tid, "--notes", "second is left"])
+    git(repo, "checkout", "-q", "main")
+    as_(repo, "marta")
+    main(["claim", tid])
+    base = Ctx(sync=False).st.saves(tid)[0]
+    main(["start", tid, "--from", base["id"][:8]])
+    assert git(repo, "rev-parse", "HEAD") == base["commit"]
+    (repo / "mod" / "second.txt").write_text("ok\n")                    # the new module: never added
+    (repo / "mod" / "build").mkdir()
+    (repo / "mod" / "build" / "out.txt").write_text("what a build leaves\n")        # ignored: .gitignore
+    (repo / "legion_contracts" / "mod").mkdir(parents=True)
+    (repo / "legion_contracts" / "mod" / "test_mod.py").write_text("pass\n")        # ignored: the contract folder
+    (repo / "scratch.txt").write_text("notes\n")                        # new too, but outside the zone
+    capsys.readouterr()
+    assert main(["save", tid, "--notes", "adds second"]) == 5
+    said = capsys.readouterr().err
+    assert "mod/second.txt" in said and "git add" in said and "--leave-untracked" in said
+    assert not any(name in said for name in ("out.txt", "test_mod.py", "scratch.txt"))
+    assert len(Ctx(sync=False).st.saved[tid]) == 1
+    # Left out on purpose, the branch is luis's save and nothing else: saving that would pass his work for hers.
+    assert main(["save", tid, "--leave-untracked"]) == 5
+    assert f"adds nothing to luis#1's saved work ({base['id'][:8]})" in capsys.readouterr().err
+    assert len(Ctx(sync=False).st.saved[tid]) == 1
+    commit_files(repo, "mod/second.txt")
+    assert main(["save", tid, "--notes", "adds second"]) == 0
+    said = capsys.readouterr().err
+    assert "not in the save" in said and "scratch.txt" in said and "out.txt" not in said and "test_mod.py" not in said
+    saved = Ctx(sync=False).st.saved[tid][-1]
+    assert saved["name"] == "marta#1" and saved["commit"] != base["commit"]
+    assert git(repo, "ls-tree", "-r", "--name-only", saved["commit"], "mod").split() == ["mod/first.txt", "mod/second.txt"]
+
+
+def test_a_save_that_only_merges_someone_elses_with_a_later_main_is_refused(project, capsys):
+    """With main moved since the save, `start --from` makes a merge commit: not the save's commit, and still
+    nothing of whoever started."""
+    from legion.cli import main
+    repo, tids, patch = project
+    tid = tids["a"]
+    as_(repo, "luis")
+    main(["claim", tid])
+    main(["start", tid])
+    (repo / "a.txt").write_text("stage 1\n")
+    commit_files(repo, "a.txt")
+    assert main(["save", tid]) == 0
+    main(["release", tid, "--notes", "stage 2 is left"])
+    git(repo, "checkout", "-q", "main")
+    (repo / "b.txt").write_text("moved\n")
+    commit_files(repo, "b.txt")
+    make_project.add(make_project.people["boss"], "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    as_(repo, "marta")
+    main(["claim", tid])
+    base = Ctx(sync=False).st.saves(tid)[0]
+    main(["start", tid, "--from", base["id"][:8]])
+    assert len(git(repo, "rev-list", "--parents", "-1", "HEAD").split()) == 3      # a merge of main and the save
+    capsys.readouterr()
+    assert main(["save", tid]) == 5
+    assert "adds nothing to luis#1's saved work" in capsys.readouterr().err
+    (repo / "a.txt").write_text("stage 2\n")
+    commit_files(repo, "a.txt")
+    assert main(["save", tid]) == 0
+    assert [w["name"] for w in Ctx(sync=False).st.saved[tid]] == ["luis#1", "marta#1"]
+
+
+def test_a_patch_and_a_sketch_are_refused_while_new_files_of_theirs_are_in_no_commit(project, capsys):
+    """The same hole as save's: the acceptance command runs in the clone, where the new file is, and passes; the
+    patch goes without it and fails at the verifiers, or gets in without it."""
+    from legion.cli import main
+    repo, tids, patch = project
+    tid = folder_task()
+    as_(repo, "luis")
+    main(["claim", tid])
+    main(["start", tid])
+    test = f"legion_sketches/{tid}/test_part.txt"
+    (repo / test).parent.mkdir(parents=True)
+    (repo / test).write_text("ok\n")
+    (repo / "mod").mkdir()
+    (repo / "mod" / "part.txt").write_text("todo\n")
+    commit_files(repo, "mod/part.txt")
+    spec = repo.parent / "sketch.json"
+    spec.write_text(json.dumps([{"key": "part", "title": "Part", "zone": ["mod/part.txt"],
+                                 "accept": "python check.py mod/part"}]))
+    capsys.readouterr()
+    assert main(["sketch", tid, str(spec)]) == 5                        # the subtasks' tests were never added
+    assert test in capsys.readouterr().err and not Ctx(sync=False).st.sketches_for(tid)
+    commit_files(repo, test)
+    assert main(["sketch", tid, str(spec)]) == 0
+    assert test in git(repo, "ls-tree", "-r", "--name-only", Ctx(sync=False).st.sketches_for(tid)[0].commit).split()
+    main(["start", tid, "--force"])                                     # the patch, from main again
+    (repo / "mod").mkdir()
+    (repo / "mod" / "first.txt").write_text("ok\n")
+    commit_files(repo, "mod/first.txt")
+    (repo / "mod" / "second.txt").write_text("ok\n")
+    (repo / "scratch.txt").write_text("notes\n")                        # new too, but outside the zone
+    capsys.readouterr()
+    assert main(["submit", tid]) == 5
+    said = capsys.readouterr().err
+    assert "mod/second.txt" in said and "scratch.txt" not in said and not Ctx(sync=False).st.patches_for(tid)
+    assert main(["submit", tid, "--leave-untracked"]) == 0
+    assert "not in the patch, since no commit holds them: mod/second.txt, scratch.txt." in capsys.readouterr().err
+    sent = Ctx(sync=False).st.patches_for(tid)[-1]
+    assert git(repo, "ls-tree", "-r", "--name-only", sent.commit, "mod") == "mod/first.txt"
+
+
+def test_a_result_says_which_new_files_beside_it_stayed_out(project, capsys):
+    """A result is the files named and no other: one written beside them goes nowhere, and nothing said so."""
+    from legion.cli import main
+    repo, tids, patch = project
+    make_project.add(make_project.people["boss"], "project.policy", results_dir="res",
+                     results_check="python check.py {stem}")
+    as_(repo, "luis")
+    main(["claim", tids["a"]])
+    (repo / "res").mkdir()
+    for name in ("lemma", "helper"):
+        (repo / "res" / f"{name}.txt").write_text("ok\n")
+    capsys.readouterr()
+    assert main(["result", tids["a"], "res/lemma.txt", "--title", "The lemma a needs"]) == 0
+    assert "not in the result, since you didn't name them: res/helper.txt." in capsys.readouterr().err
+
+
 def test_a_task_proposed_and_voted_from_the_command_line(project, capsys):
     from legion.cli import main
     repo, tids, patch = project
