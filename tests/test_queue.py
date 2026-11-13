@@ -812,6 +812,35 @@ def test_an_agent_alone_goes_on_over_work_in_review(project, capsys):
     assert git(repo, "show", "legion/main:c.txt") == "ok"
 
 
+def test_a_patch_is_not_built_on_one_whose_commit_main_already_has(project, capsys):
+    """In Erdős #902 a node held a patch in review that no other node had ever received, its commit long in main. A
+    patch submitted from there listed it as built on: every other node refused it, and its author was told it was
+    sent. A patch whose commit main has brings nothing to wait for, so it isn't listed."""
+    from legion.cli import main
+    repo, tids, patch = project
+    boss = make_project.people["boss"]
+    patch("a", "ok\n")
+    pa = Ctx(sync=False).st.patches_for(tids["a"])[0]
+    # main moves on to that very commit, and no verdict on the patch reaches this node
+    git(repo, "merge", "-q", "--ff-only", pa.commit)
+    (repo / "c.txt").write_text("todo\n")
+    git(repo, "add", "c.txt")
+    git(repo, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "c")
+    make_project.add(boss, "main.updated", commit=git(repo, "rev-parse", "HEAD"))
+    tc = S.task_id(make_project.add(boss, "task.created", key="c", title="c", zone=["c.txt"],
+                                    accept="python check.py c"))
+    assert Ctx(sync=False).st.patches[pa.id].verdict is None
+    as_(repo, "luis")
+    main(["claim", tc])
+    main(["start", tc])
+    (repo / "c.txt").write_text("ok\n")
+    git(repo, "-c", "user.name=l", "-c", "user.email=l@l", "commit", "-qam", "mine")
+    capsys.readouterr()
+    assert main(["submit", tc]) in (0, None)
+    assert "built on work still in review" not in capsys.readouterr().out
+    assert Ctx(sync=False).st.patches_for(tc)[0].on == []
+
+
 def test_a_new_agent_gets_work_at_once_greets_the_hub_and_a_stuck_one_goes_back(project, capsys):
     """Whoever joins gets a task at once and is asked to say hello in the hub as it starts (sent there first,
     before any work, agents read for minutes). A failed report sends it back, and what's said there on a task

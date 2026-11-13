@@ -2205,10 +2205,15 @@ def unsaved(c: Ctx, t: S.Task) -> bool:
 
 
 def built_on(c: Ctx, t: S.Task) -> list:
-    """The patches in review, of other tasks, that this branch contains: it was built on them."""
+    """The patches in review, of other tasks, that this branch contains: it was built on them. Not one whose commit
+    main already has: it brings nothing main lacks, and this node may be the only one that knows it. In Erdős #902
+    a node held a patch nobody else had ever received, its commit long in main; the patch that listed it was
+    refused by every other node, while its author was told it was sent."""
+    main = coordgit.base_ref(c.repo)
     return [p for p in c.st.patches.values() if p.verdict is None and p.task != t.id and not c.st.doomed(p)
             and coordgit.has_commit(c.repo, p.commit)
-            and coordgit.run(c.repo, "merge-base", "--is-ancestor", p.commit, "HEAD").returncode == 0]
+            and coordgit.run(c.repo, "merge-base", "--is-ancestor", p.commit, "HEAD").returncode == 0
+            and coordgit.run(c.repo, "merge-base", "--is-ancestor", p.commit, main).returncode != 0]
 
 
 def too_big(repo, files: list[str]) -> None:
