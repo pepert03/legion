@@ -50,7 +50,8 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "children": len(st.children(t.id)),
             "stalled": st.stalled(t.id), "failures": st.failures_since_progress(t.id),
             "open_paths": len(st.open_paths(t.id)),
-            "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None, "holdout": t.holdout}
+            "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None, "holdout": t.holdout,
+            "attack": dict(t.attack), "apart": [st.tasks[a].key for a in t.apart]}
 
 
 def tree_order(st: S.State) -> list[S.Task]:
@@ -76,6 +77,13 @@ def task_text(t: dict) -> str:
                      "`submit --refutes`: that closes the task)")
     if t.get("holdout"):
         lines.append(f"  holdout:     {t['holdout']} (it must pass too: don't tune to the metric alone)")
+    if t.get("attack"):
+        a = t["attack"]
+        role = {"line": f"line {a.get('line')}", "check": f"the check of line {a.get('line')}",
+                "synthesis": "the synthesis"}.get(a.get("role"), a.get("role"))
+        lines.append(f"  attack:      round {a.get('round')} on {t.get('parent')}, {role} (`help attacks`)")
+    if t.get("apart"):
+        lines.append(f"  apart from:  {', '.join(t['apart'])} (whoever wrote it can't take this one)")
     if t.get("contract"):
         lines.append(f"  contract:    {', '.join(t['contract'])} in {S.contract_dir(t['key'])}/ "
                      "(`start` writes it; the patch must pass it unchanged)")
@@ -655,6 +663,9 @@ def claim(c: Ctx, args, last: bool = True) -> int:
         if t.mode != "exclusive":
             raise Fail("competitive tasks aren't claimed: work on it and send it with submit", 2)
         status = c.st.status(t.id, now)
+        apart = c.st.apart_error(t, c.me)
+        if apart:
+            raise Fail(apart, 3)
         join = t in c.st.joinable(c.me, now)
         if not c.holder_is_me(t.id) and status != "open" and not join and t not in c.st.preparable(now):
             raise Fail(f"task {t.key} is not available ({status})", 3)
@@ -670,7 +681,7 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # What this agent already tried since the task last advanced goes last: someone else, or
                 # another task, has a better chance than the same agent again. What it let go of in the last
                 # hour isn't handed back to it at all (see COOLDOWN).
-                cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me))
+                cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me)) | c.st.barred(c.me)
                 fresh = lambda ts: sorted((t for t in ts if t.id not in cool),  # noqa: E731
                                           key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
                 return (fresh(c.st.claimable(now)), fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
@@ -2259,6 +2270,9 @@ def cmd_submit(args):
             raise Fail(f"task {t.key} was refuted: its statement is false, so nothing proves it now", 3)
         if not c.holder_is_me(t.id):
             raise Fail(f"you don't hold the claim on {t.key}: claim it before submitting", 3)
+    apart = c.st.apart_error(t, c.me)
+    if apart:
+        raise Fail(apart, 3)
     check, what = t.accept, "acceptance"
     if args.refutes:  # a proof that the statement is false, checked with its refute command
         check, what = c.st.refute_command(t), "refutation"
@@ -3800,7 +3814,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--no-status", action="store_true", help="don't publish the legion-status branch")
     s.set_defaults(func=cmd_integrate)
 
-    from . import netcli, sim
+    from . import attack, netcli, sim
+    attack.add_parser(sub)
     netcli.add_parsers(sub)
     sim.add_parser(sub)
     for command in sub.choices.values():  # see RECORDING

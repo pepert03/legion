@@ -21,6 +21,7 @@ PATCH_PREFIXES = ("legion/", "refs/legion/patches/")  # never main or anyone els
 # live in SKETCH_DIR/<parent-id>/, and the parent only counts as done if it passes its own test.
 SKETCH_DIR = "legion_sketches"
 MAX_CHILDREN, MAX_DEPTH = 8, 3
+ATTACK_ROLES = ("line", "check", "synthesis")  # the pieces of an attack (attack.py)
 # A task may carry its contract: test files (a sketch's tests, but in the task itself) that pin what its patch
 # must do. They live in the task's event, so whoever votes on a proposed task reads them, and legion writes them
 # into CONTRACT_DIR/<key>/ before every run of its acceptance command: outside the zone, so no patch can change
@@ -162,7 +163,7 @@ POLICY = {"quorum": 2, "verifier_trust": 65, "spot_check": 0.25,
 FINALIZE = {"patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "sketch.rejected", "sketch.failed",
             "path.accepted", "path.rejected", "task.resolved", "task.created"}
 # Rejections any node can confirm with git alone; the others need failing verifications behind them.
-PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout", "base"}
+PLAIN = {"conflict", "zone", "empty", "missing", "done", "deps", "timeout", "base", "apart"}
 # In the open mode, what only founders publish can also pass by a vote: a trusted agent proposes it, and it applies
 # once enough of the trusted owners active in the policy's vote_window say yes (each owner counts once): a
 # majority, and never fewer than MIN_YES (or all the active ones, if they are fewer). The window is a week unless
@@ -216,6 +217,10 @@ class Task:
     # but fails it is rejected. Loops that optimize one number drift away from what it stands for (in-loop gains
     # three times the audited ones, arXiv 2609.00077): e.g. the metric on the public cases, this on other seeds.
     holdout: str = ""
+    # Tasks whose writers may not take this one: an attack's check of a line is done by an agent that didn't
+    # write the line (see attack.py), as a reviewer isn't the author.
+    apart: list = field(default_factory=list)
+    attack: dict = field(default_factory=dict)  # an attack's piece: {"round", "role" (line|check|synthesis), "line"}
 
 
 @dataclass
@@ -1117,6 +1122,22 @@ class State:
                     out.append(n)
         return sorted(out, key=lambda n: n["lamport"])
 
+    def wrote(self, tid: str, author: str) -> bool:
+        """Sent a patch on the task, or saved work on it: what an attack's check of it may not come from."""
+        return any(p.author == author for p in self.patches_for(tid)) or any(w["author"] == author
+                                                                             for w in self.saved[tid])
+
+    def barred(self, author: str) -> set:
+        """The tasks this agent may not take: checks of what it wrote (Task.apart)."""
+        return {t.id for t in self.tasks.values() if t.apart and any(self.wrote(a, author) for a in t.apart)}
+
+    def apart_error(self, task: Task, author: str) -> str | None:
+        wrote = [self.tasks[a].key for a in task.apart if self.wrote(a, author)]
+        if wrote:
+            return (f"{task.key} checks {', '.join(wrote)}, which you wrote: another agent takes it, as a reviewer "
+                    "isn't the author")
+        return None
+
     def works_on(self, tid: str, author: str, now: float) -> bool:
         return any(c.author == author for c in self.claimants(tid, now))
 
@@ -1857,6 +1878,14 @@ class State:
                                               or len(ev["holdout"]) > 300 or ev.get("mode") != "competitive"
                                               or ev.get("sketch") or ev.get("path")):
             return "a holdout check is a command, for a competitive task, set by whoever creates it"
+        apart, attack = ev.get("apart"), ev.get("attack")
+        if apart is not None and (not isinstance(apart, list) or not 1 <= len(apart) <= MAX_CHILDREN
+                                  or not all(isinstance(a, str) and self.find_task(a) for a in apart)):
+            return "apart names the tasks (1 to 8, already created) whose writers may not take this one"
+        if attack is not None and (not isinstance(attack, dict) or attack.get("role") not in ATTACK_ROLES
+                                   or not all(isinstance(attack.get(k, ""), str) and len(attack.get(k, "")) <= 40
+                                              for k in ("round", "line"))):
+            return "an attack's piece says its round, its line and its role (line, check or synthesis)"
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
@@ -1880,7 +1909,8 @@ class State:
                                ev.get("metric"), ev.get("goal", "min"), deps, ev.get("size", "M"),
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
                                depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "",
-                               holdout=ev.get("holdout") or "")
+                               holdout=ev.get("holdout") or "", apart=[self.find_task(a).id for a in apart or []],
+                               attack={k: attack[k] for k in ("round", "role", "line") if k in attack} if attack else {})
         if sketch:
             sketch.child_ids.append(tid)
         return None

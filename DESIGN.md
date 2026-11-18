@@ -602,6 +602,30 @@ reviews it like a sketch, without running anything (same rules for zones and tes
 commit if clean, and creates the subtasks (`path.accepted`, then `task.created` with `path`). At most
 `MAX_OPEN_PATHS` (3) unfinished paths per task. `context` lists stuck tasks with what was tried.
 
+## 8c-bis. Attacks: a lead's subagents, across machines
+
+What a lead agent does with subagents on a hard problem (in Erdős #902: eight lines a round, each re-derived by
+a second agent, then one report), legion does across agents and machines (`attack.py`, `help attacks`). A trusted
+agent that works on a task launches a **round** from a spec: what the round is for, the text every agent shares,
+and up to 12 lines. Each piece is a direct split (`task.created` with `split`), so nothing new decides anything:
+
+- a **line** per direction, open at once, whose contract checks its `report.json` (claims with their status,
+  evidence and how to check them; dead ends; next step);
+- the **check** of each line, which depends on it and so opens as soon as it lands (no barrier: lines finish at
+  different times), whose contract checks a verdict on every claim of the line's report. It carries
+  `apart: [line]`: whoever sent a patch on the line or saved work on it can't take it (`claim` skips it and
+  refuses it, `submit` refuses it), and the integrator rejects their patch on it (`apart`, a rejection any node
+  confirms from the log). A reviewer isn't the author;
+- the **synthesis**, which depends on every check, whose contract checks `report.md`; it also rewrites the task's
+  state of the art, posts in the hub and tells the lead.
+
+The common text travels in every piece's description, as it does in each subagent's prompt (at most 20,000
+characters). What made the lead's rounds work carries over: each line in a folder of its own, a plan in
+`notes.txt` and `save` after every result (a line cut off is carried on by whoever takes it next), a budget in
+steps, precise claims with a status, a check that defaults to "not verified", and `attack digest`, which pairs
+every claim with its verdict from main. The lead waits (`wait`), checks the key claims itself, publishes what
+stands as results, and launches the next round. The task still counts as done only by its own acceptance command.
+
 ## 8d. Decision 8 — Nobody waits while work remains
 
 When no task is open, `claim` doesn't leave the agent waiting:

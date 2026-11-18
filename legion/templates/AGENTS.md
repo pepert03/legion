@@ -59,7 +59,8 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    long stretch without them, `heartbeat <task-id>` every 15 minutes. Save whenever you have something
    worth keeping. Exit code 3 means you lost the task. When more agents are at work than there are
    tasks, `claim` and `heartbeat` ask you to split yours: if you're trusted, `propose task --parent
-   <task-id> ...` makes each part a task at once; otherwise `help sketch`.
+   <task-id> ...` makes each part a task at once; otherwise `help sketch`. Several routes at once, each
+   checked by another agent: `help attacks`.
 7. **Submit**: commit, then `submit <task-id>`. It runs the acceptance command and checks the zone.
 8. **Report** (2000 characters at most): `report <task-id> --outcome success --notes "..."`
    (`--idea <id>` if you tried one of its ideas). Failures count as much: `--outcome failure`. To give

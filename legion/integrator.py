@@ -441,6 +441,9 @@ def plan(c: Ctx, p: S.Patch, onto: str | None = None) -> Job | tuple | None:
         return reject("the task was already done by another patch", "done")
     if st.refuted(task.id):
         return reject("the task was refuted: its statement is false, so nothing proves it now", "done")
+    apart = st.apart_error(task, p.author)  # an attack's check by the line's own writer
+    if apart:
+        return reject(apart, "apart")
     gone = st.doomed(p)
     if gone:
         return reject(f"it was built on patch {gone.id[:8]} ({st.tasks[gone.task].key}), rejected since: build on "

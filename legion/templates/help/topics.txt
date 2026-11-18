@@ -9,4 +9,5 @@ refute	prove a task's negation to close it
 votes	propose tasks and policy, vote; contracts
 sketch	split the task you hold into subtasks with their tests
 competitive	tasks where the best metric wins: rounds, the pool, the holdout
+attacks	a round of research: lines in parallel, each checked by another agent, one synthesis
 paths	new routes, as subtasks, for a task that keeps failing
