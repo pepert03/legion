@@ -1,22 +1,35 @@
 name: legion verifier
 
-# A node that only verifies, for a project whose own machines aren't always on. Every run it joins the project
-# named in this repository's variable LEGION_PROJECT (a Radicle id, rad:...), or catches up with it, checks the
-# patches waiting for a verdict exactly as any agent's `python -m legion verify` does, signs what it found, and
-# leaves. In Erdős #902 the only machine with Lean that could verify another owner's patches was a laptop.
+# A node that only verifies, for a project whose own machines aren't always on. It joins the project named in this
+# repository's variable LEGION_PROJECT (a Radicle id, rad:...), or catches up with it, and then, every 20 minutes for
+# nearly six hours, checks the patches waiting for a verdict exactly as any agent's `python -m legion verify` does,
+# and signs what it found. Before it ends it starts the next run. In Erdős #902 the only machine with Lean that could
+# verify another owner's patches was a laptop.
+#
+# Why a long run that starts the next one, and not a schedule: GitHub's schedule fired not once in the first two
+# hours of this workflow on main (22 Nov 2026), and it is best effort at any time. A run started by this workflow's
+# own token does start (workflow_dispatch is the exception to "events of GITHUB_TOKEN start no runs"). The schedule
+# stays, to start the chain again if a run ever ends without starting the next. Only one run at a time (the
+# concurrency group): a start while one is running waits for it.
 #
 # It needs, set once in the repository (Settings > Secrets and variables > Actions):
 #   secret   LEGION_IDENTITY  the verifier's legion identity: its file in ~/.legion/identities, whole
 #   secret   RAD_PROFILE      its Radicle node's keys and config: `tar -cz keys config.json | base64`, from a RAD_HOME
 #   variable LEGION_PROJECT   the project's Radicle id
 #   variable LEGION_SETUP     optional: the project's one-time setup in a clone (`python check.py --setup`)
+#   variable LEGION_VERIFIER  optional: `off` stops it (the run under way finishes its cycle and starts no other)
 # Its verifications count once the project trusts it: an owner vouches for it as a subagent
 # (`python -m legion delegate <its name>`), or it earns it like any agent.
 
 on:
   workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long this run goes on verifying before it starts the next (default 330: 5 h 30 min)"
+        required: false
+        default: ""
   schedule:
-    - cron: "7,27,47 * * * *"
+    - cron: "7 */2 * * *"
 
 concurrency:
   group: legion-verifier
@@ -24,19 +37,26 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # to start the next run
 
 jobs:
   verify:
-    if: vars.LEGION_PROJECT != ''
+    if: vars.LEGION_PROJECT != '' && vars.LEGION_VERIFIER != 'off'
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 355
     env:
       LEGION_PROJECT: ${{ vars.LEGION_PROJECT }}
       LEGION_SETUP: ${{ vars.LEGION_SETUP }}
       LEGION_AGENT: github-actions
       LEGION_VERIFY_INLINE: "1"
       CLONE: /home/runner/project
+      EVERY: "1200"        # seconds between the starts of two cycles
+      # Minutes after the run started past which no cycle starts: 330 (5 h 30 min), or what whoever started it asked.
+      CYCLES_MINUTES: ${{ inputs.minutes || '330' }}
     steps:
+      - name: Start
+        run: echo "STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -132,30 +152,46 @@ jobs:
           fi
           if [ -n "$LEGION_SETUP" ]; then $LEGION_SETUP; fi
 
-      - name: Verify what waits
+      - name: Verify every 20 minutes
         run: |
           cd "$CLONE"
           python - <<'EOF'
           import json
+          import os
           import subprocess
           import sys
           import time
 
-          end, done = time.time() + 30 * 60, 0
-          while time.time() < end:
-              p = subprocess.run([sys.executable, "-m", "legion", "verify", "--json", "--timeout", "1500"],
-                                 capture_output=True, text=True)
-              print(p.stdout[-4000:], p.stderr[-4000:], sep="\n", flush=True)
-              last = {}
-              for line in p.stdout.splitlines():
-                  try:
-                      last = json.loads(line) if line.startswith("{") else last
-                  except ValueError:
-                      pass
-              if p.returncode or not last.get("verified"):
+          started, every = float(os.environ["STARTED"]), int(os.environ["EVERY"])
+          until = int(os.environ["CYCLES_MINUTES"]) * 60
+          cycle, total = 0, 0
+          while time.time() - started < until:
+              cycle += 1
+              t0, done = time.time(), 0
+              while time.time() - t0 < every - 120:  # one cycle's checks end before the next starts
+                  p = subprocess.run([sys.executable, "-m", "legion", "verify", "--json", "--timeout", "1500"],
+                                     capture_output=True, text=True)
+                  last = {}
+                  for line in p.stdout.splitlines():
+                      try:
+                          last = json.loads(line) if line.startswith("{") else last
+                      except ValueError:
+                          pass
+                  if last.get("verified"):
+                      print(json.dumps(last), flush=True)
+                  if p.returncode or not last.get("verified"):
+                      if p.returncode:
+                          print(p.stdout[-3000:], p.stderr[-3000:], sep="\n", flush=True)
+                      break
+                  done += 1
+              total += done
+              print(f"{time.strftime('%H:%M:%S', time.gmtime())} UTC cycle {cycle}: verified {done}; "
+                    f"waiting: {last.get('waiting', '?')}, passed over: {last.get('skipped') or {}}", flush=True)
+              left = every - (time.time() - t0)
+              if time.time() - started + max(left, 0) >= until:
                   break
-              done += 1
-          print(f"verified {done} patch(es) in this run")
+              time.sleep(max(left, 0))
+          print(f"verified {total} patch(es) in {cycle} cycle(s)")
           EOF
 
       - name: What it left
@@ -164,3 +200,15 @@ jobs:
           cd "$CLONE" 2>/dev/null || exit 0
           python -m legion relay | tail -n 8 || true
           python -m legion log --no-sync | tail -n 6 || true
+
+      # The next run, whatever happened in this one. A run that ended early (a setup that broke) waits until 20
+      # minutes after it started, so a broken one is tried again three times an hour, not without pause.
+      - name: Start the next run
+        if: always() && github.ref == 'refs/heads/main' && vars.LEGION_VERIFIER != 'off'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ran=$(( $(date +%s) - STARTED ))
+          if [ "$ran" -lt "$EVERY" ]; then sleep $(( EVERY - ran )); fi
+          gh workflow run verifier.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "next run requested"
