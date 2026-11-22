@@ -1743,7 +1743,9 @@ class State:
         if not self.deps_ok(task):
             # Its dependencies are in review: workable now, on top of their patches, so nobody waits for the
             # verdicts. A patch written for it waits here until they are accepted.
-            if not self.deps_in_review(task) or self.patches_for(tid, None):
+            # Not a round's synthesis: it reads the lines and their checks in main, and handed out while they were
+            # all in review its agents found nothing there to read (Erdős #902, the first rounds).
+            if not self.deps_in_review(task) or self.patches_for(tid, None) or task.attack.get("role") == "synthesis":
                 return "blocked"
         elif self.patches_for(tid, None):
             return "review"

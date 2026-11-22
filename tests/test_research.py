@@ -486,3 +486,19 @@ def test_a_rejection_that_follows_from_another_holds_only_if_that_one_does():
     log.add(BOSS, "patch.rejected", patch=p["id"], code="tests", reason="fails")
     log.add(BOSS, "patch.rejected", patch=q["id"], code="base", reason="it was built on a rejected patch")
     assert log.state().patches[q["id"]].verdict == "rejected"
+
+
+def test_a_rounds_synthesis_waits_for_its_checks_to_be_in_main():
+    log, tid = goal()
+    p = propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[p["id"]]]), "ana")
+    ids = [S.task_id(log.add(ANA, "task.created", **x, split=True)) for x in pieces]
+    line, check, synth = ids
+    q = log.add(CEL, "patch.submitted", task=line, commit="a" * 40, branch="legion/r/l")
+    log.add(BEA, "patch.submitted", task=check, commit="b" * 40, branch="legion/r/c", on=[q["id"]])
+    st = log.state()
+    assert st.in_review(check) is not None and st.status(synth, 1000.0) == "blocked"  # its check is in review
+    log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit="m1")
+    log.add(BOSS, "patch.accepted", patch=log.state().patches_for(check)[0].id, merge_commit="m2")
+    assert log.state().status(synth, 1000.0) == "open"
