@@ -393,3 +393,34 @@ def test_what_happens_to_an_agents_findings_and_lines_reaches_its_inbox_and_an_o
     st = log.state()
     assert R.due(st, tid, 5000.0 + R.PROPOSE_WINDOW) is None
     assert [x["ev"]["front"] for x in R.due(st, tid, 5000.0 + R.LINE_WAIT)] == ["census"]
+
+
+def test_findings_nobody_but_their_author_stands_behind_are_handed_out_to_judge():
+    log, tid = goal()
+    f = log.add(ANA, "finding.stated", task=tid, statement="f(4) >= 50", status="proved", evidence="in main")
+    dead = log.add(ANA, "finding.stated", task=tid, statement="Paley 47 has no S4.", status="dead end")
+    log.add(ANA, "finding.stated", task=tid, statement="Is f(5) = 111?", status="unproved")  # open: nothing to judge
+    st = log.state()
+    assert st.finding_for(ANA.author, "ana") is None  # nobody judges their own
+    picks = {st.finding_for(Identity.generate(f"x{i}").author, f"x{i}")["ev"]["id"] for i in range(12)}
+    assert picks == {f["id"], dead["id"]}  # each agent its own among the first few; never the open one
+    text = R.judge_text(st, st.findings[f["id"]])
+    assert "f(4) >= 50" in text and "FIND WHAT IS WRONG" in text and f"finding judge {f['id'][:8]}" in text
+    # Two agents' say is enough; whoever said isn't asked again, "not verified" included.
+    log.add(BEA, "finding.judged", task=tid, finding=f["id"], verdict="not verified", reason="no Lean here")
+    st = log.state()
+    assert st.finding_for(BEA.author, "bea")["ev"]["id"] == dead["id"]
+    log.add(CEL, "finding.judged", task=tid, finding=f["id"], verdict="confirmed", reason="the file proves it")
+    log.add(BEA, "finding.judged", task=tid, finding=dead["id"], verdict="confirmed", reason="reran the search")
+    log.add(CEL, "finding.judged", task=tid, finding=dead["id"], verdict="confirmed", reason="reran it too")
+    assert log.state().finding_for(Identity.generate("dan").author, "dan") is None
+    # Confirmed only by its author's own owner: another owner's agent is still asked; disagreement asks for more.
+    g = log.add(ANA, "finding.stated", task=tid, statement="f(5) >= 110", status="partial")
+    log.add(Identity.generate("ana#2"), "finding.judged", task=tid, finding=g["id"], verdict="confirmed", reason="ok")
+    log.add(Identity.generate("ana#3"), "finding.judged", task=tid, finding=g["id"], verdict="confirmed", reason="ok")
+    st = log.state()
+    assert st.finding_for(Identity.generate("ana#4").author, "ana#4") is None
+    assert st.finding_for(BEA.author, "bea")["ev"]["id"] == g["id"]
+    log.add(BEA, "finding.judged", task=tid, finding=g["id"], verdict="refuted", reason="the case n = 5 is missing")
+    st = log.state()
+    assert st.finding_state(st.findings[g["id"]]) == "contested" and st.finding_for(CEL.author, "cel")["ev"]["id"] == g["id"]

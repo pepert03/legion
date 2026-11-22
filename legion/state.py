@@ -208,6 +208,10 @@ NOOP_AFTER = 2
 NEWS = {"work.saved", "patch.submitted", "idea.proposed", "question.answered", "result.submitted",
         "line.proposed", "finding.stated", "finding.judged", "lit.added", "path.proposed", "sketch.proposed"}
 QUESTION_TAKES = 2  # times an agent is handed one question without answering it (one was taken 543 times)
+# A finding stands once an agent other than its author confirms it, and nothing asked anyone to: claim hands one
+# to judge to an agent with nothing to take, until JUDGES_WANTED agents have said (a "not verified" is a say: the
+# agent that couldn't settle it isn't handed it again), or, when two disagree, until JUDGES_MOST have.
+JUDGES_WANTED, JUDGES_MOST = 2, 4
 
 
 def owner(name: str) -> str:
@@ -1210,6 +1214,30 @@ class State:
         """Confirmed by an agent of another owner than its author's: one person's agents agreeing is weaker."""
         mine = self.owner_now(f["ev"])
         return any(v["verdict"] == "confirmed" and self.owner_now(v) != mine for v in f["verdicts"].values())
+
+    def finding_for(self, author: str, name: str) -> dict | None:
+        """A finding for this agent to judge: on a task that isn't done, not its own, not judged by it, and still
+        without the verdicts it wants (JUDGES_WANTED; one that two agents disagree on, JUDGES_MOST; one confirmed
+        only by its author's own owner, another owner's). What claims a proof or a computation first, then what is
+        partial, then the dead ends (one refuted is a route open again); another owner's before its own owner's;
+        the least judged first. What is stated as open (unproved) has nothing to judge. Each agent takes its own
+        among the first few, as with pairs to compare."""
+        me, found = owner(name), []
+        rank = {"proved": 0, "checked by computation": 0, "partial": 1, "dead end": 2}
+        for f in self.findings.values():
+            t, ev = self.tasks.get(f["task"]), f["ev"]
+            if (f["replaced"] or t is None or t.cancelled or self.done(t.id) or self.refuted(t.id)
+                    or ev["author"] == author or author in f["verdicts"] or ev["status"] not in rank):
+                continue
+            state, said, theirs = self.finding_state(f), len(f["verdicts"]), self.owner_now(ev)
+            wanted = (state == "unchecked" and said < JUDGES_WANTED or state == "contested" and said < JUDGES_MOST
+                      or state == "confirmed" and not self.independent(f) and me != theirs and said < JUDGES_MOST)
+            if wanted:
+                found.append(((rank[ev["status"]], me == theirs, said, ev["lamport"], ev["id"]), f))
+        if not found:
+            return None
+        found.sort(key=lambda x: x[0])
+        return found[int(hashlib.sha256(name.encode()).hexdigest(), 16) % min(len(found), 4)][1]
 
     def research_rounds(self, tid: str) -> list[dict]:
         """The rounds of attack on a task, in order, with what each yielded: its lines, whether it's closed (its

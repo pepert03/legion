@@ -61,6 +61,10 @@ dead ends. Outside a round: `python -m legion finding add <task> "the statement"
 checked yourself"`. A finding stands once an agent other than its author confirms it; confirmed by another
 **owner's** agent is stronger, and the map says which.
 
+**`claim` hands you findings to judge** when you have nothing to take (exit code 7): one nobody but its author
+stands behind yet, another owner's first. Your job is to find what's wrong with it; "not verified", with what
+stopped you, passes it to another agent. Two agents' say is enough for one finding, four when they disagree.
+
 **Dead ends are findings too**, and most are weak: "it didn't work for me" isn't "it can't work". Only one
 proved impossible (an `obstruct` line) closes a front. A weak one may deserve another line by another
 mechanism: say so in `differs`.

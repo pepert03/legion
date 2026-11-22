@@ -355,6 +355,29 @@ def back_text(st: S.State, t: S.Task, others: list[dict]) -> str:
             + "\n\n`python -m legion line back <id>`")
 
 
+def judge_text(st: S.State, f: dict) -> str:
+    ev, t = f["ev"], st.tasks[f["task"]]
+    said = "; ".join(f"{v['name']}: {v['verdict']} ({_cut(v['reason'], 160)})" for v in f["verdicts"].values())
+    return (f"A finding on the map of {t.key} that nobody but its author stands behind yet. On a map, a finding "
+            "stands once an agent other than its author confirms it, and the next round's lines are built on what "
+            "stands. Judge this one:\n\n"
+            f"  [{ev['id'][:8]}] ({ev['status']}; front {f['front'] or '-'}; stated by {ev['name']})\n"
+            f"  {ev['statement']}\n"
+            + (f"  evidence: {ev['evidence']}\n" if ev.get("evidence") else "")
+            + (f"  how to check: {ev['check']}\n" if ev.get("check") else "")
+            + (f"  said so far: {said}\n" if said else "")
+            + "\nYOUR JOB IS TO FIND WHAT IS WRONG WITH IT. Don't take its word. If it rests on a patch in main, "
+            "read the statement that patch proves (the file it names, in main) and say whether it is THIS statement, "
+            "no stronger. If it is an argument, re-derive it and look for the gap. If it is a computation, recompute "
+            "it with code of your own when you can. If it is a dead end, say whether what failed was the route or "
+            "one attempt at it: a dead end refuted is a route open again. About 30 steps, no more.\n"
+            "  confirmed       you checked it yourself, and it holds as stated\n"
+            "  refuted         with the concrete error, the counterexample, or what it overstates\n"
+            "  \"not verified\"  you couldn't settle it (a tool this machine lacks, a proof you can't follow): say "
+            "what stopped you; it goes to another agent\n"
+            f"`python -m legion finding judge {ev['id'][:8]} <verdict> --reason \"what you checked and found\"`\n")
+
+
 def line_row(x: dict, width: int = 240) -> str:
     ev = x["ev"]
     return (f"  [{ev['id'][:8]}] {ev['front']} / {ev['method']} / {ev['move']}, by {ev['name']}"
@@ -391,15 +414,16 @@ def cycle_work(c: Ctx, args, now: float) -> int | None:
     again), a line proposed, others' lines backed. None if they want nothing from it now."""
     st, name = c.st, c.ident.name
     goals = [t for t in open_goals(st, c.me) if not st.spent(t.id)]
-    if not goals:
-        return None
-    if launch_due(c, now):
+    if goals and launch_due(c, now):
         return RELAUNCH
     for t in goals:
         waiting = st.open_lines(t.id)
         # With three rounds' worth of lines waiting already, more proposals aren't what the goal lacks.
         if not any(x["ev"]["author"] == c.me for x in waiting) and len(waiting) < 3 * MAX_ROUND_LINES:
             return _hand(c, args, "line", t, propose_text(st, t, name, 0))
+    f = st.finding_for(c.me, name)  # its own line first, so it's decided before it reads much; then others' findings
+    if f is not None:
+        return _hand(c, args, "judge", st.tasks[f["task"]], judge_text(st, f))
     me = S.owner(name)
     for t in goals:
         others = [x for x in st.open_lines(t.id) if st.owner_now(x["ev"]) != me and me not in x["backed"]]
