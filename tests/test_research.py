@@ -109,7 +109,8 @@ def test_a_round_is_due_once_enough_agents_proposed_or_the_first_proposal_has_wa
     assert R.due(log.state(), tid, 1000.0) is None  # nothing proposed
     propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
     st = log.state()
-    assert R.due(st, tid, 1000.0) is None and len(R.due(st, tid, 1000.0 + R.PROPOSE_WINDOW)) == 1
+    assert R.due(st, tid, 1000.0) is None and R.due(st, tid, 1000.0 + R.PROPOSE_WINDOW) is None  # one proposer
+    assert len(R.due(st, tid, 1000.0 + R.LONE_WINDOW)) == 1
     propose(log, BEA, tid, "paley", "Topic 2", "zeta eta theta iota kappa")
     st = log.state()
     chosen = R.due(st, tid, 1000.0)
@@ -505,3 +506,48 @@ def test_a_rounds_synthesis_waits_for_its_checks_to_be_in_main():
     log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit="m1")
     log.add(BOSS, "patch.accepted", patch=log.state().patches_for(check)[0].id, merge_commit="m2")
     assert log.state().status(synth, 1000.0) == "open"
+
+
+def test_a_rounds_lines_go_to_different_hands_and_its_synthesis_proposes_the_next(monkeypatch):
+    log, tid = goal()
+    ids = [propose(log, w, tid, f"front-{i}", f"Topic {i}", f"alpha{i} beta{i} gamma{i} delta{i} epsilon{i}")["id"]
+           for i, w in enumerate((ANA, BEA, CEL))]
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[x] for x in ids]), "ana")
+    made = {p["key"]: S.task_id(log.add(ANA, "task.created", **p, split=True)) for p in pieces}
+    lines = [k for k, p in zip(made, pieces) if p["attack"]["role"] == "line"]
+    log.add(BEA, "task.claimed", task=made[lines[0]], ttl=600)
+    st = log.state()
+    first, second = st.tasks[made[lines[0]]], st.tasks[made[lines[1]]]
+    assert st.round_mates(first) == [x for x in st.round_mates(first)] and len(st.round_mates(first)) == 2
+    assert st.has_line_in_round(second, BEA.author, 1000.0) and not st.has_line_in_round(second, CEL.author, 1000.0)
+    bea2 = Identity.generate("bea#2")
+    log.add(bea2, "agent.joined")
+    assert log.state().has_line_in_round(second, bea2.author, 1000.0, same_owner=True)
+    # The synthesis's next lines are proposed on submit, as its agent's; what the rules refuse is said.
+    rows = [dict(front="sat", method="compute", title="Decide n = 5", text="Encode n = 5 and decide it.",
+                 learn="whether n = 5 is in reach"),
+            dict(front="sat", method="compute", title="Decide n = 5", text="Encode n = 5 and decide it.",
+                 learn="same again")]
+    monkeypatch.setattr(R, "_load", lambda repo, path: rows if path.endswith(R.NEXT_LINES) else None)
+    st = log.state()
+    c = types.SimpleNamespace(st=st, repo=None, me=CEL.author, ident=types.SimpleNamespace(name="cel"),
+                              emit=lambda type, **p: log.add(CEL, type, **p))
+
+    def emit(type, **p):
+        ev = log.add(CEL, type, **p)
+        if log.state().ignored and log.state().ignored[-1][0]["id"] == ev["id"]:
+            log.events.pop()
+            raise R.Fail(log.state().ignored[-1][1] if False else "refused")
+        c.st = log.state()
+        return ev
+    c.emit = emit
+    synth = st.tasks[made[[k for k, p in zip(made, pieces) if p["attack"]["role"] == "synthesis"][0]]]
+    assert R.lift(c, synth) == 1  # the second says the same as the first: refused, and said
+    assert [x["ev"]["title"] for x in log.state().open_lines(tid)] == ["Decide n = 5"]
+    # After a line or a check, its agent is asked for a line where the next round would take more.
+    c.st, c.me, c.ident = log.state(), ANA.author, types.SimpleNamespace(name="ana")
+    ask = R.ask_for_line(c, c.st.tasks[made[lines[2]]], 1000.0)
+    assert "would take" in ask and "line propose f" in ask
+    c.me, c.ident = CEL.author, types.SimpleNamespace(name="cel")
+    assert R.ask_for_line(c, c.st.tasks[made[lines[2]]], 1000.0) == ""  # cel has one waiting

@@ -1239,6 +1239,21 @@ class State:
         found.sort(key=lambda x: x[0])
         return found[int(hashlib.sha256(name.encode()).hexdigest(), 16) % min(len(found), 4)][1]
 
+    def round_mates(self, t: Task) -> list[Task]:
+        """The other lines of the round a line belongs to."""
+        if t.attack.get("role") != "line":
+            return []
+        return [x for x in self.tasks.values() if x.parent == t.parent and x.id != t.id
+                and x.attack.get("role") == "line" and x.attack.get("round") == t.attack.get("round")]
+
+    def has_line_in_round(self, t: Task, author: str, now: float, same_owner: bool = False) -> bool:
+        """Whether this agent (or, same_owner, any agent of its owner) wrote or holds another line of the round
+        this line belongs to. In Erdős #902 one agent took and submitted all four lines of a round in eight
+        minutes: one hand on every route of a round is the convergence rounds are there to avoid."""
+        me = owner(self.names.get(author, ""))
+        who = ([a for a, n in self.names.items() if owner(n) == me] if same_owner else [author])
+        return any(self.wrote(x.id, a) or self.works_on(x.id, a, now) for x in self.round_mates(t) for a in who)
+
     def research_rounds(self, tid: str) -> list[dict]:
         """The rounds of attack on a task, in order, with what each yielded: its lines, whether it's closed (its
         synthesis is in, or every line and check), and how many of its findings stand: confirmed by another agent

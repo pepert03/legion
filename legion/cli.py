@@ -748,7 +748,11 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # goal had nothing more for an agent, they were still claimed and let go of 25 times in three hours.
                 # Work on them goes through the goal's lines; an agent with a route for one takes it by name.
                 whole = lambda ts: [t for t in ts if t.attack or not c.st.goal_of(t.id)]  # noqa: E731
-                return (whole(fresh(c.st.claimable(now))),
+                # Nor a second line of a round to an agent that wrote or holds one of it, while other agents are
+                # about: each line of a round wants its own hand (S.State.has_line_in_round).
+                others = len({a for a, ts in c.st.last_seen.items() if now - ts <= research.ACTIVE} - {c.me}) > 0
+                spread = lambda ts: [t for t in ts if not (others and c.st.has_line_in_round(t, c.me, now))]  # noqa: E731
+                return (spread(whole(fresh(c.st.claimable(now)))),
                         whole(fresh(c.st.joinable(c.me, now))) or whole(fresh(c.st.preparable(now)))
                         or fresh(c.st.competitive_for(c.me)))
             # A round due on a research goal is launched first: its lines are among the free tasks then.
@@ -831,7 +835,10 @@ def claim(c: Ctx, args, last: bool = True) -> int:
             else:
                 # Deterministic spread: each agent prefers a different order, so they collide less; tasks this
                 # agent already tried since they last advanced go last.
+                # A line of a round where its owner has none yet comes before one where it has: the lines of a
+                # round go to different owners first.
                 t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0 or t.id in circled,
+                                             c.st.has_line_in_round(t, c.me, now, same_owner=True),
                                              hashlib.sha256((c.me + t.id).encode()).hexdigest()))
     clean = c.st.stalled(t.id) and c.st.clean_view(c.me)  # the fresh view of a stuck task (S.FRESH_VIEWS)
     if not c.holder_is_me(t.id):
@@ -2425,8 +2432,11 @@ def cmd_submit(args):
                 **({"on": [p.id for p in on]} if on else {}), **({"refutes": True} if args.refutes else {}))
     mapped = research.lift(c, t)  # a round's line or check: what it says goes on its task's map
     if mapped:
-        print(f"legion: {mapped} finding(s) or verdict(s) of this piece recorded on the map of "
-              f"{c.st.tasks[t.parent].key} (`python -m legion map {c.st.tasks[t.parent].key}`).", file=sys.stderr)
+        what = ("line(s) proposed for the next round of" if t.attack.get("role") == "synthesis"
+                else "finding(s) or verdict(s) of this piece recorded on the map of")
+        print(f"legion: {mapped} {what} {c.st.tasks[t.parent].key} (`python -m legion map "
+              f"{c.st.tasks[t.parent].key}`).", file=sys.stderr)
+    ask = research.ask_for_line(c, t, time.time())
     c.sync()
     waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
                           + [c.st.tasks[p.task].key for p in on])
@@ -2436,7 +2446,7 @@ def cmd_submit(args):
         + (f"It's built on work still in review ({', '.join(waits)}): it's checked once that is accepted. Don't "
            "wait for it: whatever needs this task can be worked on now, on top of this patch. " if waits else "")
         + f"Next: report it (`python -m legion report {t.id} --outcome success --notes \"...\"`), and don't wait "
-        f"for the verdict: `context` will show it to you. {keep_going()}")
+        f"for the verdict: `context` will show it to you. {keep_going()}" + (f"\n\n{ask}" if ask else ""))
 
 
 def changed_lines(repo, base: str) -> int:

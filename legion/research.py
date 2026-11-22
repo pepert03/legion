@@ -32,6 +32,11 @@ from .ctx import Ctx, Fail
 
 ACTIVE = 2 * 3600  # agents seen in this long count towards the size of a round
 PROPOSE_WINDOW = 3600  # a round waits this long, from its first proposal, for more
+# ... and this long if all its proposals are one agent's: in Erdős #902, once the first rounds had taken everyone's
+# proposals, the agents were busy on pieces, one agent proposed a line per goal, and an hour later three rounds of
+# one line each were launched, with nothing to do in parallel.
+LONE_WINDOW = 3 * 3600
+NEXT_LINES = "next_lines.json"  # what a round's synthesis proposes for the next round (see propose_next)
 MAX_ROUND_LINES = 6
 LINE_WAIT = 12 * 3600  # a round's line nobody took in this long no longer holds the next round back
 RELAUNCH = -1  # cycle_work launched a round: claim looks again, its pieces are open now
@@ -121,10 +126,17 @@ def due(st: S.State, goal: str, now: float) -> list[dict] | None:
             or any(now - t.ts < LINE_WAIT for t in free_lines(st, goal, now))):
         return None
     size, active = round_size(st, now), active_agents(st, now)
-    enough = len(props) >= size and len({p["ev"]["author"] for p in props}) >= min(2, max(1, len(active)))
-    if not enough and now - min(p["ev"]["ts"] for p in props) < PROPOSE_WINDOW:
+    authors = len({p["ev"]["author"] for p in props})
+    enough = len(props) >= size and authors >= min(2, max(1, len(active)))
+    waited = now - min(p["ev"]["ts"] for p in props)
+    if not enough and (waited < PROPOSE_WINDOW or authors < 2 and len(active) > 1 and waited < LONE_WINDOW):
         return None
     return select(st, goal, props, size)
+
+
+def wanted(st: S.State, goal: str, now: float) -> int:
+    """How many more lines the goal's next round would take: what a full round holds, less what's proposed."""
+    return max(0, round_size(st, now) - len(st.open_lines(goal)))
 
 
 def line_key(p: dict) -> str:
@@ -152,8 +164,12 @@ def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
                      "each on a front of its own where it could. A line that fails cleanly, and says why, moves "
                      "the map as much as one that succeeds." + (f"\n{words[:3000]}" if words else "")),
             "common": map_text(st, parent, 14000),
-            "synthesis": "Say which fronts this round closed and which it opened, and name the one or two lines the "
-                         "next round should hold: its agents propose them (`python -m legion line propose`).",
+            "synthesis": ("Say which fronts this round closed and which it opened. Then propose the next round's "
+                          f"lines: write {NEXT_LINES} in the synthesis's folder, a JSON list of one to three lines, "
+                          "each an object with front, method, title, text, learn (and differs, on a front that has "
+                          "lines already), as `python -m legion help research` describes a line. On submit they are "
+                          "proposed for the next round, as yours; whatever the rules refuse is said, and the patch "
+                          "goes in all the same."),
             "lines": lines}
 
 
@@ -472,6 +488,8 @@ def lift(c: Ctx, t: S.Task) -> int:
     findings, a check's verdicts on them. How many events it recorded. Never the reason a submit fails."""
     role = t.attack.get("role")
     parent = c.st.tasks.get(t.parent)
+    if role == "synthesis" and parent is not None and t.zone:
+        return propose_next(c, parent, t.zone[0].rstrip("/"))
     if role not in ("line", "check") or parent is None or not t.zone:
         return 0
     n, d = 0, t.zone[0].rstrip("/")
@@ -514,6 +532,46 @@ def lift(c: Ctx, t: S.Task) -> int:
         print(f"legion: the map of {parent.key} didn't take all of it ({e}); the patch is submitted all the same.",
               flush=True)
     return n
+
+
+def propose_next(c: Ctx, goal: S.Task, d: str) -> int:
+    """The lines a round's synthesis proposes for the next round (NEXT_LINES in its folder), as its agent's own.
+    How many went in. Its agent knows the round best: in Erdős #902 the syntheses named next steps that nobody
+    proposed, and the next rounds were made of one line each."""
+    if goal.id not in c.st.goals:
+        return 0
+    rows = _load(c.repo, f"{d}/{NEXT_LINES}")
+    if not isinstance(rows, list):
+        return 0
+    n = 0
+    for x in rows[:S.MAX_PROPOSALS]:
+        if not isinstance(x, dict):
+            continue
+        try:
+            c.emit("line.proposed", task=goal.id, front=str(x.get("front", "")), method=str(x.get("method", "")),
+                   move=x.get("move") if x.get("move") in S.MOVES else move_for(c.st, goal.id, c.ident.name),
+                   title=str(x.get("title", "")).strip(), text=str(x.get("text", "")).strip(),
+                   learn=str(x.get("learn", "")).strip(),
+                   **({"differs": str(x["differs"]).strip()} if x.get("differs") else {}))
+            n += 1
+        except Fail as e:
+            print(f"legion: a line of {d}/{NEXT_LINES} wasn't proposed: {e}", flush=True)
+    return n
+
+
+def ask_for_line(c: Ctx, t: S.Task, now: float) -> str:
+    """After a round's line or check is submitted: if the goal's next round would take more lines, and its agent
+    has none waiting there, the ask to propose one now, when it knows that front best. "" otherwise."""
+    goal = c.st.tasks.get(t.parent)
+    if goal is None or goal.id not in c.st.goals or c.st.spent(goal.id) or t.attack.get("role") not in ("line", "check"):
+        return ""
+    if any(x["ev"]["author"] == c.me for x in c.st.open_lines(goal.id)) or not wanted(c.st, goal.id, now):
+        return ""
+    move = move_for(c.st, goal.id, c.ident.name)
+    return (f"The next round of {goal.key} has {len(c.st.open_lines(goal.id))} line(s) proposed and would take "
+            f"{wanted(c.st, goal.id, now)} more. You know this front best right now: propose one, with the move "
+            f"{move} ({MOVE_TEXT[move]}). `python -m legion line propose {goal.key} --front F --method M --title "
+            f"\"...\" --file FILE --learn \"...\"` (`help research`). The map: `python -m legion map {goal.key}`.")
 
 
 # --- the commands ----------------------------------------------------------------------------------------------------
