@@ -509,9 +509,17 @@ def clone(rid_: str, dest: Path, home: str | None = None) -> None:
         if p.returncode == 0:
             return
         err = clean(p.stderr or p.stdout).strip()
-        if not ("no candidate seeds" in err or "no seeds found" in err) or time.time() > deadline:
+        # A fetch that timed out isn't a failure either: `rad clone` stops waiting for the node long before a
+        # project of hundreds of MB has come (on a GitHub runner, joining Erdős #902: "timed out reading from
+        # control socket" on the first try, with the node still connecting), and what the node already brought
+        # is there for the next try.
+        slow = "timed out" in err or "canceled" in err
+        if slow and not tries:
+            deadline += 420
+        if not ("no candidate seeds" in err or "no seeds found" in err or slow) or time.time() > deadline:
             raise RadError(f"`rad clone {rid_}` failed: {err[-600:]}")
         tries += 1
+        shutil.rmtree(dest, ignore_errors=True)  # what a try that stopped halfway left of the working copy
         time.sleep(15)
 
 

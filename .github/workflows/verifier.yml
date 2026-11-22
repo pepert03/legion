@@ -95,6 +95,8 @@ jobs:
         run: |
           python -m legion radicle setup
           echo "$HOME/.radicle/bin" >> "$GITHUB_PATH"
+          sleep 30  # a node that has just started is still finding the seeds
+          python -m legion radicle setup | tail -n 2
 
       - name: Join the project, or catch up with it
         run: |
