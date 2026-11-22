@@ -17,8 +17,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "7,27,47 * * * *"
-  push:
-    branches: [verifier]
 
 concurrency:
   group: legion-verifier
@@ -117,6 +115,8 @@ jobs:
             python -m legion join "$LEGION_PROJECT" "$CLONE" --identity "$LEGION_ID" --no-viz
           fi
           cd "$CLONE"
+          # A runner has another address every run, and nobody connects to it: it doesn't announce one.
+          git config legion.tunnel off
           python -m legion status | tail -n 12
 
       - name: Lean
