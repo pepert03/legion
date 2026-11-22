@@ -198,6 +198,16 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
             row.update(state=st.status(piece.id, now), round=piece.attack.get("round"), piece=piece.key,
                        piece_id=piece.id)
             row["worker"], row["worker_agent"] = who(piece)
+            # What was done on it, whoever holds it now: a line let go of with work saved isn't one nobody touched.
+            saves, tried = st.saved.get(piece.id, []), [a for a in st.attempts if a.get("task") == piece.id]
+            took = {c.name: c.ts for c in st.claims.get(piece.id, ())}
+            row["hands"] = sorted(set(took) | {w["name"] for w in saves})
+            row["saves"] = [{"name": w["name"], "agent": agent(w["author"]), "notes": w["notes"][:600], "ts": w["ts"]}
+                            for w in saves[-6:]]
+            row["reports"] = [{"name": a["name"], "agent": agent(a["author"]), "outcome": a.get("outcome"),
+                               "notes": a.get("notes", "")[:600], "ts": a["ts"]} for a in tried[-6:]]
+            row["n_saves"], row["n_reports"] = len(saves), len(tried)
+            row["active"] = max([row["ts"], *took.values(), *(w["ts"] for w in saves), *(a["ts"] for a in tried)])
             if ck is not None:
                 row["check"] = st.status(ck.id, now)
                 row["checker"], row["checker_agent"] = who(ck)

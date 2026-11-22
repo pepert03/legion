@@ -202,6 +202,13 @@
   .links { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
   .links li { display: flex; align-items: center; gap: 6px; padding: 3px 0; flex-wrap: wrap; }
   .links li i { color: var(--ink3); }
+  .lc .act { font-size: 12px; font-style: italic; color: var(--ink3); margin-top: 3px; }
+  .now { list-style: none; margin: 0; padding: 0; }
+  .now li { padding: 6px 0; border-bottom: 1px solid #efebe3; cursor: pointer; font-size: 13.5px; }
+  .now li > div:first-child { display: flex; align-items: center; gap: 8px; }
+  .now .on { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--claimed); }
+  .now .when { margin-left: auto; font-style: italic; color: var(--ink3); font-size: 12px; white-space: nowrap; }
+  .now .what { color: var(--ink2); font-size: 12.5px; line-height: 1.35; overflow-wrap: anywhere; margin-top: 2px; }
   .mv-empty { font-style: italic; color: var(--ink2); max-width: 620px; margin-top: 30px; line-height: 1.5; }
   @media (max-width: 980px) { .mv-body { grid-template-columns: 1fr; } .mv-head { grid-template-columns: 1fr; } }
   @media (max-width: 640px) { #mapView { inset: 104px 0 64px 0; padding: 0 16px 10px; } .icon-btn.second { right: 58px; } }
@@ -1000,6 +1007,7 @@ function viewAbout(g) {
 let mapMode = false, mapSel = null, mapAuto = false, mapSig = "";
 const maps = () => (data && data.research && data.research.maps) || [];
 const agentById = (id) => (data ? data.agents.find((a) => a.id === id) : null);
+const lineState = (l) => (l.state === "open" && (l.n_saves || l.n_reports) ? "work saved, nobody on it now" : LINE_STATE[l.state] || l.state);
 const LINE_STATE = { proposed: "proposed", open: "nobody on it", claimed: "being explored", review: "in review",
                      accepted: "reported", blocked: "blocked", cancelled: "cancelled", sketched: "split", refuted: "refuted" };
 const LINE_COLOR = { proposed: "claimed", open: "open", claimed: "claimed", review: "review", accepted: "accepted",
@@ -1032,9 +1040,12 @@ function lineCard(l, m) {
        whoNode(l.checker_agent, l.checker, l.check === "accepted" ? "checked" : "no checker yet")];
   return h("div", { class: `lc ${l.state === "proposed" ? "proposed" : ""}`, style: `--c:${c}`,
                     onclick: () => openPop("line", `${m.id}|${l.id}`) },
-    h("div", { class: "top" }, h("span", {}, l.move || l.method), h("span", { class: "st" }, LINE_STATE[l.state] || l.state)),
+    h("div", { class: "top" }, h("span", {}, l.move || l.method), h("span", { class: "st" }, lineState(l))),
     h("div", { class: "tt" }, l.title.replace(/^r\d+ line [^:]+: /, "")),
     h("div", { class: "pair" }, ...pair.filter(Boolean)),
+    l.n_saves || l.n_reports ? h("div", { class: "act" },
+      [l.n_saves ? `${l.n_saves} save${l.n_saves > 1 ? "s" : ""}` : null, l.n_reports ? `${l.n_reports} report${l.n_reports > 1 ? "s" : ""}` : null,
+       l.hands && l.hands.length > 1 ? `${l.hands.length} agents` : null, l.active ? `last ${ago(l.active)}` : null].filter(Boolean).join(" · ")) : null,
     fs.length ? h("div", { class: "dots" }, ...fs.map((f) => h("span", { class: `fd ${fdClass(f)}`, title: fdTitle(f) }))) : null);
 }
 function ledger(fs, empty) {
@@ -1048,7 +1059,7 @@ function renderMap(force = true) {
   const el = $("mapView"), ms = maps();
   if (!mapMode) return;
   // Drawn again only when what it shows changed: the page reads the state every few seconds.
-  const sig = JSON.stringify([data.research, data.agents.map((a) => a.id), Object.keys(logos).filter((k) => logos[k])]);
+  const sig = JSON.stringify([data.research, data.agents.map((a) => [a.id, a.last_ts, a.holds]), Object.keys(logos).filter((k) => logos[k])]);
   if (!force && sig === mapSig) return;
   mapSig = sig;
   const pulse = (data.research && data.research.pulse) || { fresh: 0, looks: 0 };
@@ -1099,7 +1110,15 @@ function renderMap(force = true) {
           .map((l) => lineCard(l, m))))]));
   const real = m.findings.filter((f) => f.status !== "dead end");
   const links = ((data.research && data.research.links) || []).slice(0, 14);
+  const nowTs = data.live ? Date.now() / 1000 : data.ts;
+  const busy = data.agents.filter((a) => !a.gone && nowTs - a.last_ts < 6 * 3600).sort((a, b2) => b2.last_ts - a.last_ts).slice(0, 12);
   const side = h("aside", { class: "mv-side" },
+    h("h3", {}, "Right now"),
+    busy.length ? h("ul", { class: "now" }, ...busy.map((a) => h("li", { onclick: () => openPop("item", a.id) },
+        h("div", {}, whoNode(a.id, a.name), a.holds.length && !a.silent ? h("span", { class: "on" }, "at work") : null,
+          h("span", { class: "when" }, ago(a.last_ts))),
+        h("div", { class: "what" }, doing(a, true) || "", doing(a, true) && a.last ? " · " : "", (a.last || "").slice(0, 170)))))
+      : h("p", { class: "empty" }, "No agent has published anything in the last six hours."),
     h("h3", {}, "Methods tried on this goal"),
     h("div", { class: "mv-methods" }, ...["construct", "random", "compute", "structure", "barrier", "transfer", "reduce"].map((k) =>
       h("span", { class: m.methods[k] ? "used" : "", title: m.methods[k] ? `${m.methods[k]} line(s)` : "nobody has run a line by this method" },
@@ -1138,7 +1157,13 @@ function viewLine(ref) {
     l.learn ? [h("h2", { class: "caps" }, "If it fails, we learn"), h("p", { class: "desc" }, l.learn)] : null,
     l.differs ? [h("h2", { class: "caps" }, "How it differs from the front's earlier lines"), h("p", { class: "desc" }, l.differs)] : null,
     h("h2", { class: "caps" }, `What it found (${fs.length})`),
-    ledger(fs, l.state === "proposed" ? "Not run yet." : "Nothing reported yet."),
+    ledger(fs, l.state === "proposed" ? "Not run yet." : "Nothing on the map yet: a line's claims land here when its agent submits its report."),
+    (l.saves || []).length || (l.reports || []).length ? [
+      h("h2", { class: "caps" }, `Work on it (${l.n_saves} saves, ${l.n_reports} reports)`),
+      h("ul", { class: "events" }, ...[...(l.saves || []).map((x) => ({ ...x, what: "saved work" })),
+                                       ...(l.reports || []).map((x) => ({ ...x, what: `reported ${x.outcome || ""}` }))]
+        .sort((a, b2) => b2.ts - a.ts).map((x) => h("li", {}, whoNode(x.agent, x.name), ` ${x.what}: `, x.notes || "",
+          h("span", { class: "when" }, ago(x.ts)))))] : null,
   ];
 }
 function toggleMap(on) {
