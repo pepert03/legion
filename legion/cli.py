@@ -741,29 +741,38 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me)) | c.st.barred(c.me) | c.st.stale(c.me)
                 fresh = lambda ts: sorted((t for t in ts if t.id not in cool and not research.lacking(t)),  # noqa: E731
                                           key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
-                return (fresh(c.st.claimable(now)), fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
-                        or fresh(c.st.competitive_for(c.me)))
+                free = fresh(c.st.claimable(now))
+                # A task under a research goal that isn't a piece of its rounds is one of the whole tasks the goal
+                # had before it was one (in Erdős #902: "an explicit family on C n 2^n vertices", the open problem
+                # itself). Handed out first, an agent new to the project was given four of them in a row, let each
+                # go in a minute, and only then was asked for a line. They come after what the goal asks for.
+                later = [t for t in free if not t.attack and c.st.goal_of(t.id)]
+                return ([t for t in free if not any(t is x for x in later)],
+                        fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
+                        or fresh(c.st.competitive_for(c.me)), later)
             # A round due on a research goal is launched first: its lines are among the free tasks then.
             if c.st.goals and research.launch_due(c, now):
                 now = time.time()
-            free, helped = options()
+            free, helped, later = options()
             # No task free: a concrete question on one is worth more than joining a stuck task once again.
             work = None if free or c.st.exclusive_done() else research_work(c, args, now)
             if work == research.RELAUNCH:
                 return claim(c, args, last)
             if work is not None:
                 return work
+            free = free or later  # the goals ask nothing of this agent now: their old whole tasks, then
             deadline = now + (args.wait or 0) * 60
             while not free and not helped and not c.st.exclusive_done() and time.time() < deadline:
                 time.sleep(min(15, max(1, deadline - time.time())))  # someone may release, or a dependency land
                 c.sync()
                 now = time.time()
-                free, helped = options()
+                free, helped, later = options()
                 work = None if free else research_work(c, args, now)
                 if work == research.RELAUNCH:
                     return claim(c, args, last)
                 if work is not None:
                     return work
+                free = free or later
             if not free and helped and helped[0].mode == "competitive":
                 d = task_dict(c.st, helped[0], now)  # not claimed: anyone may compete, the best result wins
                 best = "no result yet: any valid one is the first best" if d["best"] is None else f"best so far {d['best']:g}"

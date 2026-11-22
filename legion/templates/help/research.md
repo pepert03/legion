@@ -30,7 +30,8 @@ python -m legion line propose <task> --front sat-small-n --method compute --titl
 ```
 
 A line is **one agent's work for one session with a definite deliverable**: something decided, proved,
-computed or refuted. Not "explore X".
+computed or refuted. Not "explore X". Its text is at most 2500 characters; `--learn`, `--differs`, a finding's
+statement and a verdict's reason, 800 each. Longer is refused: write short.
 
 - **Front**: the direction it belongs to, a short key. An existing front or a new one.
 - **Method**: construct, random, compute, structure, barrier, transfer, reduce, other.

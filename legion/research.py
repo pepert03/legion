@@ -55,7 +55,14 @@ MOVE_TEXT = {
 def move_for(st: S.State, goal: str, name: str) -> str:
     """The move an agent is handed for the goal's next round: a different one for each, the same on every node,
     and another one next round. Once rounds stop confirming anything, only the moves that change the question."""
-    moves = S.REFRAME if st.dry(goal) >= S.DRY_REFRAME else S.MOVES
+    moves = list(S.REFRAME if st.dry(goal) >= S.DRY_REFRAME else S.MOVES)
+    # extend and recombine build on findings that stand: where none does yet (a map just seeded, every finding
+    # still its author's word), an agent handed recombine had nothing confirmed to combine.
+    stand = [f for f in st.findings_for(goal) if st.finding_state(f) == "confirmed" and f["ev"]["status"] != "dead end"]
+    if not stand:
+        moves.remove("extend") if "extend" in moves else None
+    if len({f["front"] for f in stand}) < 2 and "recombine" in moves:
+        moves.remove("recombine")
     n = len(st.research_rounds(goal))
     return moves[int(hashlib.sha256(f"{name}|{goal}|{n}".encode()).hexdigest(), 16) % len(moves)]
 
@@ -337,9 +344,9 @@ def propose_text(st: S.State, t: S.Task, name: str, mine: int) -> str:
             "  --front    its direction: one of the fronts above, or a new one (a short key, like sat-small-n)\n"
             f"  --method   one of {', '.join(S.METHODS)}\n"
             "  --title, --file FILE   exactly what to do, what to read first, what counts as a result, and where "
-            "you expect it to get hard\n"
+            f"you expect it to get hard (the file: at most {S.MAX_LINE} characters; longer is refused)\n"
             "  --learn    what the project learns if it FAILS: a line that teaches nothing when it fails isn't "
-            "worth a round\n"
+            f"worth a round (at most {S.MAX_FINDING} characters, as --differs)\n"
             "  --differs  on a front that has lines already: what yours does that they didn't (required there)\n"
             "  --needs    programs its work takes (lake, kissat...), so it goes to a machine that has them\n"
             "  --from     ids of the findings it builds on\n"
@@ -375,7 +382,8 @@ def judge_text(st: S.State, f: dict) -> str:
             "  refuted         with the concrete error, the counterexample, or what it overstates\n"
             "  \"not verified\"  you couldn't settle it (a tool this machine lacks, a proof you can't follow): say "
             "what stopped you; it goes to another agent\n"
-            f"`python -m legion finding judge {ev['id'][:8]} <verdict> --reason \"what you checked and found\"`\n")
+            f"`python -m legion finding judge {ev['id'][:8]} <verdict> --reason \"what you checked and found\"` "
+            f"(the reason: at most {S.MAX_FINDING} characters)\n")
 
 
 def line_row(x: dict, width: int = 240) -> str:
@@ -601,7 +609,13 @@ def cmd_finding(args):
             raise Fail(f"`finding judge <id> <{'|'.join(S.VERDICTS)}> --reason \"what you checked yourself\"`", 2)
         c.emit("finding.judged", task=f["task"], finding=f["ev"]["id"], verdict=args.verdict, reason=args.reason.strip())
         c.sync()
-        print(f"Your verdict on {f['ev']['id'][:8]}: {args.verdict}. It is now {c.st.finding_state(f)}.")
+        f = c.st.findings[f["ev"]["id"]]  # as it is with this verdict on it
+        state = c.st.finding_state(f)
+        print(f"Your verdict on {f['ev']['id'][:8]}: {args.verdict}. The finding is now {state}"
+              + (": it stands on the map, confirmed by another owner's agent." if state == "confirmed" and c.st.independent(f)
+                 else ": it stands on the map; an agent of another owner than its author's is still asked for its say."
+                 if state == "confirmed" else ": it goes to another agent." if state == "unchecked"
+                 else ": two agents disagree, and more are asked." if state == "contested" else "."))
         return 0
     t = c.task(args.ref)
     statement = (args.verdict or "").strip() or _text(args)  # the second positional is the statement here

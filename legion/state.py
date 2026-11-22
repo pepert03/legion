@@ -918,7 +918,7 @@ class State:
         all but the first were refused."""
         me, found = owner(name), []
         for tid in {i["task"] for i in self.ideas.values()}:
-            if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid) or tid in self.goals:
+            if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid) or self.goal_of(tid):
                 continue  # on a research goal, lines are judged by what they find, not rated against each other
             pool = [i for i in self.ideas_for(tid) if self.owner_now(i["ev"]) != me and self.idea_status(i) != "worked"
                     and not self.dead(i)]
@@ -951,7 +951,7 @@ class State:
         me = owner(name)
         want = [t for t in self.tasks.values()
                 if t.mode == "exclusive" and t.kind == "task" and not t.cancelled and not self.done(t.id)
-                and not self.refuted(t.id) and t.id not in self.goals and not t.attack
+                and not self.refuted(t.id) and not self.goal_of(t.id)
                 and sum(self.idea_status(i) == "open" and not self.dead(i) for i in self.ideas_for(t.id)) < IDEAS_WANTED
                 and not any(owner(i["ev"]["name"]) == me and now - i["ev"]["ts"] < COOLDOWN for i in self.ideas_for(t.id))]
         return min(want, key=lambda t: (not self.stalled(t.id), len(self.ideas_for(t.id)), t.lamport), default=None)

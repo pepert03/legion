@@ -34,6 +34,14 @@ def repo_root() -> Path:
 def need_identity(repo=None) -> Identity:
     ident = Identity.load(repo=repo)
     if not ident:
+        from .identity import bound_id, identities_dir
+        bound = bound_id(repo) if repo is not None else None
+        if bound:
+            # Told only "you have no identity: ... id new", an agent would have made itself a second one, another
+            # key under the same name: its clone was bound to one kept in another legion home.
+            raise Fail(f"this clone works as the identity {bound}, but its file isn't in {identities_dir()}: it was "
+                       "made with another legion home. Set LEGION_HOME to the one that holds it and run the command "
+                       "again. Don't make a new identity for it: that would be another agent, not this one.")
         raise Fail("you have no identity: python -m legion id new --name YOUR_NAME")
     return ident
 

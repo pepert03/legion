@@ -444,3 +444,30 @@ def test_a_rejection_read_off_a_merge_counts_only_on_the_main_it_was_judged_on()
                                                    branch="legion/p/z")["id"], code="tests", reason="fails")  # no base
     st = log.state()
     assert st.patches[q["id"]].verdict == "rejected" and [x.verdict for x in st.patches.values()].count("rejected") == 2
+
+
+def test_a_goals_old_whole_tasks_are_handed_out_after_what_the_goal_asks_for(tmp_path, monkeypatch, capsys):
+    """A task under a research goal that isn't a piece of its rounds comes after the goal's own work: an agent
+    is asked for a line first, and gets the whole subtask only once the goal asks nothing more of it."""
+    from legion.cli import main
+    from legion.ctx import Ctx
+    from test_queue import as_, git, make_project
+    repo, tids, _ = make_project(tmp_path, monkeypatch)
+    boss = make_project.people["boss"]
+    for k in tids.values():
+        q = make_project.add(boss, "patch.submitted", task=k, commit=git(repo, "rev-parse", "HEAD"), branch="legion/x")
+        make_project.add(boss, "patch.accepted", patch=q["id"])
+    fid = S.task_id(make_project.add(boss, "task.created", key="f", title="F", zone=["research/"],
+                                     accept="python check.py a"))
+    make_project.add(boss, "task.created", key="f/old", title="The open problem, whole", zone=["research/old.txt"],
+                     accept="python check.py a", parent=fid, split=True)
+    as_(repo, "luis")
+    assert main(["goal", "f"]) == 0
+    capsys.readouterr()
+    assert main(["claim"]) == 7 and "Propose ONE line" in capsys.readouterr().out
+    assert main(["line", "propose", "f", "--front", "sat", "--method", "compute", "--title", "Decide n = 4",
+                 "--text", "Encode n = 4 as CNF and decide it.", "--learn", "whether it is in reach"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(S.State, "needs_brief", lambda self, *a, **k: None)
+    assert main(["claim"]) == 0  # the goal asks nothing more of luis for now: the old whole task, then
+    assert Ctx(sync=False).st.held_by(make_project.people["luis"].author, time.time())[0].key == "f/old"
