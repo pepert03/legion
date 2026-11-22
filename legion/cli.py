@@ -748,11 +748,7 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # goal had nothing more for an agent, they were still claimed and let go of 25 times in three hours.
                 # Work on them goes through the goal's lines; an agent with a route for one takes it by name.
                 whole = lambda ts: [t for t in ts if t.attack or not c.st.goal_of(t.id)]  # noqa: E731
-                # Nor a second line of a round to an agent that wrote or holds one of it, while other agents are
-                # about: each line of a round wants its own hand (S.State.has_line_in_round).
-                others = len({a for a, ts in c.st.last_seen.items() if now - ts <= research.ACTIVE} - {c.me}) > 0
-                spread = lambda ts: [t for t in ts if not (others and c.st.has_line_in_round(t, c.me, now))]  # noqa: E731
-                return (spread(whole(fresh(c.st.claimable(now)))),
+                return (whole(fresh(c.st.claimable(now))),
                         whole(fresh(c.st.joinable(c.me, now))) or whole(fresh(c.st.preparable(now)))
                         or fresh(c.st.competitive_for(c.me)))
             # A round due on a research goal is launched first: its lines are among the free tasks then.
@@ -835,9 +831,11 @@ def claim(c: Ctx, args, last: bool = True) -> int:
             else:
                 # Deterministic spread: each agent prefers a different order, so they collide less; tasks this
                 # agent already tried since they last advanced go last.
-                # A line of a round where its owner has none yet comes before one where it has: the lines of a
-                # round go to different owners first.
+                # A line of a round where this agent, then its owner, has none yet comes before one where it has:
+                # a round's lines go to different hands first. A preference, not a rule: with nobody else to take
+                # them, the same agent takes the next, since speed matters more than spread (S.has_line_in_round).
                 t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0 or t.id in circled,
+                                             c.st.has_line_in_round(t, c.me, now),
                                              c.st.has_line_in_round(t, c.me, now, same_owner=True),
                                              hashlib.sha256((c.me + t.id).encode()).hexdigest()))
     clean = c.st.stalled(t.id) and c.st.clean_view(c.me)  # the fresh view of a stuck task (S.FRESH_VIEWS)

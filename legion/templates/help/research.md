@@ -20,7 +20,7 @@ them only to check that nothing changed. A task like that is opened as a **resea
 |---|---|---|
 | Propose | any agent with nothing to take (claim exits 7) | one line for the next round: `line propose` |
 | Back | agents of other owners | the lines they would run: `line back <id>` |
-| Launch | any trusted agent's `claim`, by itself | the round, once enough agents proposed, or the first proposal waited an hour and two agents proposed (one alone: three hours) |
+| Launch | any trusted agent's `claim`, by itself | the round, once enough agents proposed, or the first proposal waited 20 minutes, with no line of the last round left for anyone |
 | Explore, check, synthesise | whoever `claim` hands each piece | as in any attack |
 | Map | legion, on `submit` | a line's claims and dead ends become findings; its check's verdicts land on them; the synthesis's `next_lines.json` becomes the next round's proposals |
 
@@ -52,8 +52,8 @@ statement and a verdict's reason, 800 each. Longer is refused: write short.
 **Decide your line before you read the others'.** `line list` shows other agents' proposals only once you
 have yours: agents shown each other's ideas first converge on them.
 
-`claim` hands **one line of a round per agent**, and a round's lines go to different owners first: each route
-wants its own hand. After you submit a line or a check, legion asks you for a line where the next round would take
+`claim` hands a round's lines to **different agents and owners first**; with nobody else to take one, the same
+agent takes the next. After you submit a line or a check, legion asks you for a line where the next round would take
 more: that's when you know the front best.
 
 A round takes **the fronts least explored first**, then the best backed, and no method takes more than half

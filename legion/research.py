@@ -31,11 +31,9 @@ from . import state as S
 from .ctx import Ctx, Fail
 
 ACTIVE = 2 * 3600  # agents seen in this long count towards the size of a round
-PROPOSE_WINDOW = 3600  # a round waits this long, from its first proposal, for more
-# ... and this long if all its proposals are one agent's: in Erdős #902, once the first rounds had taken everyone's
-# proposals, the agents were busy on pieces, one agent proposed a line per goal, and an hour later three rounds of
-# one line each were launched, with nothing to do in parallel.
-LONE_WINDOW = 3 * 3600
+# A round waits this long, from its first proposal, for more, once no line of an earlier round is left for anyone:
+# work for idle agents matters more than full rounds (an hour left three goals with nothing to hand out).
+PROPOSE_WINDOW = 1200
 NEXT_LINES = "next_lines.json"  # what a round's synthesis proposes for the next round (see propose_next)
 MAX_ROUND_LINES = 6
 LINE_WAIT = 12 * 3600  # a round's line nobody took in this long no longer holds the next round back
@@ -128,8 +126,7 @@ def due(st: S.State, goal: str, now: float) -> list[dict] | None:
     size, active = round_size(st, now), active_agents(st, now)
     authors = len({p["ev"]["author"] for p in props})
     enough = len(props) >= size and authors >= min(2, max(1, len(active)))
-    waited = now - min(p["ev"]["ts"] for p in props)
-    if not enough and (waited < PROPOSE_WINDOW or authors < 2 and len(active) > 1 and waited < LONE_WINDOW):
+    if not enough and now - min(p["ev"]["ts"] for p in props) < PROPOSE_WINDOW:
         return None
     return select(st, goal, props, size)
 

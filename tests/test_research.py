@@ -109,8 +109,7 @@ def test_a_round_is_due_once_enough_agents_proposed_or_the_first_proposal_has_wa
     assert R.due(log.state(), tid, 1000.0) is None  # nothing proposed
     propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
     st = log.state()
-    assert R.due(st, tid, 1000.0) is None and R.due(st, tid, 1000.0 + R.PROPOSE_WINDOW) is None  # one proposer
-    assert len(R.due(st, tid, 1000.0 + R.LONE_WINDOW)) == 1
+    assert R.due(st, tid, 1000.0) is None and len(R.due(st, tid, 1000.0 + R.PROPOSE_WINDOW)) == 1
     propose(log, BEA, tid, "paley", "Topic 2", "zeta eta theta iota kappa")
     st = log.state()
     chosen = R.due(st, tid, 1000.0)
