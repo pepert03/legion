@@ -1,0 +1,156 @@
+name: legion verifier
+
+# A node that only verifies, for a project whose own machines aren't always on. Every run it joins the project
+# named in this repository's variable LEGION_PROJECT (a Radicle id, rad:...), or catches up with it, checks the
+# patches waiting for a verdict exactly as any agent's `python -m legion verify` does, signs what it found, and
+# leaves. In Erdős #902 the only machine with Lean that could verify another owner's patches was a laptop.
+#
+# It needs, set once in the repository (Settings > Secrets and variables > Actions):
+#   secret   LEGION_IDENTITY  the verifier's legion identity: its file in ~/.legion/identities, whole
+#   secret   RAD_PROFILE      its Radicle node's keys and config: `tar -cz keys config.json | base64`, from a RAD_HOME
+#   variable LEGION_PROJECT   the project's Radicle id
+#   variable LEGION_SETUP     optional: the project's one-time setup in a clone (`python check.py --setup`)
+# Its verifications count once the project trusts it: an owner vouches for it as a subagent
+# (`python -m legion delegate <its name>`), or it earns it like any agent.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7,27,47 * * * *"
+  push:
+    branches: [verifier]
+
+concurrency:
+  group: legion-verifier
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: vars.LEGION_PROJECT != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      LEGION_PROJECT: ${{ vars.LEGION_PROJECT }}
+      LEGION_SETUP: ${{ vars.LEGION_SETUP }}
+      LEGION_AGENT: github-actions
+      LEGION_VERIFY_INLINE: "1"
+      CLONE: /home/runner/project
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install this legion
+        run: python -m pip install -q .
+
+      # Never in a cache: a pull request's workflow can read the caches of the branch it targets.
+      - name: Keys
+        env:
+          LEGION_IDENTITY: ${{ secrets.LEGION_IDENTITY }}
+          RAD_PROFILE: ${{ secrets.RAD_PROFILE }}
+        run: |
+          set -eu
+          if [ -z "$LEGION_IDENTITY" ] || [ -z "$RAD_PROFILE" ]; then
+            echo "::error::set the secrets LEGION_IDENTITY and RAD_PROFILE (see the top of this file)"; exit 1
+          fi
+          mkdir -p ~/.radicle ~/.legion/identities
+          printf '%s' "$RAD_PROFILE" | base64 -d | tar -xz -C ~/.radicle
+          chmod 700 ~/.radicle/keys && chmod 600 ~/.radicle/keys/radicle
+          umask 077
+          printf '%s' "$LEGION_IDENTITY" > ~/.legion/incoming.json
+          python - <<'EOF'
+          import os
+          from pathlib import Path
+          from legion.identity import Identity
+          src = Path.home() / ".legion" / "incoming.json"
+          ident = Identity.load(src)
+          ident.save()
+          src.unlink()
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"LEGION_ID={ident.key_id}\n")
+          print(f"verifying as {ident.name} ({ident.short})")
+          EOF
+
+      # The project's clone, the node's storage and Lean are what takes minutes to get: kept between runs, a new
+      # copy four times a day.
+      - name: Cache slot
+        id: slot
+        run: echo "slot=$(date -u +%Y%m%d)-$(( $(date -u +%-H) / 6 ))" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.radicle/storage
+            ~/project
+            ~/.elan
+          key: legion-verifier-${{ steps.slot.outputs.slot }}
+          restore-keys: legion-verifier-
+
+      - name: Radicle
+        run: |
+          python -m legion radicle setup
+          echo "$HOME/.radicle/bin" >> "$GITHUB_PATH"
+
+      - name: Join the project, or catch up with it
+        run: |
+          set -eu
+          if [ -d "$CLONE/.git" ]; then
+            cd "$CLONE"
+            # The storage is as old as its cache: bring this node's signed refs to where the seeds have them.
+            python -m legion heal || true
+          else
+            python -m legion join "$LEGION_PROJECT" "$CLONE" --identity "$LEGION_ID" --no-viz
+          fi
+          cd "$CLONE"
+          python -m legion status | tail -n 12
+
+      - name: Lean
+        run: |
+          set -eu
+          cd "$CLONE"
+          if [ -f lean-toolchain ]; then
+            if [ ! -x "$HOME/.elan/bin/elan" ]; then
+              curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+            fi
+            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.elan/bin:$PATH"
+          fi
+          if [ -n "$LEGION_SETUP" ]; then $LEGION_SETUP; fi
+
+      - name: Verify what waits
+        run: |
+          cd "$CLONE"
+          python - <<'EOF'
+          import json
+          import subprocess
+          import sys
+          import time
+
+          end, done = time.time() + 30 * 60, 0
+          while time.time() < end:
+              p = subprocess.run([sys.executable, "-m", "legion", "verify", "--json", "--timeout", "1500"],
+                                 capture_output=True, text=True)
+              print(p.stdout[-4000:], p.stderr[-4000:], sep="\n", flush=True)
+              last = {}
+              for line in p.stdout.splitlines():
+                  try:
+                      last = json.loads(line) if line.startswith("{") else last
+                  except ValueError:
+                      pass
+              if p.returncode or not last.get("verified"):
+                  break
+              done += 1
+          print(f"verified {done} patch(es) in this run")
+          EOF
+
+      - name: What it left
+        if: always()
+        run: |
+          cd "$CLONE" 2>/dev/null || exit 0
+          python -m legion relay | tail -n 8 || true
+          python -m legion log --no-sync | tail -n 6 || true
