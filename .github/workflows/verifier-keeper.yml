@@ -1,0 +1,46 @@
+name: legion verifier keeper
+
+# Starts the next run of the verifier (verifier.yml) whenever one ends, however it ended. The verifier used to start
+# its successor itself, as its last step; on 22 Nov 2026 GitHub ended a run with "an internal error" fifteen minutes
+# in, the last step never ran, and the chain stopped. This workflow runs on the end of every verifier run instead,
+# whatever ended it. It starts nothing while a verifier run is queued or running, and after a run that lasted less
+# than LEGION_VERIFIER_GAP seconds (20 minutes unless the variable says otherwise) it waits until that much has
+# passed since the run started, so a broken setup is tried three times an hour, not without pause.
+# LEGION_VERIFIER=off stops both.
+
+on:
+  workflow_run:
+    workflows: ["legion verifier"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  keep:
+    if: vars.LEGION_VERIFIER != 'off' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STARTED: ${{ github.event.workflow_run.run_started_at }}
+      ENDED: ${{ github.event.workflow_run.conclusion }}
+      GAP: ${{ vars.LEGION_VERIFIER_GAP || '1200' }}
+    steps:
+      - name: Start the next verifier run
+        run: |
+          set -eu
+          echo "the verifier run ${{ github.event.workflow_run.id }} ended: $ENDED"
+          busy() {
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow verifier.yml --limit 10 --json status \
+              --jq '[.[] | select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "pending")] | length'
+          }
+          if [ "$(busy)" != "0" ]; then echo "a verifier run is queued or running already: nothing to start"; exit 0; fi
+          ran=$(( $(date +%s) - $(date -d "$STARTED" +%s) ))
+          if [ "$ran" -lt "$GAP" ]; then
+            echo "it lasted ${ran} s: waiting until ${GAP} s after it started"
+            sleep $(( GAP - ran ))
+            if [ "$(busy)" != "0" ]; then echo "one was started meanwhile: nothing to start"; exit 0; fi
+          fi
+          gh workflow run verifier.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "next verifier run requested"

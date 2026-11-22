@@ -3,21 +3,22 @@ name: legion verifier
 # A node that only verifies, for a project whose own machines aren't always on. It joins the project named in this
 # repository's variable LEGION_PROJECT (a Radicle id, rad:...), or catches up with it, and then, every 20 minutes for
 # nearly six hours, checks the patches waiting for a verdict exactly as any agent's `python -m legion verify` does,
-# and signs what it found. Before it ends it starts the next run. In Erdős #902 the only machine with Lean that could
-# verify another owner's patches was a laptop.
+# and signs what it found. When it ends, however it ends, verifier-keeper.yml starts the next. In Erdős #902 the only
+# machine with Lean that could verify another owner's patches was a laptop.
 #
-# Why a long run that starts the next one, and not a schedule: GitHub's schedule fired not once in the first two
-# hours of this workflow on main (22 Nov 2026), and it is best effort at any time. A run started by this workflow's
-# own token does start (workflow_dispatch is the exception to "events of GITHUB_TOKEN start no runs"). The schedule
-# stays, to start the chain again if a run ever ends without starting the next. Only one run at a time (the
-# concurrency group): a start while one is running waits for it.
+# Why long runs that a keeper starts again, and not a schedule: GitHub's schedule fired not once in the first two
+# hours of this workflow on main (22 Nov 2026), and it is best effort at any time. A run started by a workflow's own
+# token does start (workflow_dispatch is the exception to "events of GITHUB_TOKEN start no runs"). The schedule stays,
+# to start the chain again if it ever breaks. Only one run at a time (the concurrency group): a start while one is
+# running waits for it.
 #
 # It needs, set once in the repository (Settings > Secrets and variables > Actions):
 #   secret   LEGION_IDENTITY  the verifier's legion identity: its file in ~/.legion/identities, whole
 #   secret   RAD_PROFILE      its Radicle node's keys and config: `tar -cz keys config.json | base64`, from a RAD_HOME
 #   variable LEGION_PROJECT   the project's Radicle id
 #   variable LEGION_SETUP     optional: the project's one-time setup in a clone (`python check.py --setup`)
-#   variable LEGION_VERIFIER  optional: `off` stops it (the run under way finishes its cycle and starts no other)
+#   variable LEGION_VERIFIER  optional: `off` stops it (the run under way goes on; no other is started)
+#   variable LEGION_VERIFIER_MINUTES  optional: how long a run goes on verifying (default 330)
 # Its verifications count once the project trusts it: an owner vouches for it as a subagent
 # (`python -m legion delegate <its name>`), or it earns it like any agent.
 
@@ -37,7 +38,6 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write  # to start the next run
 
 jobs:
   verify:
@@ -52,7 +52,7 @@ jobs:
       CLONE: /home/runner/project
       EVERY: "1200"        # seconds between the starts of two cycles
       # Minutes after the run started past which no cycle starts: 330 (5 h 30 min), or what whoever started it asked.
-      CYCLES_MINUTES: ${{ inputs.minutes || '330' }}
+      CYCLES_MINUTES: ${{ inputs.minutes || vars.LEGION_VERIFIER_MINUTES || '330' }}
     steps:
       - name: Start
         run: echo "STARTED=$(date +%s)" >> "$GITHUB_ENV"
@@ -200,15 +200,3 @@ jobs:
           cd "$CLONE" 2>/dev/null || exit 0
           python -m legion relay | tail -n 8 || true
           python -m legion log --no-sync | tail -n 6 || true
-
-      # The next run, whatever happened in this one. A run that ended early (a setup that broke) waits until 20
-      # minutes after it started, so a broken one is tried again three times an hour, not without pause.
-      - name: Start the next run
-        if: always() && github.ref == 'refs/heads/main' && vars.LEGION_VERIFIER != 'off'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ran=$(( $(date +%s) - STARTED ))
-          if [ "$ran" -lt "$EVERY" ]; then sleep $(( EVERY - ran )); fi
-          gh workflow run verifier.yml --repo "$GITHUB_REPOSITORY" --ref main
-          echo "next run requested"
