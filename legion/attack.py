@@ -456,6 +456,50 @@ def cmd_attack(args):
     return 0
 
 
+# Who a new round is announced to: every owner seen in the project within this many seconds. A message to an owner
+# reaches each of its agents (`send @owner`): an idle one under `legion run` is started again with it, a busy one
+# gets it mid-session (its hooks, or its next legion command).
+CALL_SEEN = 86400
+
+CALL = """Round {rnd} of attack on {parent} is open, launched by {lead}: {lines} line(s) ({keys}), each checked by an \
+agent that didn't write it, then one synthesis (`python -m legion help attacks`). Join it, the way a lead fills a \
+round with subagents. Between tasks: `python -m legion claim` hands you a piece. Busy on a task: don't drop it; if \
+your harness can, start subagents of yours (OWNER#<n>, each its own identity and its own clone: \
+`python -m legion join <invitation> --number <n>`), one per piece nobody holds, until every open piece has someone, \
+and go on with yours. Who holds what: `python -m legion attack status {parent}`."""
+
+
+def open_pieces(st: S.State, now: float) -> list[S.Task]:
+    """The pieces of attack open right now that nobody holds: the holes a round's agents are called to fill."""
+    return sorted((t for t in st.tasks.values() if t.attack and not t.cancelled and st.status(t.id, now) == "open"
+                   and st.holder(t.id, now) is None), key=lambda t: t.key)
+
+
+def call_text(st: S.State, me: str, now: float) -> str:
+    """What `context` says of the open pieces this agent could take (not the checks of lines it wrote), or ""."""
+    holes = [t for t in open_pieces(st, now) if not st.apart_error(t, me)]
+    if not holes:
+        return ""
+    return (f"{len(holes)} piece(s) of attack open with nobody on them: {', '.join(t.key for t in holes[:8])}"
+            + ("…" if len(holes) > 8 else "") + ". Between tasks, `claim` hands you one. Busy on a task: if your "
+            "harness can, start one subagent of yours (OWNER#<n>, its own identity and clone: `join <invitation> "
+            "--number <n>`) per piece, until each has someone, and go on with yours (`help attacks`).")
+
+
+def announce(c: Ctx, parent: S.Task, rnd: str, pieces: list[dict], now: float) -> list[str]:
+    """Tell every owner active in the project that the round is open: the owners it went to."""
+    owners = sorted({S.owner(c.st.names[a]) for a, ts in c.st.last_seen.items()
+                     if now - ts <= CALL_SEEN and a in c.st.names})
+    if not owners:
+        return []
+    keys = [p["key"] for p in pieces if p["attack"]["role"] == "line"]
+    text = CALL.format(rnd=rnd, parent=parent.key, lead=c.ident.name, lines=len(keys), keys=", ".join(keys))
+    for i in range(0, len(owners), S.MAX_RECIPIENTS):  # a message names at most MAX_RECIPIENTS
+        c.emit("message.sent", to=["@" + o for o in owners[i:i + S.MAX_RECIPIENTS]], task=parent.id,
+               text=text[:2000])
+    return owners
+
+
 def launch(args):
     c = Ctx()
     parent = c.task(args.task)
@@ -476,6 +520,7 @@ def launch(args):
         return 0
     for p in pieces:
         c.emit("task.created", **p, split=True)
+    called = announce(c, parent, rnd, pieces, now)
     c.sync()
     made = [p["key"] for p in pieces if c.st.find_task(p["key"])]
     lines = sum(1 for p in pieces if p["attack"]["role"] == "line")
@@ -485,6 +530,9 @@ def launch(args):
           f"Follow it with `python -m legion attack status {parent.key}`, and `wait`: the synthesis tells you when "
           f"it's done. Then read it and `attack digest {parent.key}`, check the key claims yourself, and launch the "
           "next round from its next steps.")
+    if called:
+        print(f"Announced to {', '.join('@' + o for o in called)}: their agents between tasks take pieces, and busy "
+              "ones start subagents until each piece has someone.")
     if len(made) < len(pieces):
         raise Fail(f"only {len(made)} of {len(pieces)} subtasks were created: "
                    f"{c.st.ignored[-1][1] if c.st.ignored else 'unknown'}", 1)

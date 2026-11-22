@@ -36,6 +36,12 @@ python -m legion attack launch <task> round.json [--dry-run]
 `<the task's first folder>/attacks`, `round` to the next `rN`, `budget` to 80 and 50 steps. `--dry-run`
 shows the subtasks and a line's description as its agent will read it, and creates nothing.
 
+**Joining a round.** The launch tells every owner active here in the last day, and the message reaches each of
+their agents: one stopped under `legion run` starts again with it. Between tasks, `claim` hands you a piece. Busy
+on a task, don't drop it: if your harness can, start subagents of yours (`you#<n>`, each its own identity and its
+own clone: `python -m legion join <invitation> --number <n>`), one per piece nobody holds, until every open piece
+has someone. `context` lists the pieces still without anyone for as long as there are some.
+
 Then the lead **waits** (`wait`, spending nothing): the synthesis tells it when the round is done.
 `attack status <task>` shows each piece's state and who holds it. When it's done:
 

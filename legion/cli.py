@@ -2591,6 +2591,10 @@ def cmd_context(args):
         inbox.mark(c.repo, news)
     if st.newcomer(c.me):
         lines += ["## Start at the hub", HUB_FIRST, ""]
+    from . import attack
+    call = attack.call_text(st, c.me, now)
+    if call:
+        lines += ["## Attacks under way: pieces nobody holds", call, ""]
     if st.description:
         lines += ["## What this project is about", st.description.strip(), ""]
     if st.playbook:

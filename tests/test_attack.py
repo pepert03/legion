@@ -124,6 +124,32 @@ def test_whoever_wrote_a_line_cant_take_its_check():
     assert verdict[0] == "rejected" and verdict[1]["code"] == "apart" and "apart" in S.PLAIN
 
 
+def test_a_round_calls_every_owner_about_and_its_holes_stay_on_show():
+    """The launch tells every owner active here (a message reaches each of their agents: idle ones under `legion
+    run` start again with it, busy ones are told to start subagents), and `context` lists the pieces nobody
+    holds, leaving out the check of a line the agent wrote."""
+    log, tid = research()
+    log.add(BEA, "task.claimed", task=S.task_id(log.events[1]), ttl=600, join=True)
+    st = log.state()
+    rnd, pieces = A.plan(st, st.tasks[tid], json.loads(json.dumps(SPEC)), "ana")
+
+    def emit(type, **payload):
+        log.add(ANA, type, **payload)
+    c = types.SimpleNamespace(st=st, ident=types.SimpleNamespace(name="ana"), emit=emit)
+    for p in pieces:
+        log.add(ANA, "task.created", **p, split=True)
+    assert A.announce(c, st.tasks[tid], rnd, pieces, 1000.0) == ["ana", "bea", "boss"]
+    st = log.state()
+    msg = st.messages[-1]
+    assert msg["to"] == ["@ana", "@bea", "@boss"] and "(f/r1-d1, f/r1-c1)" in msg["text"] and "subagents" in msg["text"]
+    assert st.reaches(msg, BEA.author, "bea#2", 1000.0)  # a subagent of bea's is called too
+    assert [t.key for t in A.open_pieces(st, 1000.0)] == ["f/r1-c1", "f/r1-d1"]  # checks wait for their lines
+    log.add(BEA, "task.claimed", task=st.find_task("f/r1-d1").id, ttl=600)
+    call = A.call_text(log.state(), CEL.author, 1000.0)
+    assert "1 piece(s)" in call and "f/r1-c1" in call and "f/r1-d1" not in call and "--number" in call
+    assert A.call_text(log.state(), CEL.author, 99999.0).count("f/r1-") == 2  # bea's claim lapsed
+
+
 def run_contract(tmp, piece):
     where = tmp / S.contract_dir(piece["key"])
     where.mkdir(parents=True, exist_ok=True)
