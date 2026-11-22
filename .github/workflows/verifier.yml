@@ -3,14 +3,18 @@ name: legion verifier
 # A node that only verifies, for a project whose own machines aren't always on. It joins the project named in this
 # repository's variable LEGION_PROJECT (a Radicle id, rad:...), or catches up with it, and then, every 20 minutes for
 # nearly six hours, checks the patches waiting for a verdict exactly as any agent's `python -m legion verify` does,
-# and signs what it found. When it ends, however it ends, verifier-keeper.yml starts the next. In Erdős #902 the only
-# machine with Lean that could verify another owner's patches was a laptop.
+# and signs what it found. Its first step queues the next run, which waits (the concurrency group) and starts the
+# moment this one ends, however it ends. In Erdős #902 the only machine with Lean that could verify another owner's
+# patches was a laptop.
 #
-# Why long runs that a keeper starts again, and not a schedule: GitHub's schedule fired not once in the first two
-# hours of this workflow on main (22 Nov 2026), and it is best effort at any time. A run started by a workflow's own
-# token does start (workflow_dispatch is the exception to "events of GITHUB_TOKEN start no runs"). The schedule stays,
-# to start the chain again if it ever breaks. Only one run at a time (the concurrency group): a start while one is
-# running waits for it.
+# Why each run queues the next at its start: GitHub's schedule fired not once in the first two hours of this workflow
+# on main (22 Nov 2026). A run that started its successor as its last step stopped the chain when GitHub ended it with
+# "an internal error" fifteen minutes in, before that step. And a keeper on `workflow_run` doesn't fire for runs that
+# a workflow's own token started, which every run after the first is. A run started by that token does start
+# (workflow_dispatch is the exception to "events of GITHUB_TOKEN start no runs"), and one queued at the start of a
+# run is there whatever happens to it. The schedule and verifier-keeper.yml stay, to start the chain again if it
+# ever breaks. A run that ends before LEGION_VERIFIER_GAP seconds (20 minutes) waits that long, so a broken setup
+# is tried three times an hour, not without pause.
 #
 # It needs, set once in the repository (Settings > Secrets and variables > Actions):
 #   secret   LEGION_IDENTITY  the verifier's legion identity: its file in ~/.legion/identities, whole
@@ -38,6 +42,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # to queue the next run
 
 jobs:
   verify:
@@ -53,9 +58,16 @@ jobs:
       EVERY: "1200"        # seconds between the starts of two cycles
       # Minutes after the run started past which no cycle starts: 330 (5 h 30 min), or what whoever started it asked.
       CYCLES_MINUTES: ${{ inputs.minutes || vars.LEGION_VERIFIER_MINUTES || '330' }}
+      GAP: ${{ vars.LEGION_VERIFIER_GAP || '1200' }}
     steps:
       - name: Start
         run: echo "STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Queue the next run
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run verifier.yml --repo "$GITHUB_REPOSITORY" --ref main && echo "next run queued"
 
       - uses: actions/checkout@v4
 
@@ -200,3 +212,9 @@ jobs:
           cd "$CLONE" 2>/dev/null || exit 0
           python -m legion relay | tail -n 8 || true
           python -m legion log --no-sync | tail -n 6 || true
+
+      - name: Pace
+        if: always()
+        run: |
+          ran=$(( $(date +%s) - STARTED ))
+          if [ "$ran" -lt "$GAP" ]; then echo "ran ${ran} s: waiting until ${GAP} s"; sleep $(( GAP - ran )); fi
