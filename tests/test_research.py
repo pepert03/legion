@@ -446,9 +446,9 @@ def test_a_rejection_read_off_a_merge_counts_only_on_the_main_it_was_judged_on()
     assert st.patches[q["id"]].verdict == "rejected" and [x.verdict for x in st.patches.values()].count("rejected") == 2
 
 
-def test_a_goals_old_whole_tasks_are_handed_out_after_what_the_goal_asks_for(tmp_path, monkeypatch, capsys):
-    """A task under a research goal that isn't a piece of its rounds comes after the goal's own work: an agent
-    is asked for a line first, and gets the whole subtask only once the goal asks nothing more of it."""
+def test_a_goals_old_whole_tasks_are_never_handed_out_by_claim(tmp_path, monkeypatch, capsys):
+    """A task under a research goal that isn't a piece of its rounds isn't handed out by a plain claim: an agent
+    is asked for a line, and once the goal asks nothing more of it, it's told to wait. By name it can be taken."""
     from legion.cli import main
     from legion.ctx import Ctx
     from test_queue import as_, git, make_project
@@ -469,7 +469,10 @@ def test_a_goals_old_whole_tasks_are_handed_out_after_what_the_goal_asks_for(tmp
                  "--text", "Encode n = 4 as CNF and decide it.", "--learn", "whether it is in reach"]) == 0
     capsys.readouterr()
     monkeypatch.setattr(S.State, "needs_brief", lambda self, *a, **k: None)
-    assert main(["claim"]) == 0  # the goal asks nothing more of luis for now: the old whole task, then
+    assert main(["claim"]) == 5  # the goal asks nothing more of luis for now: not the old whole task, but wait
+    assert "legion wait" in capsys.readouterr().out
+    assert not Ctx(sync=False).st.held_by(make_project.people["luis"].author, time.time())
+    assert main(["claim", "f/old"]) == 0  # by name, with a route of its own
     assert Ctx(sync=False).st.held_by(make_project.people["luis"].author, time.time())[0].key == "f/old"
 
 

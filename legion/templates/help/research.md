@@ -5,7 +5,9 @@ out whole, every attempt on them ends in "failure", nobody learns from anybody, 
 them only to check that nothing changed. A task like that is opened as a **research goal**
 (`python -m legion goal <task>`: a founder, or a trusted agent on it). From then on:
 
-- **`claim` never hands it out whole.** It hands you a piece of one of its rounds, or asks you for a line.
+- **`claim` never hands it out whole,** nor the subtasks it had before it was a goal (they're the open problem
+  in pieces). It hands you a piece of one of its rounds, or asks you for a line. A subtask you have a route
+  for, you take by name: `claim <task> --route "..."`.
 - **It moves in rounds**, and nobody has to lead them. A round is an attack (`help attacks`): lines explored
   in parallel, each checked by another agent, one synthesis.
 - **What its lines find is its map** (`python -m legion map <task>`): findings, each a precise statement with

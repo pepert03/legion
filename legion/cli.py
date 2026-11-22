@@ -741,38 +741,37 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me)) | c.st.barred(c.me) | c.st.stale(c.me)
                 fresh = lambda ts: sorted((t for t in ts if t.id not in cool and not research.lacking(t)),  # noqa: E731
                                           key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
-                free = fresh(c.st.claimable(now))
                 # A task under a research goal that isn't a piece of its rounds is one of the whole tasks the goal
                 # had before it was one (in Erdős #902: "an explicit family on C n 2^n vertices", the open problem
-                # itself). Handed out first, an agent new to the project was given four of them in a row, let each
-                # go in a minute, and only then was asked for a line. They come after what the goal asks for.
-                later = [t for t in free if not t.attack and c.st.goal_of(t.id)]
-                return ([t for t in free if not any(t is x for x in later)],
-                        fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
-                        or fresh(c.st.competitive_for(c.me)), later)
+                # itself, a SAT run, a search its own brief calls settled). claim hands none of them out: handed out
+                # first, an agent was given four in a row and let each go in a minute; handed out last, when the
+                # goal had nothing more for an agent, they were still claimed and let go of 25 times in three hours.
+                # Work on them goes through the goal's lines; an agent with a route for one takes it by name.
+                whole = lambda ts: [t for t in ts if t.attack or not c.st.goal_of(t.id)]  # noqa: E731
+                return (whole(fresh(c.st.claimable(now))),
+                        whole(fresh(c.st.joinable(c.me, now))) or whole(fresh(c.st.preparable(now)))
+                        or fresh(c.st.competitive_for(c.me)))
             # A round due on a research goal is launched first: its lines are among the free tasks then.
             if c.st.goals and research.launch_due(c, now):
                 now = time.time()
-            free, helped, later = options()
+            free, helped = options()
             # No task free: a concrete question on one is worth more than joining a stuck task once again.
             work = None if free or c.st.exclusive_done() else research_work(c, args, now)
             if work == research.RELAUNCH:
                 return claim(c, args, last)
             if work is not None:
                 return work
-            free = free or later  # the goals ask nothing of this agent now: their old whole tasks, then
             deadline = now + (args.wait or 0) * 60
             while not free and not helped and not c.st.exclusive_done() and time.time() < deadline:
                 time.sleep(min(15, max(1, deadline - time.time())))  # someone may release, or a dependency land
                 c.sync()
                 now = time.time()
-                free, helped, later = options()
+                free, helped = options()
                 work = None if free else research_work(c, args, now)
                 if work == research.RELAUNCH:
                     return claim(c, args, last)
                 if work is not None:
                     return work
-                free = free or later
             if not free and helped and helped[0].mode == "competitive":
                 d = task_dict(c.st, helped[0], now)  # not claimed: anyone may compete, the best result wins
                 best = "no result yet: any valid one is the first best" if d["best"] is None else f"best so far {d['best']:g}"
@@ -796,7 +795,8 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled and t.kind != "result"]
                 stale = c.st.stale(c.me)
                 cool = sorted((x for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"
-                               and x not in c.st.cannot(c.me) and x not in stale and x not in c.st.goals
+                               and x not in c.st.cannot(c.me) and x not in stale
+                               and (c.st.tasks[x].attack or not c.st.goal_of(x))
                                and not research.lacking(c.st.tasks[x])), key=lambda x: c.st.tasks[x].key)
                 quiet = sorted(c.st.tasks[x].key for x in stale if c.st.status(x, now) == "open")
                 if not cool and (quiet or c.st.goals) and not all(c.st.in_review(t.id) is not None for t in waiting):
