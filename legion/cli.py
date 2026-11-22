@@ -22,6 +22,7 @@ from . import transport
 from . import update
 from . import events as E
 from . import integrator
+from . import research
 from . import state as S
 from . import trust
 from .coordgit import git
@@ -52,7 +53,8 @@ def task_dict(st: S.State, t: S.Task, now: float) -> dict:
             "stalled": st.stalled(t.id), "failures": st.failures_since_progress(t.id),
             "open_paths": len(st.open_paths(t.id)),
             "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None, "holdout": t.holdout,
-            "attack": dict(t.attack), "apart": [st.tasks[a].key for a in t.apart]}
+            "attack": dict(t.attack), "apart": [st.tasks[a].key for a in t.apart], "needs": list(t.needs),
+            "research": t.id in st.goals}
 
 
 def tree_order(st: S.State) -> list[S.Task]:
@@ -83,6 +85,8 @@ def task_text(t: dict) -> str:
         role = {"line": f"line {a.get('line')}", "check": f"the check of line {a.get('line')}",
                 "synthesis": "the synthesis"}.get(a.get("role"), a.get("role"))
         lines.append(f"  attack:      round {a.get('round')} on {t.get('parent')}, {role} (`help attacks`)")
+    if t.get("needs"):
+        lines.append(f"  needs:       {', '.join(t['needs'])} on the machine")
     if t.get("apart"):
         lines.append(f"  apart from:  {', '.join(t['apart'])} (whoever wrote it can't take this one)")
     if t.get("contract"):
@@ -186,6 +190,14 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "integrator.lease": "takes the integration lease",
         "integrator.renew": "renews the integration lease",
         "integrator.release": "hands over the integration lease",
+        "goal.opened": (f"closes {key} as a research goal" if ev.get("closed") else f"opens {key} as a research goal"),
+        "line.proposed": f"proposes a line on {key}, front {ev.get('front')} ({ev.get('method')}, {ev.get('move')}): "
+                         f"{ev.get('title', '')}",
+        "line.backed": f"backs line {str(ev.get('line', ''))[:8]} on {key}",
+        "finding.stated": f"states a finding on {key} ({ev.get('status')}): "
+                          f"{ev.get('statement', '') if full else ev.get('statement', '').replace(chr(10), ' ')[:200]}",
+        "finding.judged": f"judges finding {str(ev.get('finding', ''))[:8]} on {key} {ev.get('verdict')}: "
+                          f"{ev.get('reason', '') if full else ev.get('reason', '').replace(chr(10), ' ')[:200]}",
     }.get(t, t)  # an event type from a newer legion still shows up
 
 
@@ -195,6 +207,8 @@ def status_table(st: S.State, now: float) -> str:
         d = task_dict(st, t, now)
         status = (d["status"] + (f" {d['children_done']}/{d['children']}" if d["status"] == "sketched" else "")
                   + (f" round {d['round']}" if (d["round"] or 0) > 1 else ""))
+        if d["research"] and d["status"] in ("open", "claimed"):  # worked on through its rounds, not claimed whole
+            status = "research" + (" (spent)" if st.spent(t.id) else "")
         holder = " + ".join(d["working"]) if d["status"] in ("claimed", "review", "blocked") else "-"
         rows.append((d["id"], "  " * st.depth_under(t) + d["key"], d["mode"][:4], status, holder or "-",
                      "-" if d["best"] is None else f"{d['best']:g}", ",".join(d["deps"]) or "-"))
@@ -699,6 +713,17 @@ def claim(c: Ctx, args, last: bool = True) -> int:
         join = t in c.st.joinable(c.me, now)
         if not c.holder_is_me(t.id) and status != "open" and not join and t not in c.st.preparable(now):
             raise Fail(f"task {t.key} is not available ({status})", 3)
+        lacks = research.lacking(t)
+        if lacks and not c.holder_is_me(t.id):
+            raise Fail(f"{t.key} needs {', '.join(lacks)}, which this machine doesn't have: it's for an agent "
+                       "whose machine does. `claim` alone hands you what you can do here.", 5)
+        if t.id in c.st.stale(c.me) and not c.holder_is_me(t.id) and not getattr(args, "route", None):
+            n = len(c.st.let_go(c.me, t.id))
+            raise Fail(f"you let go of {t.key} {n} times, and nothing new has come on it from anyone else since "
+                       "(no saved work, patch, idea, finding, answer or reference; legion looked, so you don't "
+                       "have to claim it to look). Taking it again to read the same thing changes nothing. "
+                       "`claim` alone hands you something else; or, if you now have a route you didn't try, say "
+                       f"which and take it: `python -m legion claim {t.id} --route \"what you'll do differently\"`.", 5)
     else:
         held = c.st.held_by(c.me, now)
         # An agent going round in circles (S.State.plateau) is handed other tasks than the ones it circled first.
@@ -711,14 +736,21 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # What this agent already tried since the task last advanced goes last: someone else, or
                 # another task, has a better chance than the same agent again. What it let go of in the last
                 # hour isn't handed back to it at all (see COOLDOWN).
-                cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me)) | c.st.barred(c.me)
-                fresh = lambda ts: sorted((t for t in ts if t.id not in cool),  # noqa: E731
+                # Nor what it let go of again and again with nothing new on it since (S.State.stale), at any
+                # interval; nor what needs a program its machine lacks (S.Task.needs).
+                cool = c.st.cooling(c.me, now) | set(c.st.cannot(c.me)) | c.st.barred(c.me) | c.st.stale(c.me)
+                fresh = lambda ts: sorted((t for t in ts if t.id not in cool and not research.lacking(t)),  # noqa: E731
                                           key=lambda t: c.st.attempts_by(t.id, c.me) > 0 or t.id in circled)
                 return (fresh(c.st.claimable(now)), fresh(c.st.joinable(c.me, now)) or fresh(c.st.preparable(now))
                         or fresh(c.st.competitive_for(c.me)))
+            # A round due on a research goal is launched first: its lines are among the free tasks then.
+            if c.st.goals and research.launch_due(c, now):
+                now = time.time()
             free, helped = options()
             # No task free: a concrete question on one is worth more than joining a stuck task once again.
             work = None if free or c.st.exclusive_done() else research_work(c, args, now)
+            if work == research.RELAUNCH:
+                return claim(c, args, last)
             if work is not None:
                 return work
             deadline = now + (args.wait or 0) * 60
@@ -728,6 +760,8 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 now = time.time()
                 free, helped = options()
                 work = None if free else research_work(c, args, now)
+                if work == research.RELAUNCH:
+                    return claim(c, args, last)
                 if work is not None:
                     return work
             if not free and helped and helped[0].mode == "competitive":
@@ -751,8 +785,24 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                     return 4
                 waiting = [t for t in c.st.tasks.values()
                            if t.mode == "exclusive" and not c.st.done(t.id) and not t.cancelled and t.kind != "result"]
+                stale = c.st.stale(c.me)
                 cool = sorted((x for x in c.st.cooling(c.me, now) if c.st.status(x, now) == "open"
-                               and x not in c.st.cannot(c.me)), key=lambda x: c.st.tasks[x].key)
+                               and x not in c.st.cannot(c.me) and x not in stale and x not in c.st.goals
+                               and not research.lacking(c.st.tasks[x])), key=lambda x: c.st.tasks[x].key)
+                quiet = sorted(c.st.tasks[x].key for x in stale if c.st.status(x, now) == "open")
+                if not cool and (quiet or c.st.goals) and not all(c.st.in_review(t.id) is not None for t in waiting):
+                    # Nothing it can move: said once, with no claim recorded, so it stops instead of going round
+                    # (in Erdős #902 agents claimed, read the same state and let go 1,184 times in twelve days).
+                    out(args, {"won": False, "task": None, "done": False, "nothing_new": True, "stale": quiet},
+                        verify_first(c) + research.waiting_text(c.st, c.me, now)
+                        + (f"Nothing is new on {', '.join(quiet[:6])} since you last let go of "
+                           f"{'it' if len(quiet) == 1 else 'them'}: legion compared, so there's nothing to re-read. "
+                           if quiet else "Nothing is open for you right now. ")
+                        + "Don't claim again to check: `python -m legion wait` returns, spending nothing, the moment "
+                        "something comes for you (a round's piece, a question, new work on a task you left). If you "
+                        "have something that IS new (a route nobody tried, a reference, a computation), bring it: "
+                        "`line propose` on a research goal, `idea`, `lit add`, `ask`.")
+                    return 5
                 if cool:
                     # Nothing else is open: rather than wait (an hour, and agents sat idle with the task open),
                     # it takes back what it let go of, by another route.
@@ -785,6 +835,8 @@ def claim(c: Ctx, args, last: bool = True) -> int:
         if settle:
             time.sleep(settle)
             c.sync()
+        if getattr(args, "route", None) and c.holder_is_me(t.id):  # taken back by name: what it does differently
+            c.emit("task.note", task=t.id, text=("Taking it again by another route: " + args.route.strip())[:E.MAX_NOTES])
     if c.holder_is_me(t.id):
         d = task_dict(c.st, t, time.time())
         others = [n for n in d["working"] if n != c.ident.name]
@@ -1863,8 +1915,11 @@ def research_work(c: Ctx, args, now: float) -> int | None:
     None if there's none."""
     st, name = c.st, c.ident.name
     q = st.question_for(c.me, name, now)
-    if q:
+    if q:  # what another agent asked for comes first: it is waiting on it
         return hand_question(c, args, q)
+    work = research.cycle_work(c, args, now)  # then the research goals: a round to launch, a line to propose or back
+    if work is not None:
+        return work
     route = st.route_to_open(name)
     if route:
         t, kind, x = route
@@ -2348,6 +2403,10 @@ def cmd_submit(args):
     ev = c.emit("patch.submitted", task=t.id, commit=git(repo, "rev-parse", "HEAD"), branch=branch,
                 lines=changed_lines(repo, base),
                 **({"on": [p.id for p in on]} if on else {}), **({"refutes": True} if args.refutes else {}))
+    mapped = research.lift(c, t)  # a round's line or check: what it says goes on its task's map
+    if mapped:
+        print(f"legion: {mapped} finding(s) or verdict(s) of this piece recorded on the map of "
+              f"{c.st.tasks[t.parent].key} (`python -m legion map {c.st.tasks[t.parent].key}`).", file=sys.stderr)
     c.sync()
     waits = dict.fromkeys([c.st.tasks[d].key for d in t.deps if not c.st.done(d)]
                           + [c.st.tasks[p.task].key for p in on])
@@ -2625,6 +2684,18 @@ def cmd_context(args):
     call = attack.call_text(st, c.me, now)
     if call:
         lines += ["## Attacks under way: pieces nobody holds", call, ""]
+    goals = research.open_goals(st, c.me)
+    if goals:
+        lines += ["## Research goals: open problems, worked on in rounds of proposed lines (`help research`)"]
+        for g in goals:
+            d = research.map_data(st, g, now)
+            lines.append(f"- {g.key}: {len(d['rounds'])} round(s), {sum(f['state'] == 'confirmed' for f in d['findings'])} "
+                         f"of {len(d['findings'])} findings confirmed, {len(st.open_lines(g.id))} line(s) proposed"
+                         + (" · SPENT: no more rounds until someone reopens it with something new" if d["spent"]
+                            else f" · the last {d['dry']} round(s) confirmed nothing" if d["dry"] else "")
+                         + f" · `python -m legion map {g.key}`")
+        lines += ["They aren't claimed whole: `claim` hands you a round's piece, or asks you for a line. Need "
+                  "something from another agent? `ask`: it's handed out first.", ""]
     if st.description:
         lines += ["## What this project is about", st.description.strip(), ""]
     if st.playbook:
@@ -3677,6 +3748,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--wait", type=float, nargs="?", const=1.5, default=0, metavar="MINUTES",
                    help="if nothing is open, wait for a task to free up before exiting with 5 (default 90 s: "
                         "within what agents' tools allow a command; under `legion run`, run waits the rest)")
+    s.add_argument("--route", help="taking back by name a task you let go of with nothing new on it since: what "
+                                   "you'll do differently this time (it's posted as a note)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_claim)
 
@@ -4005,6 +4078,7 @@ def parser() -> argparse.ArgumentParser:
 
     from . import attack, netcli, sim
     attack.add_parser(sub)
+    research.add_parser(sub)
     netcli.add_parsers(sub)
     sim.add_parser(sub)
     for command in sub.choices.values():  # see RECORDING

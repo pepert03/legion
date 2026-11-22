@@ -1,0 +1,670 @@
+"""The research cycle: how agents work together on a task that is an open problem (state.METHODS has the rules).
+
+A task whose statement nobody proves in a session can't be handed out whole: every attempt ends in "failure", the
+agents learn nothing from one another's, and after a while they only check whether anything changed. Opened as a
+research GOAL, it is worked on in rounds of an attack (attack.py) that nobody has to lead:
+
+- PROPOSE. An agent with nothing to take proposes a line for the next round: one agent's work for one session, with
+  a definite deliverable, on a FRONT (a direction), by a METHOD, with a MOVE. Each agent is handed a different move,
+  and decides its line before it is shown the others' (agents shown each other's ideas first converge on them). A
+  line on a front that has lines already says how it differs, or is refused.
+- LAUNCH. Once there are enough proposals, any trusted agent's `claim` makes the round from them: the fronts least
+  explored first, no method taking more than half of it. Its pieces are ordinary subtasks: a line, its check by
+  another agent, one synthesis.
+- FIND. What a line reports becomes FINDINGS on the goal (a precise statement, its status, where the evidence is)
+  when its patch is submitted, and its checker's verdicts are recorded on them the same way. Dead ends are findings
+  too. Together they are the goal's MAP: what the next round's proposals start from, in place of a text that
+  someone has to keep rewriting.
+- TURN. Rounds that confirm nothing are counted. After a few, the only moves handed out are the ones that change
+  the question; after a few more the goal is spent, and its agents stop instead of going round, until someone
+  reopens it with something new.
+"""
+
+import hashlib
+import json
+import shutil
+import time
+from collections import Counter, defaultdict
+
+from . import attack as A
+from . import state as S
+from .ctx import Ctx, Fail
+
+ACTIVE = 2 * 3600  # agents seen in this long count towards the size of a round
+PROPOSE_WINDOW = 3600  # a round waits this long, from its first proposal, for more
+MAX_ROUND_LINES = 6
+LINE_WAIT = 12 * 3600  # a round's line nobody took in this long no longer holds the next round back
+RELAUNCH = -1  # cycle_work launched a round: claim looks again, its pieces are open now
+
+MOVE_TEXT = {
+    "extend": "take the most informative confirmed finding one definite step further",
+    "obstruct": "prove WHY a family of failed attempts can't work: a barrier that rules the whole family out, so "
+                "nobody tries its members one by one",
+    "specialise": "settle the smallest case still undecided, exactly, and say what its answer suggests in general",
+    "weaken": "prove a weaker statement than the goal (a worse constant, an extra hypothesis, a special family) "
+              "that nobody has, stated precisely, with what separates it from the goal",
+    "transfer": "bring a technique or a theorem from another field or from the literature (add the reference with "
+                "`lit add`) and test it on a definite piece of the problem",
+    "invert": "attack the negation: look for a counterexample, the dual problem, or the extremal object the "
+              "statement forbids, and say what its absence would prove",
+    "recombine": "combine two confirmed findings from different fronts into something neither gives alone",
+    "wild": "open a front, by a method, that nobody has tried on this goal: a real attempt, not a variation",
+}
+
+
+def move_for(st: S.State, goal: str, name: str) -> str:
+    """The move an agent is handed for the goal's next round: a different one for each, the same on every node,
+    and another one next round. Once rounds stop confirming anything, only the moves that change the question."""
+    moves = S.REFRAME if st.dry(goal) >= S.DRY_REFRAME else S.MOVES
+    n = len(st.research_rounds(goal))
+    return moves[int(hashlib.sha256(f"{name}|{goal}|{n}".encode()).hexdigest(), 16) % len(moves)]
+
+
+def lacking(t: S.Task) -> list[str]:
+    """The programs a task needs that this machine doesn't have."""
+    return [n for n in t.needs if not shutil.which(n)]
+
+
+def active_agents(st: S.State, now: float) -> set[str]:
+    return {a for a, ts in st.last_seen.items() if now - ts <= ACTIVE}
+
+
+def round_size(st: S.State, now: float) -> int:
+    """How many lines a round takes: each wants someone to explore it and someone else to check it."""
+    return max(2, min(MAX_ROUND_LINES, len(active_agents(st, now)) // 2))
+
+
+def free_lines(st: S.State, goal: str, now: float) -> list[S.Task]:
+    """The lines of the goal's rounds that are open with nobody on them."""
+    return [t for t in st.tasks.values() if t.parent == goal and t.attack.get("role") == "line" and not t.cancelled
+            and st.status(t.id, now) == "open" and st.holder(t.id, now) is None]
+
+
+def select(st: S.State, goal: str, props: list[dict], size: int) -> list[dict]:
+    """Which proposals make the round: one per front, the fronts with the fewest lines so far first (what's
+    unexplored before what's promising: a rating picks what looks typical), then the best backed; round again
+    while there's room; and no method takes more than half of it while another is on offer."""
+    ran, by = Counter(x["ev"]["front"] for x in st.lines_for(goal) if x["piece"]), defaultdict(list)
+    for p in sorted(props, key=lambda p: (-len(p["backed"]), p["ev"]["lamport"], p["ev"]["id"])):
+        by[p["ev"]["front"]].append(p)
+    fronts = sorted(by, key=lambda f: (ran[f], -len(by[f][0]["backed"]), by[f][0]["ev"]["lamport"], f))
+    chosen, methods, cap = [], Counter(), (size + 1) // 2
+    for capped in (True, False):  # with the cap on methods first; without it only to fill what's left
+        took = True
+        while took and len(chosen) < size:
+            took = False
+            for f in fronts:
+                p = next((p for p in by[f] if not any(p is q for q in chosen)
+                          and not (capped and methods[p["ev"]["method"]] >= cap)), None)
+                if p is not None and len(chosen) < size:
+                    chosen.append(p)
+                    methods[p["ev"]["method"]] += 1
+                    took = True
+    return chosen
+
+
+def due(st: S.State, goal: str, now: float) -> list[dict] | None:
+    """The lines of the round to launch on the goal now, or None: there are proposals, no line of an earlier round
+    is still waiting for someone (rounds answer demand), and either enough agents proposed to fill one or the
+    first proposal has waited PROPOSE_WINDOW."""
+    props = st.open_lines(goal)
+    # A line still on offer means there's work for whoever asks. Not one that has waited LINE_WAIT: nobody here
+    # can take it (a program its machines lack, or every agent already let it go), and it would stop the cycle.
+    if (not props or st.spent(goal) or goal not in st.goals
+            or any(now - t.ts < LINE_WAIT for t in free_lines(st, goal, now))):
+        return None
+    size, active = round_size(st, now), active_agents(st, now)
+    enough = len(props) >= size and len({p["ev"]["author"] for p in props}) >= min(2, max(1, len(active)))
+    if not enough and now - min(p["ev"]["ts"] for p in props) < PROPOSE_WINDOW:
+        return None
+    return select(st, goal, props, size)
+
+
+def line_key(p: dict) -> str:
+    return f"{p['ev']['front']}-{p['ev']['id'][:4]}"
+
+
+def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
+    """The attack's spec that makes a round from proposed lines: what every piece shares is the goal and its map."""
+    lines = []
+    for p in chosen:
+        ev = p["ev"]
+        task = (f"{ev['text'].strip()}\n\nMETHOD: {ev['method']}. MOVE: {ev['move']} ({MOVE_TEXT[ev['move']]}).\n"
+                f"IF IT FAILS, THE PROJECT LEARNS: {ev['learn'].strip()}"
+                + (f"\nHOW IT DIFFERS from earlier lines on this front: {ev['differs'].strip()}"
+                   if ev.get("differs", "").strip() else "")
+                + ("\nIT BUILDS ON the findings " + ", ".join(x[:8] for x in ev["from"])
+                   + f" (`python -m legion map {parent.key}`)." if ev.get("from") else "")
+                + f"\nProposed by {ev['name']}. Need something from another agent on the way (a lemma, a "
+                  f"computation, a reference, a check with a tool you lack)? Ask for it, and go on: `python -m legion "
+                  f"ask {parent.key} \"...\"` is handed out before anything else.")
+        lines.append({"key": line_key(p), "title": ev["title"].strip(), "front": ev["front"], "task": task[:A.MAX_TEXT],
+                      **({"needs": ev["needs"]} if ev.get("needs") else {}), "proposal": ev["id"]})
+    words = (st.goals[parent.id].get("text") or "").strip() if parent.id in st.goals else ""
+    return {"goal": (f"A round of the research cycle on {parent.key} ({parent.title}): lines its agents proposed, "
+                     "each on a front of its own where it could. A line that fails cleanly, and says why, moves "
+                     "the map as much as one that succeeds." + (f"\n{words[:3000]}" if words else "")),
+            "common": map_text(st, parent, 14000),
+            "synthesis": "Say which fronts this round closed and which it opened, and name the one or two lines the "
+                         "next round should hold: its agents propose them (`python -m legion line propose`).",
+            "lines": lines}
+
+
+def may_launch(st: S.State, parent: S.Task, author: str, now: float) -> bool:
+    return author in st.integrators or st.trusted(author) and st.took_part(parent.id, author, now)
+
+
+def launch(c: Ctx, parent: S.Task, chosen: list[dict], now: float) -> str:
+    """Make the round: its pieces are subtasks of the goal, created by whoever's claim found it due."""
+    rnd, pieces = A.plan(c.st, parent, spec_for(c.st, parent, chosen), c.ident.name)
+    for p in pieces:
+        c.emit("task.created", **p, split=True)
+    A.announce(c, parent, rnd, pieces, now)
+    c.sync()
+    return rnd
+
+
+# --- the map ---------------------------------------------------------------------------------------------------------
+
+def map_data(st: S.State, t: S.Task, now: float) -> dict:
+    """A task's map, ready to print or draw: its fronts, every line with where it stands, its findings with their
+    verdicts, and its rounds with what each yielded."""
+    agent = lambda author: "a-" + author[8:20]  # noqa: E731 (viz.agent_id)
+    pieces = {x.id: x for x in st.tasks.values() if x.parent == t.id and x.attack}
+    checks = {x.attack.get("round", "") + "/" + x.attack.get("line", ""): x for x in pieces.values()
+              if x.attack.get("role") == "check"}
+    lines, seen = [], set()
+
+    def who(piece):
+        """Who a piece is with: its holder, or whoever's patch closed it or waits on it."""
+        h = st.holder(piece.id, now)
+        ps = st.patches_for(piece.id)
+        src = h or next((p for p in reversed(ps) if p.verdict in (None, "accepted")), None)
+        return (src.name, agent(src.author)) if src else (None, None)
+
+    def entry(piece, x=None):
+        ev = x["ev"] if x else None
+        row = {"id": ev["id"] if ev else piece.id, "front": ev["front"] if ev else st.line_front(piece),
+               "method": ev["method"] if ev else "other", "move": ev["move"] if ev else "",
+               "title": ev["title"] if ev else piece.title, "text": (ev["text"] if ev else "")[:1500],
+               "learn": ev["learn"] if ev else "", "differs": ev.get("differs", "") if ev else "",
+               "by": ev["name"] if ev else None, "agent": agent(ev["author"]) if ev else None,
+               "backed": sorted(x["backed"].values()) if x else [], "state": "proposed", "round": None,
+               "piece": None, "worker": None, "worker_agent": None, "checker": None, "checker_agent": None,
+               "check": None, "needs": (ev.get("needs") or []) if ev else list(piece.needs),
+               "ts": ev["ts"] if ev else 0}
+        if piece is not None:
+            ck = checks.get(piece.attack.get("round", "") + "/" + piece.attack.get("line", ""))
+            row.update(state=st.status(piece.id, now), round=piece.attack.get("round"), piece=piece.key,
+                       piece_id=piece.id)
+            row["worker"], row["worker_agent"] = who(piece)
+            if ck is not None:
+                row["check"] = st.status(ck.id, now)
+                row["checker"], row["checker_agent"] = who(ck)
+        return row
+
+    for x in st.lines_for(t.id):
+        piece = pieces.get(x["piece"]) if x["piece"] else None
+        seen.add(x["piece"])
+        lines.append(entry(piece, x))
+    for piece in sorted(pieces.values(), key=lambda p: p.lamport):  # rounds launched by hand, from a spec
+        if piece.attack.get("role") == "line" and piece.id not in seen:
+            lines.append(entry(piece))
+    key_of = {r.get("piece_id"): r["id"] for r in lines if r.get("piece_id")}
+    findings = []
+    for f in st.findings_for(t.id):
+        ev = f["ev"]
+        findings.append({"id": ev["id"], "cid": ev.get("cid", ""), "statement": ev["statement"],
+                         "status": ev["status"], "kind": ev.get("kind", ""), "state": st.finding_state(f),
+                         "independent": st.independent(f), "front": f["front"], "line": key_of.get(f["line"]),
+                         "by": ev["name"], "agent": agent(ev["author"]), "evidence": ev.get("evidence", ""),
+                         "from": list(ev.get("from") or []), "ts": ev["ts"],
+                         "verdicts": [{"name": v["name"], "agent": agent(v["author"]), "verdict": v["verdict"],
+                                       "reason": v["reason"]} for v in f["verdicts"].values()]})
+    fronts = {}
+    for r in lines:
+        fr = fronts.setdefault(r["front"], {"front": r["front"], "methods": [], "lines": 0, "ran": 0, "confirmed": 0,
+                                            "refuted": 0, "dead": 0, "unchecked": 0})
+        fr["lines"] += 1
+        fr["ran"] += r["state"] != "proposed"
+        if r["method"] not in fr["methods"]:
+            fr["methods"].append(r["method"])
+    for f in findings:
+        fr = fronts.setdefault(f["front"] or "-", {"front": f["front"] or "-", "methods": [], "lines": 0, "ran": 0,
+                                                   "confirmed": 0, "refuted": 0, "dead": 0, "unchecked": 0})
+        if f["status"] == "dead end":
+            fr["dead"] += 1
+        elif f["state"] in ("confirmed", "refuted"):
+            fr[f["state"]] += 1
+        else:
+            fr["unchecked"] += 1
+    rounds = [{"round": r["round"], "lines": len(r["lines"]), "confirmed": r["confirmed"], "closed": r["closed"]}
+              for r in st.research_rounds(t.id)]
+    used = Counter(r["method"] for r in lines if r["state"] != "proposed")
+    return {"task": t.key, "id": t.id, "title": t.title, "goal": t.id in st.goals,
+            "text": (st.goals[t.id].get("text") or "") if t.id in st.goals else "",
+            "dry": st.dry(t.id), "spent": st.spent(t.id), "fronts": list(fronts.values()), "lines": lines,
+            "findings": findings, "rounds": rounds, "methods": dict(used),
+            "untried": [m for m in S.METHODS if m != "other" and not used[m]]}
+
+
+def _cut(text: str, n: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
+
+
+def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None) -> str:
+    """The map in words: what stands, what fell, what nobody checked, what failed, and where the fronts are. It
+    is computed from the findings and their verdicts, so nobody has to rewrite it, and it can't drift from them."""
+    d = map_data(st, t, now or time.time())
+    if not d["findings"] and not d["lines"]:
+        return (f"(The map of {t.key} is empty: no findings and no lines yet. Its state of the art, if someone "
+                f"wrote one: `python -m legion brief {t.key}`.)")
+    per = max(160, min(700, width // max(8, len(d["findings"]) + len(d["fronts"]) + 4)))
+
+    def row(f):
+        checked = "; ".join(f"{v['name']}: {v['verdict']}" for v in f["verdicts"])
+        return (f"  [{f['id'][:8]}] ({f['status']}; front {f['front'] or '-'}; by {f['by']}"
+                + (f"; {checked}" if checked else "") + (", another owner's check" if f["independent"] else "")
+                + f") {_cut(f['statement'], per)}" + (f" [{_cut(f['evidence'], 90)}]" if f["evidence"] else ""))
+
+    real = [f for f in d["findings"] if f["status"] != "dead end"]
+    parts = [("ESTABLISHED (confirmed by an agent other than its author)", [f for f in real if f["state"] == "confirmed"]),
+             ("REFUTED (don't build on these)", [f for f in real if f["state"] == "refuted"]),
+             ("CONTESTED (confirmed by one checker, refuted by another: settle it)",
+              [f for f in real if f["state"] == "contested"]),
+             ("NOT CHECKED (their author's word only: check before you build on one)",
+              [f for f in real if f["state"] == "unchecked"]),
+             ("DEAD ENDS (what was tried and didn't work, and why. One nobody PROVED impossible is weak: the same "
+              "target by another mechanism may still be worth a line)", [f for f in d["findings"] if f["status"] == "dead end"])]
+    out = [f"THE MAP OF {t.key} (`python -m legion map {t.key}` prints it whole):"]
+    for title, fs in parts:
+        if fs:
+            out.append(f"{title}:")
+            out += [row(f) for f in fs]
+    if d["fronts"]:
+        out.append("FRONTS (directions tried so far):")
+        for fr in sorted(d["fronts"], key=lambda fr: -fr["lines"]):
+            last = next((r for r in reversed(d["lines"]) if r["front"] == fr["front"]), None)
+            out.append(f"  {fr['front']} ({', '.join(fr['methods']) or '-'}): {fr['ran']} line(s) run, "
+                       f"{fr['confirmed']} confirmed, {fr['refuted']} refuted, {fr['dead']} dead end(s)"
+                       + (f"; latest: {_cut(last['title'], 80)} [{last['state']}]" if last else ""))
+    if d["untried"]:
+        out.append("METHODS nobody has run a line by here: " + ", ".join(d["untried"]) + ".")
+    if d["rounds"]:
+        out.append("ROUNDS: " + ", ".join(f"{r['round']} ({r['lines']} lines, {r['confirmed']} confirmed"
+                                           + ("" if r["closed"] else ", under way") + ")" for r in d["rounds"])
+                   + (f". The last {d['dry']} closed round(s) confirmed nothing." if d["dry"] else "."))
+    text = "\n".join(out)
+    return text if len(text) <= width else text[:width - 60].rstrip() + f"\n… (cut: `python -m legion map {t.key}`)"
+
+
+# --- what claim hands out ------------------------------------------------------------------------------------------
+
+def _hand(c: Ctx, args, kind: str, t: S.Task, text: str) -> int:
+    from .cli import out, verify_first
+    out(args, {"won": False, "task": None, "work": {"kind": kind, "task": t.key}},
+        verify_first(c) + text + "\nThen claim again.")
+    return 7
+
+
+def propose_text(st: S.State, t: S.Task, name: str, mine: int) -> str:
+    move, dry = move_for(st, t.id, name), st.dry(t.id)
+    return (f"{t.key} is a research goal: an open problem nobody closes in one session, so it isn't handed out "
+            "whole. It moves in rounds of lines that its agents propose, explore and check (`python -m legion help "
+            f"research`). Propose ONE line for the next round"
+            + (f" (you have {mine} waiting; you may hold {S.MAX_PROPOSALS})" if mine else "") + ".\n\n"
+            f"YOUR MOVE: {move}: {MOVE_TEXT[move]}.\nEach agent of a round is handed a different move, so the round "
+            "doesn't make one move several times. Make this one if you can; if it truly can't be made here, say why "
+            "in your line and make another.\n"
+            + (f"The last {dry} rounds confirmed nothing new. That is the sign of going round the same ideas: this "
+               "round's moves are only those that change the question.\n" if dry >= S.DRY_REFRAME else "")
+            + "Decide your line BEFORE you look at the proposals of others: they aren't shown to you until you "
+            "have yours, because agents shown each other's ideas first converge on them.\n\n"
+            + map_text(st, t, 7000) + "\n\n"
+            "A line is one agent's work for one session (about 80 steps) with a definite deliverable: something "
+            "decided, proved, computed or refuted. Not \"explore X\". Say:\n"
+            "  --front    its direction: one of the fronts above, or a new one (a short key, like sat-small-n)\n"
+            f"  --method   one of {', '.join(S.METHODS)}\n"
+            "  --title, --file FILE   exactly what to do, what to read first, what counts as a result, and where "
+            "you expect it to get hard\n"
+            "  --learn    what the project learns if it FAILS: a line that teaches nothing when it fails isn't "
+            "worth a round\n"
+            "  --differs  on a front that has lines already: what yours does that they didn't (required there)\n"
+            "  --needs    programs its work takes (lake, kissat...), so it goes to a machine that has them\n"
+            "  --from     ids of the findings it builds on\n"
+            f"`python -m legion line propose {t.key} --front F --method M --title \"...\" --file line.txt "
+            "--learn \"...\"`\n")
+
+
+def back_text(st: S.State, t: S.Task, others: list[dict]) -> str:
+    return (f"Lines proposed for the next round on {t.key}, by other agents. Back the ones you would run (one say "
+            "an owner; the round takes the fronts least explored first, then the best backed), and say what's wrong "
+            "with one that rests on something false: `python -m legion note " + t.key + " \"...\"`.\n\n"
+            + "\n".join(line_row(x, 400) for x in others[:8])
+            + "\n\n`python -m legion line back <id>`")
+
+
+def line_row(x: dict, width: int = 240) -> str:
+    ev = x["ev"]
+    return (f"  [{ev['id'][:8]}] {ev['front']} / {ev['method']} / {ev['move']}, by {ev['name']}"
+            + (f", backed by {', '.join(sorted(x['backed']))}" if x["backed"] else "")
+            + f": {ev['title']}. {_cut(ev['text'], width)}"
+            + (f"\n      differs: {_cut(ev['differs'], 200)}" if ev.get("differs", "").strip() else "")
+            + f"\n      if it fails: {_cut(ev['learn'], 200)}")
+
+
+def open_goals(st: S.State, me: str) -> list[S.Task]:
+    """The research goals still open, in an order of this agent's own, so they don't all start on the same one."""
+    return sorted((st.tasks[g] for g in st.goals if not st.tasks[g].cancelled and not st.done(g)
+                   and not st.refuted(g)), key=lambda t: hashlib.sha256((me + t.id).encode()).hexdigest())
+
+
+def launch_due(c: Ctx, now: float) -> bool:
+    """Launch the rounds that are due, if this agent may: True if it launched one."""
+    made = False
+    for t in open_goals(c.st, c.me):
+        chosen = due(c.st, t.id, now)
+        if chosen and may_launch(c.st, t, c.me, now):
+            try:
+                rnd = launch(c, t, chosen, now)
+            except Fail as e:  # another agent's launch got there first, or the goal's zone has no folder for it
+                print(f"legion: the round due on {t.key} wasn't launched here: {e}", flush=True)
+                continue
+            print(f"legion: round {rnd} on {t.key} launched from {len(chosen)} proposed line(s).", flush=True)
+            made = True
+    return made
+
+
+def cycle_work(c: Ctx, args, now: float) -> int | None:
+    """What the research goals want from an agent with no task to take: a round launched (RELAUNCH: claim looks
+    again), a line proposed, others' lines backed. None if they want nothing from it now."""
+    st, name = c.st, c.ident.name
+    goals = [t for t in open_goals(st, c.me) if not st.spent(t.id)]
+    if not goals:
+        return None
+    if launch_due(c, now):
+        return RELAUNCH
+    for t in goals:
+        waiting = st.open_lines(t.id)
+        # With three rounds' worth of lines waiting already, more proposals aren't what the goal lacks.
+        if not any(x["ev"]["author"] == c.me for x in waiting) and len(waiting) < 3 * MAX_ROUND_LINES:
+            return _hand(c, args, "line", t, propose_text(st, t, name, 0))
+    me = S.owner(name)
+    for t in goals:
+        others = [x for x in st.open_lines(t.id) if st.owner_now(x["ev"]) != me and me not in x["backed"]]
+        if others:
+            return _hand(c, args, "back", t, back_text(st, t, others))
+    return None
+
+
+def waiting_text(st: S.State, me: str, now: float) -> str:
+    """What an agent with nothing to take is told of the research goals: what they wait for, or that they're spent."""
+    out = []
+    for t in open_goals(st, me):
+        if st.spent(t.id):
+            out.append(f"{t.key} is spent: its last {st.dry(t.id)} rounds confirmed nothing, so no more are launched "
+                       "on it until someone brings something new and reopens it (`python -m legion goal "
+                       f"{t.key} --text \"...\"`: a founder, or a trusted agent on it). Don't go round it.")
+        else:
+            props = st.open_lines(t.id)
+            if props:
+                left = PROPOSE_WINDOW - (now - min(p["ev"]["ts"] for p in props))
+                out.append(f"{t.key} has {len(props)} line(s) proposed for its next round"
+                           + (f", launched in about {max(1, left / 60):.0f} min or as soon as enough agents propose"
+                              if left > 0 and not free_lines(st, t.id, now) else "") + ".")
+    return ("\n".join(out) + "\n") if out else ""
+
+
+# --- from a line's report to the map -------------------------------------------------------------------------------
+
+def _load(repo, path: str):
+    try:
+        return json.loads((repo / path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def lift(c: Ctx, t: S.Task) -> int:
+    """Record on the task's map what a round's piece just submitted says: a line's claims and dead ends as
+    findings, a check's verdicts on them. How many events it recorded. Never the reason a submit fails."""
+    role = t.attack.get("role")
+    parent = c.st.tasks.get(t.parent)
+    if role not in ("line", "check") or parent is None or not t.zone:
+        return 0
+    n, d = 0, t.zone[0].rstrip("/")
+    try:
+        if role == "line":
+            report = _load(c.repo, f"{d}/{A.REPORT}")
+            if not isinstance(report, dict):
+                return 0
+            mine = {f["ev"].get("cid"): f for f in c.st.findings_for(parent.id, t.id) if f["ev"]["author"] == c.me}
+            rows = [(str(x.get("id", ""))[:60], x) for x in report.get("claims") or [] if isinstance(x, dict)]
+            dead = str(report.get("dead_ends") or "").strip()
+            if len(dead) > 20:
+                rows.append(("dead-ends", {"statement": dead, "kind": "dead end", "status": "dead end",
+                                           "evidence": f"{d}/{A.REPORT}", "how_to_check": ""}))
+            for cid, x in rows:
+                statement = _cut(str(x.get("statement") or ""), S.MAX_FINDING)
+                status = x.get("status") if x.get("status") in S.FINDING_STATUS else "unproved"
+                old = mine.get(cid)
+                if not statement or old and old["ev"]["statement"] == statement and old["ev"]["status"] == status:
+                    continue
+                c.emit("finding.stated", task=parent.id, line=t.id, cid=cid, statement=statement, status=status,
+                       kind=str(x.get("kind") or "finding")[:30], evidence=_cut(str(x.get("evidence") or ""), S.MAX_FINDING),
+                       check=_cut(str(x.get("how_to_check") or ""), S.MAX_FINDING),
+                       **({"replaces": old["ev"]["id"]} if old else {}))
+                n += 1
+        else:
+            line = next((c.st.tasks[a] for a in t.apart if a in c.st.tasks), None)
+            verdicts = _load(c.repo, f"{d}/{A.VERDICTS_FILE}")
+            if line is None or not isinstance(verdicts, dict):
+                return 0
+            fs = {f["ev"].get("cid"): f for f in c.st.findings_for(parent.id, line.id)}
+            for v in verdicts.get("verdicts") or []:
+                f = fs.get(str(v.get("claim_id", ""))[:60]) if isinstance(v, dict) else None
+                if f is None or f["ev"]["author"] == c.me or v.get("verdict") not in S.VERDICTS:
+                    continue
+                c.emit("finding.judged", task=parent.id, finding=f["ev"]["id"], verdict=v["verdict"],
+                       reason=_cut(str(v.get("reason") or "-"), S.MAX_FINDING))
+                n += 1
+    except Fail as e:
+        print(f"legion: the map of {parent.key} didn't take all of it ({e}); the patch is submitted all the same.",
+              flush=True)
+    return n
+
+
+# --- the commands ----------------------------------------------------------------------------------------------------
+
+def _find(pool: dict, ref: str, what: str) -> dict:
+    hits = [x for k, x in pool.items() if k.startswith(ref)]
+    if len(hits) != 1:
+        raise Fail(f"there is no {what} {ref}" if not hits else f"{ref} is the start of several {what}s: give more of it", 3)
+    return hits[0]
+
+
+def _text(args) -> str:
+    if getattr(args, "file", None):
+        try:
+            return open(args.file, encoding="utf-8").read().strip()
+        except OSError as e:
+            raise Fail(f"can't read {args.file}: {e}", 2)
+    return (getattr(args, "text", None) or "").strip()
+
+
+def cmd_goal(args):
+    from .cli import out
+    c = Ctx(sync=not args.no_sync)
+    now = time.time()
+    if not args.task:
+        rows = []
+        for t in open_goals(c.st, ""):
+            d = map_data(c.st, t, now)
+            rows.append({"task": t.key, "rounds": len(d["rounds"]), "dry": d["dry"], "spent": d["spent"],
+                         "proposed": len(c.st.open_lines(t.id)), "findings": len(d["findings"]),
+                         "confirmed": sum(f["state"] == "confirmed" for f in d["findings"])})
+        out(args, {"goals": rows},
+            "\n".join(f"  {r['task']:<32} {r['rounds']} round(s), {r['confirmed']} of {r['findings']} findings "
+                      f"confirmed, {r['proposed']} line(s) proposed"
+                      + (", SPENT" if r["spent"] else f", {r['dry']} dry round(s)" if r["dry"] else "") for r in rows)
+            or "No task is a research goal. `python -m legion goal <task>` opens one (`help research`).")
+        return 0
+    t = c.task(args.task)
+    text = _text(args)
+    c.emit("goal.opened", task=t.id, **({"text": text} if text else {}), **({"closed": True} if args.close else {}))
+    c.sync()
+    print(f"{t.key} is no longer a research goal: claim hands it out like any task." if args.close else
+          f"{t.key} is a research goal: claim no longer hands it out whole. Its agents propose lines (`line "
+          f"propose`), rounds are made from them, and what they find is its map (`map {t.key}`).")
+    return 0
+
+
+def cmd_line(args):
+    from .cli import out
+    c = Ctx(sync=not args.no_sync)
+    now = time.time()
+    if args.action == "back":
+        x = _find(c.st.lines, args.ref, "line")
+        c.emit("line.backed", task=x["task"], line=x["ev"]["id"])
+        c.sync()
+        print(f"You back line {x['ev']['id'][:8]} ({x['ev']['title']}).")
+        return 0
+    t = c.task(args.ref)
+    if args.action == "list":
+        mine = any(x["ev"]["author"] == c.me for x in c.st.lines_for(t.id))
+        rows = [x for x in c.st.open_lines(t.id) if args.all or mine or x["ev"]["author"] == c.me]
+        hidden = len(c.st.open_lines(t.id)) - len(rows)
+        out(args, {"task": t.key, "lines": [x["ev"] for x in rows], "hidden": hidden},
+            (f"Lines proposed for the next round on {t.key}:\n" + "\n".join(line_row(x) for x in rows) if rows
+             else f"No line is proposed on {t.key}.")
+            + (f"\n({hidden} by other agents aren't shown until you have proposed yours: decide it first. --all "
+               "shows them.)" if hidden else ""))
+        return 0
+    text = _text(args)
+    if not (args.front and args.method and args.title and text and args.learn):
+        raise Fail("a line needs --front, --method, --title, its text (--file FILE or --text) and --learn "
+                   "(`python -m legion help research`)", 2)
+    frm = [_find(c.st.findings, x, "finding")["ev"]["id"] for x in args.frm or []]
+    ev = c.emit("line.proposed", task=t.id, front=args.front, method=args.method,
+                move=args.move or move_for(c.st, t.id, c.ident.name), title=args.title.strip(), text=text,
+                learn=args.learn.strip(), **({"differs": args.differs.strip()} if args.differs else {}),
+                **({"needs": args.needs} if args.needs else {}), **({"from": frm} if frm else {}))
+    made = launch_due(c, now)
+    c.sync()
+    others = [x for x in c.st.open_lines(t.id) if x["ev"]["author"] != c.me]
+    print(f"Line {ev['id'][:8]} proposed on {t.key}, front {args.front}."
+          + ("" if made else " " + waiting_text(c.st, c.me, time.time()).strip())
+          + (f"\nNow the others' ({len(others)}): `python -m legion line list {t.key}`, and back the ones you'd run."
+             if others else "") + "\nThen claim again: the round's lines are handed out by `claim`.")
+    return 0
+
+
+def cmd_finding(args):
+    c = Ctx(sync=not args.no_sync)
+    if args.action == "judge":
+        f = _find(c.st.findings, args.ref, "finding")
+        if args.verdict not in S.VERDICTS or not args.reason:
+            raise Fail(f"`finding judge <id> <{'|'.join(S.VERDICTS)}> --reason \"what you checked yourself\"`", 2)
+        c.emit("finding.judged", task=f["task"], finding=f["ev"]["id"], verdict=args.verdict, reason=args.reason.strip())
+        c.sync()
+        print(f"Your verdict on {f['ev']['id'][:8]}: {args.verdict}. It is now {c.st.finding_state(f)}.")
+        return 0
+    t = c.task(args.ref)
+    statement = (args.verdict or "").strip() or _text(args)  # the second positional is the statement here
+    if not statement or not args.status:
+        raise Fail(f"`finding add <task> \"the precise statement\" --status <{'|'.join(S.FINDING_STATUS)}> "
+                   "[--evidence where] [--check how] [--front F] [--kind K]`", 2)
+    line = c.task(args.line).id if args.line else None
+    frm = [_find(c.st.findings, x, "finding")["ev"]["id"] for x in args.frm or []]
+    ev = c.emit("finding.stated", task=t.id, statement=statement, status=args.status, kind=args.kind or "finding",
+                **{k: v for k, v in (("evidence", args.evidence), ("check", args.check), ("front", args.front),
+                                     ("line", line)) if v}, **({"from": frm} if frm else {}))
+    c.sync()
+    print(f"Finding {ev['id'][:8]} is on the map of {t.key}, unchecked until an agent other than you judges it "
+          f"(`python -m legion finding judge {ev['id'][:8]} confirmed --reason \"...\"`).")
+    return 0
+
+
+def cmd_map(args):
+    from .cli import out
+    c = Ctx(sync=not args.no_sync)
+    t = c.task(args.task)
+    d = map_data(c.st, t, time.time())
+    out(args, d, map_text(c.st, t, 10**6)
+        + ("\n" + waiting_text(c.st, c.me, time.time()) if t.id in c.st.goals else ""))
+    return 0
+
+
+def cmd_round(args):
+    c = Ctx(sync=not args.no_sync)
+    t, now = c.task(args.task), time.time()
+    props = c.st.open_lines(t.id)
+    if not props:
+        raise Fail(f"no line is proposed on {t.key}: `python -m legion line propose {t.key} ...`", 3)
+    if not may_launch(c.st, t, c.me, now):
+        raise Fail(f"a round is launched by a founder or a trusted agent that works on {t.key}", 3)
+    chosen = select(c.st, t.id, props, args.lines or round_size(c.st, now))
+    if args.dry_run:
+        print(f"The round on {t.key} would take {len(chosen)} of {len(props)} proposed line(s):\n"
+              + "\n".join(line_row(x) for x in chosen))
+        return 0
+    rnd = launch(c, t, chosen, now)
+    print(f"Round {rnd} on {t.key}: {len(chosen)} line(s), each with its check, and a synthesis. `claim` hands "
+          f"them out; `python -m legion attack status {t.key}` follows it.")
+    return 0
+
+
+def add_parser(sub) -> None:
+    s = sub.add_parser("goal", help="research goals: open problems worked on in rounds of proposed lines, never "
+                                    "handed out whole (`help research`)")
+    s.add_argument("task", nargs="?", help="open this task as a research goal (none: list them)")
+    s.add_argument("--text", help="what counts as progress on it; or, on a spent goal, what is new")
+    s.add_argument("--file")
+    s.add_argument("--close", action="store_true", help="it's no longer a research goal")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_goal)
+    s = sub.add_parser("line", help="propose a line of research for a goal's next round, back others', list them")
+    s.add_argument("action", choices=["propose", "back", "list"])
+    s.add_argument("ref", help="propose, list: the goal; back: the line's id")
+    s.add_argument("--front", help="its direction, a short key: an existing front or a new one")
+    s.add_argument("--method", choices=S.METHODS)
+    s.add_argument("--move", choices=S.MOVES, help="default: the move claim handed you")
+    s.add_argument("--title")
+    s.add_argument("--text")
+    s.add_argument("--file", help="the line's text: what to do, what counts as a result, where it gets hard")
+    s.add_argument("--learn", help="what the project learns if the line fails")
+    s.add_argument("--differs", help="what it does that earlier lines on its front didn't")
+    s.add_argument("--needs", nargs="*", help="programs its work takes on the machine")
+    s.add_argument("--from", dest="frm", nargs="*", help="findings it builds on")
+    s.add_argument("--all", action="store_true", help="list: the others' too, before you have proposed")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_line)
+    s = sub.add_parser("finding", help="put a finding on a task's map, or judge another agent's")
+    s.add_argument("action", choices=["add", "judge"])
+    s.add_argument("ref", help="add: the task; judge: the finding's id")
+    s.add_argument("verdict", nargs="?", help="add: the statement; judge: confirmed, refuted or \"not verified\"")
+    s.add_argument("--status", choices=S.FINDING_STATUS)
+    s.add_argument("--kind")
+    s.add_argument("--evidence", help="where its proof or data is (a path in main, a save)")
+    s.add_argument("--check", help="how another agent can confirm or refute it")
+    s.add_argument("--front")
+    s.add_argument("--line", help="the round's line it came from")
+    s.add_argument("--from", dest="frm", nargs="*", help="findings it rests on")
+    s.add_argument("--reason", help="judge: what you checked yourself and what you found")
+    s.add_argument("--text")
+    s.add_argument("--file")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_finding)
+    s = sub.add_parser("map", help="a task's map: what stands, what fell, what failed, its fronts and rounds")
+    s.add_argument("task")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_map)
+    s = sub.add_parser("round", help="launch a goal's next round now, from the lines proposed")
+    s.add_argument("task")
+    s.add_argument("--lines", type=int, help="how many lines (default: by the agents active)")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_round)

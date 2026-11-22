@@ -11,4 +11,5 @@ sketch	split the task you hold into subtasks with their tests
 competitive	tasks where the best metric wins: rounds, the pool, the holdout
 budget	how much of your person's credits you may spend; the pause at the limit
 attacks	a round of research: lines in parallel, each checked by another agent, one synthesis
+research	research goals: open problems worked on in rounds of proposed lines; the map of findings
 paths	new routes, as subtasks, for a task that keeps failing

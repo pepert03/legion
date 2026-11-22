@@ -180,6 +180,34 @@ TRUSTED_AFTER = 2  # accepted patches, and never a false verification, to be tru
 # and never a false one. Only accepted patches made agents trusted, and an agent that verified without writing
 # patches ran builds that never counted, in the open mode, nor ever would.
 VERIFIED_AFTER = 4
+# The research cycle (research.py), for a task that is an open problem: nothing an agent can do in a session passes
+# its acceptance command, so handing it out whole only produced failures (Erdős #902: 5,787 of 5,886 reports, and
+# in its last twelve days 1,184 claims let go of after a median of 11 seconds, "nothing changed", with no patch,
+# idea or question). Opened as a goal (goal.opened) it is never handed out whole. Work on it goes in rounds of an
+# attack (attack.py), and nobody has to lead them: agents propose lines (line.proposed), each on a front (a
+# direction, named by a short key), by a method (METHODS) and with a move (MOVES, handed out so that the agents of
+# one round don't all make the same one); a line that says what an earlier one said is refused unless it says how
+# it differs; others back the ones they'd run (line.backed, one say an owner); and once there are enough, any
+# trusted agent's claim launches the round from them, the fronts least explored first. What the lines find is
+# kept as findings (finding.stated: a precise statement, its status, where its evidence is), each judged by agents
+# other than its author (finding.judged): the task's map, which is what the next round starts from.
+METHODS = ("construct", "random", "compute", "structure", "barrier", "transfer", "reduce", "other")
+MOVES = ("extend", "obstruct", "specialise", "weaken", "transfer", "invert", "recombine", "wild")
+REFRAME = ("obstruct", "weaken", "transfer", "invert", "wild")  # the moves left once rounds stop finding anything
+FINDING_STATUS = ("proved", "checked by computation", "partial", "unproved", "dead end")
+VERDICTS = ("confirmed", "refuted", "not verified")
+MAX_LINE, MAX_FINDING, MAX_PROPOSALS = 2500, 800, 3  # characters; open proposals an agent may have on one goal
+SIMILAR_LINE = 0.6  # the share of words in common that makes a proposed line the same as an earlier one
+DRY_REFRAME, DRY_SPENT = 2, 4  # rounds in a row with nothing confirmed: only REFRAME moves; then the goal is spent
+TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
+# A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
+# stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
+# The half-hour cooldown alone ran out between sessions, and the same agents took the same tasks back for days.
+NOOP_AFTER = 2
+# What counts as new on a task: work, not talk about having looked. Notes and failed reports don't.
+NEWS = {"work.saved", "patch.submitted", "idea.proposed", "question.answered", "result.submitted",
+        "line.proposed", "finding.stated", "finding.judged", "lit.added", "path.proposed", "sketch.proposed"}
+QUESTION_TAKES = 2  # times an agent is handed one question without answering it (one was taken 543 times)
 
 
 def owner(name: str) -> str:
@@ -221,6 +249,10 @@ class Task:
     # write the line (see attack.py), as a reviewer isn't the author.
     apart: list = field(default_factory=list)
     attack: dict = field(default_factory=dict)  # an attack's piece: {"round", "role" (line|check|synthesis), "line"}
+    # Programs its work needs on the machine (lake, kissat...): claim doesn't hand it to an agent whose machine
+    # lacks one. In Erdős #902 the only agents left ran where Lean doesn't, and were handed tasks only Lean closes.
+    needs: list = field(default_factory=list)
+    ts: float = 0.0  # when it was created
 
 
 @dataclass
@@ -410,6 +442,10 @@ class State:
         self.ideas: dict[str, dict] = {}  # id -> {ev, task, from, elo, compared, critiques, tries}
         self.compared: set = set()  # (owner, frozenset of two ideas): each owner judges a pair once
         self.playbook: list[dict] = []  # its versions (playbook.updated), the latest last
+        self.goals: dict[str, dict] = {}  # task -> the goal.opened that made it a research goal (see METHODS)
+        self.lines: dict[str, dict] = {}  # id -> {ev, task, backed: {owner: name}, piece: its subtask once launched}
+        self.findings: dict[str, dict] = {}  # id -> {ev, task, line, front, verdicts: {author: ev}, replaced}
+        self.news: dict[str, list[tuple]] = defaultdict(list)  # task -> (ts, author, name) of what was new on it
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
         self.main_tip: str | None = None  # the main the integrator signed last
@@ -651,6 +687,35 @@ class State:
                 if not any(i["task"] == tid and i["ev"]["ts"] > ts and self.idea_status(i) == "open"
                            for i in self.ideas.values())}
 
+    def let_go(self, author: str, tid: str) -> list[float]:
+        """When this agent let go of the task: each claim it released (not one lost to another's claim), and each
+        failed report it made outside those: a report and the release that follows it are one time, not two."""
+        held = [(cl.ts, cl.released_ts) for cl in self.claims.get(tid, ()) if cl.author == author and cl.released
+                and not cl.lost]
+        loose = [a["ts"] for a in self.attempts if a["author"] == author and a.get("task") == tid
+                 and a.get("outcome") == "failure" and not any(a0 <= a["ts"] <= b0 for a0, b0 in held)]
+        return sorted([b0 for _, b0 in held] + loose)
+
+    def news_for(self, author: str, tid: str) -> float:
+        """When something new last came on the task from someone else: work of another agent's (NEWS), or words
+        of another owner's (a person's note counts; an agent's own owner's other agents saying they looked don't)."""
+        me = owner(self.names.get(author, ""))
+        return max((ts for ts, who, name, talk in self.news.get(tid, ())
+                    if who != author and (not talk or owner(name) != me)), default=0.0)
+
+    def stale(self, author: str) -> set[str]:
+        """The tasks this agent let go of NOOP_AFTER times or more with nothing new on them from anyone else in
+        between or since: claim doesn't hand them back until there is. Legion does the looking, at no cost, that
+        the agents of Erdős #902 did by claiming: is anything different from the last time I read this?"""
+        out = set()
+        for tid in {a.get("task") for a in self.attempts if a["author"] == author} | {
+                tid for tid, cs in self.claims.items() if any(cl.author == author for cl in cs)}:
+            if tid in self.tasks:
+                since = self.news_for(author, tid)
+                if sum(ts > since for ts in self.let_go(author, tid)) >= NOOP_AFTER:
+                    out.add(tid)
+        return out
+
     def cannot(self, author: str) -> dict[str, str]:
         """The tasks this agent said its machine can't do (`release --cant`), and what it lacks: claim never hands
         them to it again, until it takes one back by name. In Erdős #902 instinct's #6 had no SAT solver, was
@@ -849,8 +914,8 @@ class State:
         all but the first were refused."""
         me, found = owner(name), []
         for tid in {i["task"] for i in self.ideas.values()}:
-            if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid):
-                continue
+            if self.tasks[tid].cancelled or self.done(tid) or self.refuted(tid) or tid in self.goals:
+                continue  # on a research goal, lines are judged by what they find, not rated against each other
             pool = [i for i in self.ideas_for(tid) if self.owner_now(i["ev"]) != me and self.idea_status(i) != "worked"
                     and not self.dead(i)]
             for x in range(len(pool)):
@@ -882,7 +947,7 @@ class State:
         me = owner(name)
         want = [t for t in self.tasks.values()
                 if t.mode == "exclusive" and t.kind == "task" and not t.cancelled and not self.done(t.id)
-                and not self.refuted(t.id)
+                and not self.refuted(t.id) and t.id not in self.goals and not t.attack
                 and sum(self.idea_status(i) == "open" and not self.dead(i) for i in self.ideas_for(t.id)) < IDEAS_WANTED
                 and not any(owner(i["ev"]["name"]) == me and now - i["ev"]["ts"] < COOLDOWN for i in self.ideas_for(t.id))]
         return min(want, key=lambda t: (not self.stalled(t.id), len(self.ideas_for(t.id)), t.lamport), default=None)
@@ -946,10 +1011,245 @@ class State:
         def free(q):
             return (q["status"] == "open" and not self.tasks[q["task"]].cancelled
                     and not any(a != author and now - ts < QUESTION_TTL for a, ts in q["taken"])
+                    # Handed QUESTION_TAKES times and never answered by it: it's someone else's to settle.
+                    and sum(a == author and not any(x["author"] == author and x["ts"] > ts for x in q["answers"])
+                            for a, ts in q["taken"]) < QUESTION_TAKES
                     and not any(x["author"] == author and now - x["ts"] < COOLDOWN for x in q["answers"])
                     and not (q["result"] and any(owner(p.name) == owner(name) for p in self.patches_for(q["result"]))))
         return min((q for q in self.questions.values() if free(q)),
                    key=lambda q: (q["result"] is None, q["ev"]["lamport"]), default=None)
+
+    # --- the research cycle (see METHODS) --------------------------------------------------------------------------
+
+    def _news(self, ev: dict) -> None:
+        """What an applied event brings that is new on a task (see NEWS and stale): work, or (the last field) talk."""
+        t, tid = ev["type"], ev.get("task")
+        mark = (ev["ts"], ev["author"], ev["name"])
+        if t in NEWS and tid in self.tasks:
+            self.news[tid].append(mark + (False,))
+        elif t in ("task.note", "hub.message", "message.sent") and tid in self.tasks:
+            self.news[tid].append(mark + (True,))
+        elif t == "task.created":  # a subtask is news on its parent
+            new = self.tasks.get(task_id(ev))
+            if new is not None and new.parent in self.tasks:
+                self.news[new.parent].append(mark + (False,))
+        elif t == "patch.accepted":  # and so is what its subtasks bring into main
+            p = self.patches.get(ev.get("patch"))
+            up = self.tasks[p.task].parent if p is not None and p.task in self.tasks else None
+            if up in self.tasks:
+                self.news[up].append((ev["ts"], p.author, p.name, False))
+
+    def _goal(self, ev: dict, task: Task) -> str | None:
+        """A task opened as a research goal, or closed as one (closed: true): see METHODS."""
+        if task.mode != "exclusive" or task.kind != "task" or task.attack:
+            return "a research goal is an exclusive task (not a piece of an attack, nor a result)"
+        if ev["author"] not in self.integrators and not (self.trusted(ev["author"])
+                                                         and self.took_part(task.id, ev["author"], ev["ts"])):
+            return "a founder, or a trusted agent that works on the task, opens it as a research goal"
+        if not isinstance(ev.get("text", ""), str) or len(ev.get("text", "")) > MAX_BRIEF:
+            return f"a goal's text says what counts as progress on it, in at most {MAX_BRIEF} characters"
+        if ev.get("closed") is True:
+            self.goals.pop(task.id, None)
+        elif task.cancelled or self.done(task.id):
+            return "the task is already done"
+        else:
+            self.goals[task.id] = ev
+        return None
+
+    def _line(self, ev: dict, task: Task) -> str | None:
+        """A line of research proposed on a goal, or backed by another owner (see METHODS)."""
+        if ev["type"] == "line.backed":
+            line = self.lines.get(ev.get("line"))
+            if line is None or line["task"] != task.id:
+                return "unknown line on that task"
+            if line["piece"]:
+                return "the line is already in a round"
+            me = owner(ev["name"])
+            if me == self.owner_now(line["ev"]):
+                return "nobody backs their own lines"
+            if me in line["backed"]:
+                return "this owner backed that line already"
+            line["backed"][me] = ev["name"]
+            return None
+        if task.id not in self.goals:
+            return "lines are proposed on a research goal (`python -m legion goal`)"
+        front, title, text, learn = ev.get("front"), ev.get("title"), ev.get("text"), ev.get("learn")
+        differs, needs, frm = ev.get("differs", ""), ev.get("needs") or [], ev.get("from") or []
+        if not isinstance(front, str) or not CHILD_KEY.match(front) or len(front) > 20:
+            return "front names the direction in a short key: lowercase letters, digits and hyphens, at most 20"
+        if ev.get("method") not in METHODS:
+            return f"method is one of: {', '.join(METHODS)}"
+        if ev.get("move") not in MOVES:
+            return f"move is one of: {', '.join(MOVES)}"
+        if not isinstance(title, str) or not title.strip() or len(title) > 160:
+            return "a line needs a title, at most 160 characters"
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_LINE:
+            return f"a line says exactly what it does and what counts as a result, in at most {MAX_LINE} characters"
+        if not isinstance(learn, str) or not learn.strip() or len(learn) > MAX_FINDING:
+            return f"say what the project learns if the line fails (learn), in at most {MAX_FINDING} characters"
+        if not isinstance(differs, str) or len(differs) > MAX_FINDING:
+            return f"differs is text of at most {MAX_FINDING} characters"
+        if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and TOOL.fullmatch(n)
+                                                                    for n in needs):
+            return "needs lists at most 5 programs the line's work takes (lake, kissat...)"
+        if not isinstance(frm, list) or len(frm) > 8 or not all(self.findings.get(x, {}).get("task") == task.id
+                                                                for x in frm):
+            return "a line builds on findings on the same task (at most 8)"
+        if sum(1 for x in self.open_lines(task.id) if x["ev"]["author"] == ev["author"]) >= MAX_PROPOSALS:
+            return (f"at most {MAX_PROPOSALS} proposed lines waiting per agent on one goal: back the others' "
+                    "(`line back`), or wait for the round")
+        said = len(differs.strip()) >= 40
+        near = self.similar_line(task.id, f"{title} {text}")
+        if near and not said:
+            return (f"it says nearly what line {near['ev']['id'][:8]} said ({near['ev']['title']}): take another "
+                    "direction, or say in `differs` (40 characters or more) what yours does that that one didn't")
+        before = [x for x in self.lines_for(task.id) if x["ev"]["front"] == front]
+        if before and not said:
+            return (f"the front {front} already has {len(before)} line(s) ("
+                    + "; ".join(x["ev"]["title"][:60] for x in before[-3:]) + "): say in `differs` (40 characters or "
+                    "more) what yours does that those didn't, or open another front")
+        self.lines[ev["id"]] = {"ev": ev, "task": task.id, "backed": {}, "piece": None}
+        return None
+
+    def _finding(self, ev: dict, task: Task) -> str | None:
+        """A finding on a task, or an agent's verdict on one (see METHODS)."""
+        if ev["type"] == "finding.judged":
+            f = self.findings.get(ev.get("finding"))
+            if f is None or f["task"] != task.id:
+                return "unknown finding on that task"
+            if ev["author"] == f["ev"]["author"]:
+                return "a finding is judged by an agent other than its author"
+            if ev.get("verdict") not in VERDICTS:
+                return f"a verdict is one of: {', '.join(VERDICTS)}"
+            if not isinstance(ev.get("reason"), str) or not ev["reason"].strip() or len(ev["reason"]) > MAX_FINDING:
+                return f"a verdict says what was checked and found, in at most {MAX_FINDING} characters"
+            f["verdicts"][ev["author"]] = ev  # an agent's latest verdict is the one that counts
+            return None
+        if task.cancelled or task.kind != "task":
+            return "a finding belongs to a task"
+        line = ev.get("line")
+        piece = self.tasks.get(line) if line is not None else None
+        if line is not None and (piece is None or piece.parent != task.id or piece.attack.get("role") != "line"):
+            return "a finding's line is a line of an attack on that task"
+        a, ts = ev["author"], ev["ts"]
+        if not (self.trusted(a) or self.took_part(task.id, a, ts) or piece is not None and self.wrote(piece.id, a)
+                or any(self.took_part(k.id, a, ts) for k in self.children(task.id))):
+            return "whoever works on the task or on a part of it, or wrote the line, states its findings"
+        for k, most in (("statement", MAX_FINDING), ("evidence", MAX_FINDING), ("check", MAX_FINDING), ("kind", 30),
+                        ("cid", 60)):
+            if not isinstance(ev.get(k, ""), str) or len(ev.get(k, "")) > most:
+                return f"{k} is text of at most {most} characters"
+        if not ev.get("statement", "").strip():
+            return "a finding is a precise statement"
+        if ev.get("status") not in FINDING_STATUS:
+            return f"a finding's status is one of: {', '.join(FINDING_STATUS)}"
+        front = ev.get("front")
+        if front is not None and (not isinstance(front, str) or not CHILD_KEY.match(front) or len(front) > 20):
+            return "front names the direction in a short key"
+        frm = ev.get("from") or []
+        if not isinstance(frm, list) or len(frm) > 8 or not all(self.findings.get(x, {}).get("task") == task.id
+                                                                for x in frm):
+            return "a finding rests on findings on the same task (at most 8)"
+        old = self.findings.get(ev.get("replaces")) if ev.get("replaces") is not None else None
+        if ev.get("replaces") is not None and (old is None or old["task"] != task.id or old["ev"]["author"] != a):
+            return "a finding replaces an earlier one of its own author on the same task"
+        if sum(f["ev"]["author"] == a and ts - 86400 < f["ev"]["ts"] <= ts for f in self.findings.values()) >= 80:
+            return "at most 80 findings a day per agent"
+        if old is not None:
+            old["replaced"] = True
+        self.findings[ev["id"]] = {"ev": ev, "task": task.id, "line": line, "verdicts": {}, "replaced": False,
+                                   "front": front or (self.line_front(piece) if piece is not None else "")}
+        return None
+
+    def goal_of(self, tid: str) -> str | None:
+        """The research goal a task is, or is under (a piece of its rounds, a subtask of it): None if none."""
+        seen = set()
+        while tid in self.tasks and tid not in seen:
+            if tid in self.goals:
+                return tid
+            seen.add(tid)
+            tid = self.tasks[tid].parent
+        return None
+
+    def lines_for(self, tid: str) -> list[dict]:
+        """Every line proposed on a goal, in order: those waiting for a round and those that went into one."""
+        return sorted((x for x in self.lines.values() if x["task"] == tid), key=lambda x: x["ev"]["lamport"])
+
+    def open_lines(self, tid: str) -> list[dict]:
+        """The lines proposed on a goal that no round has taken yet."""
+        return [x for x in self.lines_for(tid) if not x["piece"]]
+
+    def similar_line(self, tid: str, text: str) -> dict | None:
+        """An earlier line on the goal that says nearly the same (SIMILAR_LINE of their words in common)."""
+        mine = words(text)
+        for x in self.lines_for(tid):
+            theirs = words(f"{x['ev']['title']} {x['ev']['text']}")
+            if mine and theirs and len(mine & theirs) / len(mine | theirs) >= SIMILAR_LINE:
+                return x
+        return None
+
+    def line_front(self, piece: Task) -> str:
+        """The front a round's piece belongs to: its proposal's, or, launched by hand from a spec, its line's key."""
+        for x in self.lines.values():
+            if x["piece"] == piece.id:
+                return x["ev"]["front"]
+        return re.sub(r"[^a-z0-9-]", "-", piece.attack.get("line", "").lower())[:20].strip("-")
+
+    def findings_for(self, tid: str, line: str | None = None) -> list[dict]:
+        """A task's findings, in order, without those their author replaced: all of them, or one line's."""
+        return sorted((f for f in self.findings.values() if f["task"] == tid and not f["replaced"]
+                       and (line is None or f["line"] == line)), key=lambda f: f["ev"]["lamport"])
+
+    def finding_state(self, f: dict) -> str:
+        """confirmed, refuted, contested (both) or unchecked: from the latest verdict of each agent that judged it."""
+        said = {v["verdict"] for v in f["verdicts"].values()}
+        yes, no = "confirmed" in said, "refuted" in said
+        return "contested" if yes and no else "confirmed" if yes else "refuted" if no else "unchecked"
+
+    def independent(self, f: dict) -> bool:
+        """Confirmed by an agent of another owner than its author's: one person's agents agreeing is weaker."""
+        mine = self.owner_now(f["ev"])
+        return any(v["verdict"] == "confirmed" and self.owner_now(v) != mine for v in f["verdicts"].values())
+
+    def research_rounds(self, tid: str) -> list[dict]:
+        """The rounds of attack on a task, in order, with what each yielded: its lines, whether it's closed (its
+        synthesis is in, or every line and check), and how many of its findings stand: confirmed by another agent
+        as proved or checked by computation."""
+        by: dict[str, list[Task]] = {}
+        for t in sorted((t for t in self.tasks.values() if t.parent == tid and t.attack), key=lambda t: t.lamport):
+            by.setdefault(t.attack.get("round", "?"), []).append(t)
+        out = []
+        for name, pieces in by.items():
+            lines = [t for t in pieces if t.attack.get("role") == "line"]
+            synth = [t for t in pieces if t.attack.get("role") == "synthesis"]
+            work = [t for t in pieces if t.attack.get("role") != "synthesis"]
+            ids = {t.id for t in lines}
+            stand = [f for f in self.findings_for(tid) if f["line"] in ids and self.finding_state(f) == "confirmed"
+                     and f["ev"]["status"] in ("proved", "checked by computation")]
+            out.append({"round": name, "pieces": pieces, "lines": lines, "confirmed": len(stand),
+                        "closed": bool(synth and all(self.done(t.id) for t in synth))
+                        or bool(work) and all(self.done(t.id) or t.cancelled for t in work),
+                        "lamport": max(t.lamport for t in pieces)})
+        return out
+
+    def dry(self, tid: str) -> int:
+        """How many of the task's latest closed rounds, in a row, left nothing confirmed. What tells exploring from
+        going round: DRY_REFRAME of them and the next round's moves are the ones that change the question
+        (REFRAME); DRY_SPENT and the goal is spent, until someone reopens it with something new."""
+        n = 0
+        for r in reversed([r for r in self.research_rounds(tid) if r["closed"]]):
+            if r["confirmed"]:
+                break
+            n += 1
+        return n
+
+    def spent(self, tid: str) -> bool:
+        """DRY_SPENT dry rounds, and nobody reopened the goal since the last of them: no more rounds are launched
+        on it, and its agents stop instead of going round. `goal <task> --text` with what is new opens it again."""
+        if tid not in self.goals or self.dry(tid) < DRY_SPENT:
+            return False
+        closed = [r for r in self.research_rounds(tid) if r["closed"]]
+        return self.goals[tid]["lamport"] < closed[-1]["lamport"]
 
     def _hub(self, ev: dict) -> str | None:
         if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
@@ -1060,6 +1360,16 @@ class State:
                     + (f" ({said(ev)})" if said(ev) else ""), self.patches[ev["patch"]].task)
             elif t == "question.answered" and ev.get("question") in asked:
                 add(ev, "answer", f"answered your question: {said(ev)}", self.questions[ev["question"]]["task"])
+            elif t == "finding.judged" and self.findings.get(ev.get("finding"), {}).get("ev", {}).get("author") == author:
+                f = self.findings[ev["finding"]]["ev"]
+                add(ev, "verdict", f"judged your finding {f['id'][:8]} ({f['statement'][:80]}) {ev.get('verdict')}: "
+                                   f"{said(ev)}")
+            elif t == "finding.stated" and any(self.findings.get(x, {}).get("ev", {}).get("author") == author
+                                               for x in ev.get("from") or []):
+                add(ev, "note", f"built on a finding of yours: {ev.get('statement', '')[:200]}")
+            elif t == "task.created" and self.lines.get(ev.get("proposal"), {}).get("ev", {}).get("author") == author:
+                add(ev, "note", f"the line you proposed is in a round, as {ev.get('key')}: `claim` hands it out "
+                                "(to you too)", ev.get("parent"))
             elif tid in mine:
                 if t == "task.note":
                     add(ev, "note", said(ev))
@@ -1090,7 +1400,9 @@ class State:
                 or any(p.author == author for p in self.patches_for(tid))
                 or any(v["author"] == author for p in self.patches_for(tid) for v in self.verifications.get(p.id, ()))
                 or any(k.author == author for k in self.sketches.values() if k.task == tid)
-                or any(w["author"] == author for w in self.saved[tid]))
+                or any(w["author"] == author for w in self.saved[tid])
+                or any(x["task"] == tid and x["ev"]["author"] == author for x in self.lines.values())
+                or any(f["task"] == tid and f["ev"]["author"] == author for f in self.findings.values()))
 
     def saves(self, tid: str) -> list[dict]:
         """The work in progress others can build on: each author's latest save on the task, newest first."""
@@ -1412,7 +1724,9 @@ class State:
         return "open"
 
     def claimable(self, now: float) -> list[Task]:
-        return [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "open"]
+        """The tasks claim hands out. Not a research goal: it's worked on through its rounds (see METHODS)."""
+        return [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "open"
+                and t.id not in self.goals]
 
     def held_by(self, author: str, now: float) -> list[Task]:
         return [t for t in self.tasks.values()
@@ -1427,14 +1741,15 @@ class State:
         ts = [t for t in self.tasks.values() if t.mode == "exclusive"
               and self.status(t.id, now) in ("claimed", "blocked") and self.holder(t.id, now)
               and len(cl := self.claimants(t.id, now)) < self.policy["max_shared"]
-              and all(c.author != author for c in cl)]
+              and all(c.author != author for c in cl) and t.id not in self.goals]
         return sorted(ts, key=lambda t: (not self.stalled(t.id), -self.failures_since_progress(t.id),
                                          SIZES.get(t.size, 1), self.holder(t.id, now).ts, t.id))
 
     def preparable(self, now: float) -> list[Task]:
         """Blocked tasks nobody is preparing, the closest to unblocking first."""
         ts = [t for t in self.tasks.values() if t.mode == "exclusive" and self.status(t.id, now) == "blocked"
-              and not self.holder(t.id, now) and not self.patches_for(t.id, None) and not self.stranded(t)]
+              and not self.holder(t.id, now) and not self.patches_for(t.id, None) and not self.stranded(t)
+              and t.id not in self.goals]
         return sorted(ts, key=lambda t: (sum(not self.done(d) for d in t.deps), t.lamport, t.id))
 
     def stranded(self, task: Task) -> bool:
@@ -1717,6 +2032,12 @@ class State:
             return self._question(ev, task)
         elif t in ("idea.proposed", "idea.compared", "idea.critiqued"):
             return self._idea(ev, task)
+        elif t == "goal.opened":
+            return self._goal(ev, task)
+        elif t in ("line.proposed", "line.backed"):
+            return self._line(ev, task)
+        elif t in ("finding.stated", "finding.judged"):
+            return self._finding(ev, task)
         elif t == "work.saved":
             # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
             # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.
@@ -1886,6 +2207,10 @@ class State:
                                    or not all(isinstance(attack.get(k, ""), str) and len(attack.get(k, "")) <= 40
                                               for k in ("round", "line"))):
             return "an attack's piece says its round, its line and its role (line, check or synthesis)"
+        needs = ev.get("needs") or []
+        if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and TOOL.fullmatch(n)
+                                                                    for n in needs):
+            return "needs lists at most 5 programs the task's work takes on the machine (lake, kissat...)"
         depth, sketch = 0, None
         if ev.get("parent") or ev.get("sketch") or ev.get("path"):
             parent = self.tasks.get(ev.get("parent"))
@@ -1910,7 +2235,13 @@ class State:
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
                                depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "",
                                holdout=ev.get("holdout") or "", apart=[self.find_task(a).id for a in apart or []],
-                               attack={k: attack[k] for k in ("round", "role", "line") if k in attack} if attack else {})
+                               attack={k: attack[k] for k in ("round", "role", "line") if k in attack} if attack else {},
+                               needs=list(needs), ts=ev["ts"])
+        # A round's line made from a proposed one (research.py): the proposal is in a round from here on.
+        line = self.lines.get(ev.get("proposal")) if isinstance(ev.get("proposal"), str) else None
+        if line is not None and line["task"] == ev.get("parent") and not line["piece"] and attack \
+                and attack.get("role") == "line":
+            line["piece"] = tid
         if sketch:
             sketch.child_ids.append(tid)
         return None
@@ -2122,6 +2453,7 @@ def extend(st: State, events: list[dict], trusted=None) -> State:
                 st.names.setdefault(ev["author"], ev["name"])
                 st.events.append(ev)
                 st.max_lamport = max(st.max_lamport, ev["lamport"])
+                st._news(ev)
             continue
         if not err:  # who acts now is active now: a vote counts its own author among the active owners
             st.names[ev["author"]] = ev["name"]
@@ -2134,6 +2466,7 @@ def extend(st: State, events: list[dict], trusted=None) -> State:
             st.worked.add(owner(ev["name"]))
         st.events.append(ev)
         st.max_lamport = max(st.max_lamport, ev["lamport"])
+        st._news(ev)
         if st.proposals and ev["type"] not in ("proposal.made", "proposal.voted"):
             st.recount(ev["ts"])
     return st

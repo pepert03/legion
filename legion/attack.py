@@ -167,6 +167,10 @@ def check_spec(spec: dict) -> str | None:
                 return f"line {key} needs {k}, text of at most {MAX_TEXT} characters"
         if not isinstance(ln.get("front", ""), str) or len(ln.get("front", "")) > 60:
             return f"line {key}: front is a few words"
+        needs = ln.get("needs") or []
+        if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and S.TOOL.fullmatch(n)
+                                                                    for n in needs):
+            return f"line {key}: needs lists at most 5 programs its work takes (lake, kissat...)"
     if spec.get("round") is not None and (not isinstance(spec["round"], str) or not S.CHILD_KEY.match(spec["round"])):
         return "round is a short name: lowercase letters, digits and hyphens"
     if spec.get("folder") is not None and (not isinstance(spec["folder"], str) or not spec["folder"].strip("/")
@@ -332,6 +336,8 @@ def plan(st: S.State, parent: S.Task, spec: dict, lead: str) -> tuple[str, list[
                            accept=accept(key), body=body, size="L", mode="exclusive", deps=[],
                            contract={"test_report.py": report_contract(key, f"{d}/{REPORT}")},
                            attack={"round": rnd, "role": "line", "line": ln["key"]}))
+        # What the line's work takes on the machine, and the proposal it was made from (research.py), if any.
+        pieces[-1].update({k: ln[k] for k in ("needs", "proposal") if ln.get(k)})
         ckey, cd = f"{key}-check", f"{d}-check"
         extra = spec.get("check", "").strip()
         cbody = CHECK.format(**shared, key=ckey, line=ln["key"], front=front, title=ln["title"].strip(),

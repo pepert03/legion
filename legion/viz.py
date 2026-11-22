@@ -104,6 +104,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         tasks.append({"id": t.id, "key": t.key, "title": t.title, "status": status, "mode": t.mode,
                       # Where it's drawn: under its parent, or the task its key starts with (see State.under).
                       "depth": st.depth_under(t), "parent": st.under(t), "deps": t.deps, "size": t.size,
+                      "research": t.id in st.goals,
                       "kind": t.kind, "replicated": st.replications(t.id) if t.kind == "result" else [],
                       "questions": sum(q["task"] == t.id and q["status"] == "open" for q in st.questions.values()),
                       "ideas": [{"id": i["ev"]["id"], "text": i["ev"]["text"][:600], "elo": round(i["elo"]),
@@ -198,11 +199,48 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     recent = [item(e, st) for e in evs if e["type"] not in ROUTINE][-14:]
     return {"project": st.project.get("project") if st.project else None, "description": st.description,
+            "research": research_view(st, evs, now),
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
             "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent,
             "mode": st.policy["mode"], "policy": {k: st.policy[k] for k in ("quorum", "window", "audit")},
             "hub": {"messages": len(st.hub), "literature": len(st.literature)}}
+
+
+def research_view(st: S.State, evs: list[dict], now: float) -> dict:
+    """What the map view draws: the map of every task worked on in rounds (the research goals first), who did
+    something for whom (checked a finding, backed a line, answered a question, verified a patch), and the
+    project's pulse over the last day: new work against tasks taken and let go of."""
+    from . import research
+    worked = {t.parent for t in st.tasks.values() if t.attack} | {f["task"] for f in st.findings.values()}
+    shown = sorted((t for t in st.tasks.values() if (t.id in st.goals or t.id in worked) and not t.cancelled),
+                   key=lambda t: (t.id not in st.goals, st.done(t.id), t.lamport))
+    links: dict[tuple, int] = {}
+
+    def link(a, b, kind):
+        if a != b:
+            links[(a, b, kind)] = links.get((a, b, kind), 0) + 1
+    for f in st.findings.values():
+        for v in f["verdicts"].values():
+            link(v["author"], f["ev"]["author"], "checked")
+    for q in st.questions.values():
+        for a in q["answers"]:
+            link(a["author"], q["ev"]["author"], "answered")
+    for pid, vs in st.verifications.items():
+        if pid in st.patches:
+            for v in vs:
+                link(v["author"], st.patches[pid].author, "verified")
+    for ev in evs:
+        if ev["type"] == "line.backed" and ev.get("line") in st.lines:
+            link(ev["author"], st.lines[ev["line"]]["ev"]["author"], "backed")
+    day = [e for e in evs if now - e["ts"] <= 86400]
+    return {"maps": [research.map_data(st, t, now) for t in shown],
+            "links": [{"from": agent_id(a), "from_name": st.names.get(a, "?"), "to": agent_id(b),
+                       "to_name": st.names.get(b, "?"), "kind": kind, "n": n}
+                      for (a, b, kind), n in sorted(links.items(), key=lambda x: (-x[1], x[0]))[:40]],
+            "pulse": {"fresh": sum(e["type"] in S.NEWS or e["type"] == "patch.accepted" for e in day),
+                      "looks": sum(e["type"] == "task.released" and not e.get("lost") for e in day),
+                      "talk": sum(e["type"] in ("task.note", "hub.message", "message.sent") for e in day)}}
 
 
 def agent_id(author: str) -> str:
