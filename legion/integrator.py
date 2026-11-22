@@ -235,12 +235,21 @@ def prepare_merge(c: Ctx, commit: str, branch: str, allowed: list, msg: str, ont
     if tip and not coordgit.need_commit(repo, tip, wait=5):
         return None  # that main hasn't reached this node yet
     if not coordgit.fetch_patch(repo, branch):
-        return reject(f"branch {branch} not found", "missing")
+        return "rejected", {"reason": f"branch {branch} not found", "code": "missing"}
     if not coordgit.need_commit(repo, commit, branch, 5):
         if coordgit.is_p2p(repo):
             return None  # the event arrived before the commit: gossip will bring it on a later sync
-        return reject("the commit is not on its branch", "missing")
+        return "rejected", {"reason": "the commit is not on its branch", "code": "missing"}
     head = onto or tip or git(repo, "rev-parse", main + "^{commit}")
+    # A rejection read off the merge (it conflicts, it changes nothing, it leaves its zone) holds for the main it
+    # was merged on, and says which: on another main the state doesn't count it (see State.apply). In Erdős #902 an
+    # agent back after twelve days, its log not yet whole, merged two patches on the main of ten days before: a
+    # file that had gone into main since looked like theirs, outside their zone, and its rejection stood over
+    # the acceptance a node with the right main published half a minute earlier.
+    on_main = {"base": tip} if tip and not onto else {}
+
+    def reject(reason: str, code: str):  # noqa: F811 (the module's, with the main it was judged on)
+        return "rejected", {"reason": reason, "code": code, **on_main}
     # The merge runs on git objects (no worktree, no stash) and commands run on a plain copy of the files
     # in a short temporary path, so Windows' 260-character limit never gets in the way.
     # No container yet: with code from strangers this needs a sandbox.

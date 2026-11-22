@@ -1862,8 +1862,11 @@ class State:
         # Compare-and-swap on main: whatever moves main must say which main it was built on. If main has
         # moved since (another integrator got there first), the event doesn't count and the work is redone.
         # This, not the lease, is what keeps main from forking; the lease only avoids duplicated work.
-        if t in ("patch.accepted", "patch.reverted", "sketch.accepted", "main.updated") and ev.get("base") is not None \
-                and self.main_tip and ev["base"] != self.main_tip:
+        # A rejection read off a merge (conflict, zone, empty) names its main too, and on another one it doesn't
+        # count either: a node whose main was ten days old rejected, as leaving their zone, two patches that a
+        # node with the right main had just accepted.
+        if t in ("patch.accepted", "patch.rejected", "patch.reverted", "sketch.accepted", "main.updated") \
+                and ev.get("base") is not None and self.main_tip and ev["base"] != self.main_tip:
             return "stale base: main moved on since this was computed"
 
         if t.startswith("integrator."):

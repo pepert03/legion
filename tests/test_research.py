@@ -424,3 +424,23 @@ def test_findings_nobody_but_their_author_stands_behind_are_handed_out_to_judge(
     log.add(BEA, "finding.judged", task=tid, finding=g["id"], verdict="refuted", reason="the case n = 5 is missing")
     st = log.state()
     assert st.finding_state(st.findings[g["id"]]) == "contested" and st.finding_for(CEL.author, "cel")["ev"]["id"] == g["id"]
+
+
+def test_a_rejection_read_off_a_merge_counts_only_on_the_main_it_was_judged_on():
+    """An agent back after days, its log not whole yet, merged a patch on an old main and rejected it as leaving
+    its zone: on the main everyone has, that rejection doesn't count, and the patch can still be accepted."""
+    log, tid = research()
+    log.add(BOSS, "main.updated", commit="new-main")
+    p = log.add(BEA, "patch.submitted", task=tid, commit="c" * 40, branch="legion/p/x")
+    log.add(BOSS, "patch.rejected", patch=p["id"], task=tid, code="zone", reason="touches files outside its zone",
+            base="old-main")
+    st = log.state()
+    assert st.patches[p["id"]].verdict is None and "stale base" in st.ignored[-1][1]
+    log.add(BOSS, "patch.accepted", patch=p["id"], merge_commit="m" * 40, base="new-main")
+    assert log.state().patches[p["id"]].verdict == "accepted"
+    q = log.add(CEL, "patch.submitted", task=S.task_id(log.events[2]), commit="d" * 40, branch="legion/p/y")
+    log.add(BOSS, "patch.rejected", patch=q["id"], code="zone", reason="outside", base="m" * 40)  # on the main as it is
+    log.add(BOSS, "patch.rejected", patch=log.add(CEL, "patch.submitted", task=S.task_id(log.events[2]), commit="e" * 40,
+                                                   branch="legion/p/z")["id"], code="tests", reason="fails")  # no base
+    st = log.state()
+    assert st.patches[q["id"]].verdict == "rejected" and [x.verdict for x in st.patches.values()].count("rejected") == 2
