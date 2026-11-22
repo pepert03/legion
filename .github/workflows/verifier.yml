@@ -54,6 +54,10 @@ jobs:
       LEGION_SETUP: ${{ vars.LEGION_SETUP }}
       LEGION_AGENT: github-actions
       LEGION_VERIFY_INLINE: "1"
+      # Every command also takes from the node's storage what came by Radicle, not only what the relays hold: a
+      # runner's clone read the relays alone, missed events no relay had, worked out an older main than the
+      # project's, and (rightly) judged nothing.
+      LEGION_RADICLE: always
       CLONE: /home/runner/project
       EVERY: "1200"        # seconds between the starts of two cycles
       # Minutes after the run started past which no cycle starts: 330 (5 h 30 min), or what whoever started it asked.
@@ -189,8 +193,7 @@ jobs:
                           last = json.loads(line) if line.startswith("{") else last
                       except ValueError:
                           pass
-                  if last.get("verified"):
-                      print(json.dumps(last), flush=True)
+                  print(json.dumps(last), flush=True)
                   if p.returncode or not last.get("verified"):
                       if p.returncode:
                           print(p.stdout[-3000:], p.stderr[-3000:], sep="\n", flush=True)
