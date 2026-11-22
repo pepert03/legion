@@ -165,7 +165,7 @@ jobs:
           started, every = float(os.environ["STARTED"]), int(os.environ["EVERY"])
           until = int(os.environ["CYCLES_MINUTES"]) * 60
           cycle, total = 0, 0
-          while time.time() - started < until:
+          while cycle == 0 or time.time() - started < until:  # always one cycle, however short the run asked for
               cycle += 1
               t0, done = time.time(), 0
               while time.time() - t0 < every - 120:  # one cycle's checks end before the next starts
