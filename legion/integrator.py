@@ -662,6 +662,21 @@ def matches(repo, v: dict, tree: str) -> bool:
     return isinstance(reads, dict) and bool(reads) and blobs(repo, tree, list(reads)) == reads
 
 
+def log_behind(c: Ctx) -> str | None:
+    """The project's main as git has it (Radicle's, published by the nodes that merge), when the main this clone
+    works out from its log is an ancestor of it and not it: events are missing here. None if the log isn't behind,
+    or there is no way to tell (no such ref: a project of relays alone, a clone that never fetched)."""
+    tip = c.st.main_tip
+    if not tip or not coordgit.is_radicle(c.repo):
+        return None
+    p = coordgit.run(c.repo, "rev-parse", "--verify", "-q", "refs/remotes/rad/main^{commit}")
+    theirs = p.stdout.decode().strip() if p.returncode == 0 else ""
+    if not theirs or theirs == tip:
+        return None
+    behind = coordgit.run(c.repo, "merge-base", "--is-ancestor", tip, theirs).returncode == 0
+    return theirs if behind else None
+
+
 def trusted_verifiers(st: S.State, now: float) -> set[str]:
     """Whose verifications count: in the open mode, whom the state trusts (founders, and agents with accepted
     work and no false verification); otherwise the integrators, and agents with enough trust."""

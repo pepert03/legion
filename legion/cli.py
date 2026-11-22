@@ -1453,6 +1453,17 @@ def _verify(args):
     # A git older than 2.38 verifies (see integrator.merge_tree) and leaves what goes into main to the nodes that
     # merge as everyone does: a main is one tree for all.
     finalizes = open_mode and integrator.git_at_least(2, 38)
+    behind = integrator.log_behind(c)
+    if behind:
+        # Its log has a hole: the main it works out is one the project's main has left behind. What it judged on
+        # it would be wrong (in Erdős #902 a clone back after days rejected, on the main of eighteen days before,
+        # patches that were fine), so it judges nothing until it has caught up.
+        out(args, {"verified": None, "behind": behind},
+            f"This clone's log is behind the project: it works out main as {str(c.st.main_tip)[:10]}, and the main "
+            f"the project published ({behind[:10]}) is ahead of it. Some events haven't reached it, so it judges no "
+            "patch for now, since what it decided would be wrong. Run `python -m legion status` to sync and try "
+            "again; if it stays behind, tell your person: this clone may need to be joined afresh.")
+        return 0
     if finalizes:  # no integrator: first finalize what the others already verified
         integrator.finalize(c, log, timeout=args.timeout)
     why = {}

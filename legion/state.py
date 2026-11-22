@@ -2106,6 +2106,11 @@ class State:
                 return "unknown patch"
             if p.verdict:
                 return "the patch already had a verdict"
+            # A rejection that only follows from another verdict holds if that verdict does, in this log: a node
+            # whose log had a hole took a patch for rejected, and rejected the check built on it; everyone else,
+            # for whom that patch was waiting (and went in), took its word.
+            if t == "patch.rejected" and ev.get("code") == "base" and not self.doomed(p):
+                return "no patch it was built on is rejected"
             p.verdict = "accepted" if t == "patch.accepted" else "rejected"
             p.reason = ev.get("reason", "")
             p.code = ev.get("code")

@@ -471,3 +471,18 @@ def test_a_goals_old_whole_tasks_are_handed_out_after_what_the_goal_asks_for(tmp
     monkeypatch.setattr(S.State, "needs_brief", lambda self, *a, **k: None)
     assert main(["claim"]) == 0  # the goal asks nothing more of luis for now: the old whole task, then
     assert Ctx(sync=False).st.held_by(make_project.people["luis"].author, time.time())[0].key == "f/old"
+
+
+def test_a_rejection_that_follows_from_another_holds_only_if_that_one_does():
+    """A node with a hole in its log took a patch for rejected and rejected the check built on it: where that
+    patch isn't rejected, the rejection of what was built on it doesn't count."""
+    log, tid = research()
+    other = S.task_id(log.events[2])
+    p = log.add(BEA, "patch.submitted", task=tid, commit="c" * 40, branch="legion/p/x")
+    q = log.add(CEL, "patch.submitted", task=other, commit="d" * 40, branch="legion/p/y", on=[p["id"]])
+    log.add(BOSS, "patch.rejected", patch=q["id"], code="base", reason="it was built on a rejected patch")
+    st = log.state()
+    assert st.patches[q["id"]].verdict is None and "no patch it was built on is rejected" in st.ignored[-1][1]
+    log.add(BOSS, "patch.rejected", patch=p["id"], code="tests", reason="fails")
+    log.add(BOSS, "patch.rejected", patch=q["id"], code="base", reason="it was built on a rejected patch")
+    assert log.state().patches[q["id"]].verdict == "rejected"
