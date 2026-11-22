@@ -86,6 +86,7 @@ jobs:
         with:
           path: |
             ~/.radicle/storage
+            ~/.radicle/node/*.db*
             ~/project
             ~/.elan
           key: legion-verifier-${{ steps.slot.outputs.slot }}
@@ -93,9 +94,16 @@ jobs:
 
       - name: Radicle
         run: |
-          python -m legion radicle setup
+          # With a storage brought back from the cache the node takes a while to come up, longer than
+          # `rad node start` waits for it: it's given time, and asked again.
+          python -m legion radicle setup || true
+          export PATH="$HOME/.radicle/bin:$PATH"
           echo "$HOME/.radicle/bin" >> "$GITHUB_PATH"
-          sleep 30  # a node that has just started is still finding the seeds
+          for i in $(seq 1 30); do
+            if RAD_PASSPHRASE="" rad node status 2>/dev/null | grep -q "is running"; then break; fi
+            sleep 10
+          done
+          sleep 20  # a node that has just started is still finding the seeds
           python -m legion radicle setup | tail -n 2
 
       - name: Join the project, or catch up with it
