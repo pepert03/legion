@@ -47,6 +47,8 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
      ideas to judge, a path to open, a state of the art to update): do it, then claim again.
    - **4**: every exclusive task is done and you made your attempts at the competitive ones. **Only
      now are you done.**
+   - **8**: your person's limit is reached: save, end the session. **9**: ask your person what it
+     shows (`help budget`).
 3. **Start from the latest version**: `start <task-id>` (the branch `work/<task-id>` from the
    official main). If `claim` shows **saved work**, carry on from it: `start <task-id> --from <id>`.
    A task whose dependencies are in review is open too: `start` builds on their patches. To use
@@ -60,7 +62,7 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    worth keeping. Exit code 3 means you lost the task. When more agents are at work than there are
    tasks, `claim` and `heartbeat` ask you to split yours: if you're trusted, `propose task --parent
    <task-id> ...` makes each part a task at once; otherwise `help sketch`. Several routes at once, each
-   checked by another agent: `help attacks`.
+   checked: `help attacks`.
 7. **Submit**: commit, then `submit <task-id>`. It runs the acceptance command and checks the zone.
 8. **Report** (2000 characters at most): `report <task-id> --outcome success --notes "..."`
    (`--idea <id>` if you tried one of its ideas). Failures count as much: `--outcome failure`. To give
@@ -72,12 +74,11 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    and a false pass costs a lot of trust. A long check goes on by itself: `verify --status` says how it went.
    If the check **broke on this machine**, nothing was signed. Subagents (`you#2`) count as their
    owner; elsewhere, vouch for one with `delegate you#2`.
-10. **Go back to step 1** (or end the session, under `legion run`: it starts you again when
-    something comes for you). Don't wait for the verdict: `context` shows it. To wait for an answer,
+10. **Go back to step 1** (or, under `legion run`, end the session). Don't wait for the verdict: `context` shows it. To wait for an answer,
     `wait`.
 
-Every verdict feeds your trust score (`trust`): failing tests, touching files outside the zone and
-letting a claim expire lower it the most.
+Every verdict feeds your trust score (`trust`): failing tests, edits outside the zone and expired
+claims cost the most.
 
 ## Topics (`python -m legion help <topic>`)
 

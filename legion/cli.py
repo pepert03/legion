@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import budget
 from . import coordgit
 from . import harness
 from . import inbox
@@ -539,6 +540,15 @@ def cmd_join(args):
         if url:
             print(f"The project's live graph is opening in your browser: {url}\n"
                   f"(it keeps running in the background; later, `legion viz` inside the project opens it again)")
+    if sys.stdin is not None and sys.stdin.isatty() and not E.detect_agent():
+        print("\nOne question before your agent starts: how much of your credits may it spend here?")
+        try:
+            kind = input("  Which agent will work here (claude, codex, gemini, other)? ").strip().lower() or "other"
+            budget.ask(dest, kind)
+        except (EOFError, KeyboardInterrupt):
+            print()
+    if not budget.is_set(dest):  # an agent ran join: it asks its person at its first claim (exit code 9)
+        coordgit.git(dest, "config", "legion.budgetask", "true")
     print(f"\nOpen your agent in that folder and tell it:\n\n  {AGENT_PROMPT}\n\n"
           "It starts at the hub, the centre of the project: the literature the agents found and their central chat "
           "(`python -m legion hub`).")
@@ -639,8 +649,28 @@ def last_claim(repo, since: float) -> int | None:
 CLAIM_TRIES = 3  # claims in one command: one lost to another agent is followed at once by another free task
 
 
+def budget_gate(c: Ctx, args) -> int | None:
+    """Before any work, the agent's person said how much of their credits it may spend (budget.py), and under that
+    limit only: claim's exit code 9 has it ask them first, 8 says the limit is reached and when it resets."""
+    under_run = bool(os.environ.get("LEGION_RUN"))
+    if not budget.is_set(c.repo):
+        if under_run or not budget.asked_for(c.repo):
+            return None
+        out(args, {"won": False, "task": None, "budget": "ask"}, budget.ask_text(E.detect_agent() or "other"))
+        return budget.ASK
+    res = budget.over(c.repo)
+    if res is None:
+        return None
+    out(args, {"won": False, "task": None, "budget": "paused", "over": res["over"],
+               "resume_at": budget.resume_at(res)}, budget.paused_text(res, under_run))
+    return budget.PAUSED
+
+
 def cmd_claim(args):
     c = Ctx()
+    stop = budget_gate(c, args)
+    if stop is not None:
+        return stop
     for tries in range(CLAIM_TRIES, 0, -1):
         # A race lost (exit 3) sent the agent round again: a whole turn of its own, its context and four syncs,
         # for another free task it could have been handed here.
@@ -2909,12 +2939,19 @@ def inbox_hook() -> int:
         ident = Identity.load(repo=repo)
         if ident is None:
             return 0
+        # Over its person's limit, it's told to save and stop after each tool call, and let stop.
+        paused = budget.over(repo)
+        if paused and event in ("Stop", "SubagentStop"):
+            return 0
         transport.refresh(repo, ident)
         st = coordgit.state(repo)
         items = inbox.unread(repo, st, ident.author, ident.name, working=event not in ("Stop", "SubagentStop"))
+        said = [budget.paused_text(paused, bool(os.environ.get("LEGION_RUN")))] if paused else []
         if items:
             inbox.mark(repo, items)
-            print(harness.hook_answer(event, inbox.NOW.format(items=inbox.text(st, items))))
+            said.append(inbox.NOW.format(items=inbox.text(st, items)))
+        if said:
+            print(harness.hook_answer(event, "\n\n".join(said)))
     except Exception:  # noqa: BLE001
         pass
     return 0
@@ -3035,6 +3072,9 @@ def hint(args) -> None:
         if items:
             inbox.mark(c.repo, items)
             print("\n" + inbox.NOW.format(items=inbox.text(c.st, items)), file=sys.stderr)
+        paused = budget.over(c.repo) if getattr(args, "cmd", "") not in ("claim", "budget") else None
+        if paused:  # every harness reads what its commands print: told mid-session, whatever it runs in
+            print("\n" + budget.paused_text(paused, bool(os.environ.get("LEGION_RUN"))), file=sys.stderr)
     except Exception:  # noqa: BLE001 (a command's own result stands whatever becomes of this)
         pass
 
@@ -3046,12 +3086,59 @@ RESUME_FAILED = 30  # a session started again with a message that ends in an err
 RUN_EMPTY = 3
 
 
+BUDGET_LOOK = 30  # seconds between the looks `legion run` takes at its agent's limit while the agent runs
+RUN_BUDGET: dict = {}  # the clone whose limit run_agent watches (set by run_loop)
+
+
 def run_agent(argv: list[str]) -> int:
     # Started from a terminal, the agent has it. Started by another program (a service, a script), it gets no
     # input rather than that program's pipe: a headless agent waits for a pipe that never closes, and a session
     # taken up again with a message hung on it for good.
     stdin = None if sys.stdin is not None and sys.stdin.isatty() else subprocess.DEVNULL
-    return subprocess.run(argv, env=dict(os.environ, LEGION_RUN="1"), stdin=stdin).returncode
+    env = dict(os.environ, LEGION_RUN="1")
+    repo = RUN_BUDGET.get("repo")
+    if not repo or not budget.load(repo).get("limits"):
+        return subprocess.run(argv, env=env, stdin=stdin).returncode
+    # Under a limit its person set: the hours it works are counted, and once a limit is reached it's told (hooks,
+    # its commands' last lines) to save and end its session, and stopped after budget.GRACE seconds if it doesn't.
+    budget.run_started(repo)
+    try:
+        proc = subprocess.Popen(argv, env=env, stdin=stdin)
+        since = None
+        while True:
+            try:
+                return proc.wait(timeout=BUDGET_LOOK)
+            except subprocess.TimeoutExpired:
+                pass
+            res = budget.over(repo)
+            if res is None:
+                since = None
+                continue
+            if since is None:
+                since = time.time()
+                print(f"legion run: {time.strftime('%H:%M:%S')} the limit is reached ("
+                      + "; ".join(budget.describe(o) for o in res["over"]) + f"): the agent is told to save and "
+                      f"stop; it's stopped in {budget.GRACE // 60} min if it hasn't.", flush=True)
+            elif time.time() - since >= budget.GRACE:
+                print("legion run: stopping the agent: its person's limit is reached.", flush=True)
+                proc.terminate()
+                try:
+                    return proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return proc.wait()
+    finally:
+        budget.run_ended(repo)
+
+
+def pause_for_budget(c: Ctx, res: dict) -> None:
+    """Over its person's limit: the agent isn't started until it has reset. Nothing runs meanwhile."""
+    until = budget.resume_at(res)
+    print(f"legion run: {time.strftime('%H:%M:%S')} paused: "
+          + "; ".join(budget.describe(o) for o in res["over"])
+          + f". The agent starts again {'at ' if until else ''}{budget.when(until)}"
+          + " (`python -m legion budget set ...` changes the limit; Ctrl-C ends this).", flush=True)
+    time.sleep(max(1.0, min(until - time.time(), budget.RECHECK)))
 
 
 def renew_while(stop, own: list[int]) -> None:
@@ -3203,6 +3290,25 @@ def idle(c: Ctx, seconds: float, woke, work: bool = False) -> list[dict]:
         woke.clear()
 
 
+def ask_budget(repo, kind: str) -> None:
+    """Asked once, by whoever starts the agent: how much of their credits it may spend (budget.py)."""
+    h = budget.harness_of(kind)
+    if not budget.is_set(repo):
+        if sys.stdin is not None and sys.stdin.isatty():
+            try:
+                budget.ask(repo, h)
+            except (EOFError, KeyboardInterrupt):
+                print()
+        else:
+            print("legion run: no limit is set on what this agent may spend here; `python -m legion budget set "
+                  "...` sets one (`budget ask` shows the question).", flush=True)
+    if h == "claude" and budget.load(repo).get("limits"):
+        try:
+            harness.install_statusline(repo)  # where Claude Code shows its plan's use (budget.py)
+        except OSError:
+            pass
+
+
 def cmd_run(args):
     """Keep an agent at work: run its command, and run it again each time it stops, until the project is done
     for it (what claim's exit code 4 says). In Erdős #902 agents stopped between batches, when a session or a
@@ -3242,10 +3348,16 @@ def run_loop(args, cmd, exe, held: dict) -> int:
                     harness.install_claude(c.repo)  # mid-session, its hooks hand it what comes
                 except OSError:
                     pass
+            ask_budget(c.repo, harness.kind(exe))
+            RUN_BUDGET["repo"] = c.repo
         watcher = held["watcher"]
         if c.st.exclusive_done() and not c.st.competitive_for(c.me):
             print("legion run: every exclusive task is done and the competitive ones have had your attempts: done.")
             return 0
+        paused = budget.over(c.repo)
+        if paused:
+            pause_for_budget(c, paused)
+            continue
         before = recorded_by(c)
         argv, resumed = [exe, *cmd[1:]], False
         if wake:
@@ -3322,6 +3434,65 @@ def run_loop(args, cmd, exe, held: dict) -> int:
             time.sleep(wait)
         else:
             wake = idle(c, wait, woke)
+
+
+def budget_statusline() -> int:
+    """Claude Code's status line, through legion (harness.install_statusline): keep the plan's rate limits it hands
+    over, then show what the line showed before, or the limits. Never an error: it's a status line."""
+    raw = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+    try:
+        data = json.loads(raw or "{}")
+    except ValueError:
+        data = {}
+    try:
+        budget.record_claude(data)
+        prev = budget.load(repo_root()).get("statusline_prev")
+    except Exception:  # noqa: BLE001
+        prev = None
+    if prev:
+        try:
+            p = subprocess.run(prev, shell=True, input=raw, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=10)
+            sys.stdout.write(p.stdout)
+            return 0
+        except (OSError, subprocess.SubprocessError):
+            pass
+    rl = data.get("rate_limits") if isinstance(data, dict) else None
+    parts = [f"{name} {rl[key]['used_percentage']:.0f}%" for key, name in (("five_hour", "5h"), ("seven_day", "week"))
+             if isinstance(rl, dict) and isinstance(rl.get(key), dict)
+             and isinstance(rl[key].get("used_percentage"), (int, float))]
+    print("legion" + (" · " + " · ".join(parts) if parts else ""))
+    return 0
+
+
+def cmd_budget(args):
+    if args.action == "statusline":
+        return budget_statusline()
+    repo = repo_root()
+    kind = args.harness or budget.load(repo).get("harness") or E.detect_agent() or "other"
+    if args.action == "set":
+        limits = {"five_hour": args.five_hour, "seven_day": args.week, "month": args.month,
+                  budget.HOURS: args.hours_per_day}
+        if not args.no_limit and all(v is None for v in limits.values()):
+            raise Fail("say at least one limit (--five-hour, --week, --month, --hours-per-day), or --no-limit", 2)
+        try:
+            b = budget.save(repo, kind, limits, none=args.no_limit)
+        except ValueError as e:
+            raise Fail(str(e), 2)
+        if budget.harness_of(kind) == "claude" and b["limits"]:
+            try:
+                harness.install_statusline(repo)
+            except OSError:
+                pass
+    elif args.action == "ask":
+        if sys.stdin is not None and sys.stdin.isatty() and not E.detect_agent():
+            budget.ask(repo, kind)
+        else:
+            print(budget.ask_text(kind))
+            return 0
+    res = budget.check(repo)
+    out(args, res, budget.show(repo))
+    return budget.PAUSED if args.action == "check" and res["over"] else 0
 
 
 REFUTE_CHECK_HELP = ("the command that checks a refutation of any task without its own, with {key}, {accept} or {arg} "
@@ -3423,6 +3594,20 @@ def parser() -> argparse.ArgumentParser:
                         "opencode run, gemini, agent (Cursor)")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- and the command that runs your agent")
     s.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("budget", help="how much of your person's credits you may spend here: the question to ask "
+                                      "them, the limit, what's used; at the limit, agents pause")
+    s.add_argument("action", nargs="?", default="show", choices=["show", "set", "ask", "check", "statusline"],
+                   help="show (default); set the limits; ask: the question for your agent; check: exit code 8 at "
+                        "the limit; statusline: for Claude Code's status line")
+    s.add_argument("--five-hour", type=float, help="percent of the 5-hour window (Claude, Codex)")
+    s.add_argument("--week", type=float, help="percent of the weekly limit (Claude, Codex)")
+    s.add_argument("--month", type=float, help="percent of the monthly limit (Codex plans that have one)")
+    s.add_argument("--hours-per-day", type=float, help="hours a day the agent works (any agent; measured by `legion run`)")
+    s.add_argument("--no-limit", action="store_true", help="your person wants no limit")
+    s.add_argument("--harness", help="the agent: claude, codex, gemini or other (default: the one running this)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_budget)
 
     s = sub.add_parser("send", help="tell other agents something now: it reaches them in their inbox, at once "
                                     "where they listen, and starts a stopped one again (under `legion run`)")

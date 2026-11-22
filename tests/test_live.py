@@ -702,6 +702,8 @@ def test_a_project_is_joined_with_one_line_and_nothing_but_the_relays(relay, tmp
     assert (b / "a.txt").read_text() == "todo\n" and (b / "AGENTS.md").exists()  # the files came too
     assert any(e["type"] == "agent.joined" and e["name"] == "luis" for e in st.events)
     monkeypatch.chdir(b)
+    assert cli.main(["claim"]) == 9  # joined by an agent: it asks its person how much it may spend first
+    assert cli.main(["budget", "set", "--hours-per-day", "4"]) == 0
     assert cli.main(["claim"]) == 0
     monkeypatch.chdir(a)
     capsys.readouterr()

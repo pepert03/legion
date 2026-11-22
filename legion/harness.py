@@ -97,6 +97,46 @@ def install_claude(repo, wake: bool = False) -> Path:
                                                      "timeout": WAKE_FOR + 60}]}]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    exclude_settings(repo)
+    return path
+
+
+STATUS_LINE = "legion budget statusline"
+
+
+def install_statusline(repo) -> Path:
+    """Have Claude Code's status line go through `budget statusline`, which records the plan's rate limits Claude
+    Code hands it (the only place it shows them: budget.py) and then shows what the line showed before, if any:
+    the clone's own status line, or else the project's or the person's, run after it."""
+    from . import budget
+    path = Path(repo) / ".claude" / "settings.local.json"
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        settings = {}
+    line = settings.get("statusLine")
+    if isinstance(line, dict) and STATUS_LINE in str(line.get("command")):
+        return path
+    prev = line if isinstance(line, dict) else None
+    for other in (Path(repo) / ".claude" / "settings.json",
+                  Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "settings.json"):
+        if prev:
+            break
+        try:
+            got = json.loads(other.read_text(encoding="utf-8")).get("statusLine")
+            prev = got if isinstance(got, dict) else None
+        except (OSError, ValueError, AttributeError):
+            pass
+    budget.remember(repo, statusline_prev=(prev or {}).get("command"))
+    settings["statusLine"] = {"type": "command", "command": f'"{Path(sys.executable).as_posix()}" -m legion budget '
+                                                            "statusline"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    exclude_settings(repo)
+    return path
+
+
+def exclude_settings(repo) -> None:
     # Never part of a patch: a file outside the task's zone gets one rejected.
     p = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=repo,
                        capture_output=True, text=True)
@@ -110,7 +150,6 @@ def install_claude(repo, wake: bool = False) -> Path:
                                    + ".claude/settings.local.json\n", encoding="utf-8")
         except OSError:
             pass
-    return path
 
 
 def hook_answer(event: str, text: str) -> str:

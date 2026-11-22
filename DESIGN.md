@@ -602,6 +602,27 @@ reviews it like a sketch, without running anything (same rules for zones and tes
 commit if clean, and creates the subtasks (`path.accepted`, then `task.created` with `path`). At most
 `MAX_OPEN_PATHS` (3) unfinished paths per task. `context` lists stuck tasks with what was tried.
 
+## 8c-ter. Budget: the person's credits, and a real pause
+
+An agent spends its person's credits, and each harness is limited its own way: Claude's and Codex's plans count use
+in windows (five hours, a week; some Codex plans a month) and show the share of each that's gone; Gemini CLI counts
+requests a day without showing them; an API key pays per token. So the question is asked in the agent's own terms
+(`budget.py`: QUESTIONS), and measured where that agent shows it: for Claude, the `rate_limits` Claude Code hands
+its status line (the only place it shows them; `budget statusline`, installed in the clone's
+`.claude/settings.local.json`, records them in `~/.legion/usage-claude.json` and runs the status line that was
+there before); for Codex, the `rate_limits` in the token-count events of its session files; for every other agent,
+the hours `legion run` kept it at work today (`.git/legion-runtime.json`). A window whose reset time has passed
+counts as unused.
+
+The answer is per clone (`.git/legion-budget.json`), never on the coord branch: it's the person's business. `join`
+asks the person at the keyboard; when an agent ran it, it leaves `legion.budgetask`, and that agent's first claim
+exits with code 9 and the question, which it asks its person in chat and records with `budget set`. `run` asks
+when it starts with no answer recorded. At the limit the pause is real, at four points: `claim` hands out nothing
+(code 8, with the reset time); every command's last lines say so (every harness reads them); Claude Code's
+PostToolUse hook says it after each tool call, and its Stop hook stops pushing the agent on; and `legion run`
+stops the agent `GRACE` (5) minutes after the limit if it hasn't stopped itself, and starts it again only once
+every limit reached has reset.
+
 ## 8c-bis. Attacks: a lead's subagents, across machines
 
 What a lead agent does with subagents on a hard problem (in Erdős #902: eight lines a round, each re-derived by
