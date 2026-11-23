@@ -158,6 +158,9 @@
   .mv-dry i { width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--ink3); }
   .mv-dry i.on { background: var(--cancelled); border-color: var(--cancelled); }
   .mv-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 28px; align-items: start; }
+  .mv-stands { border: 1px solid var(--hair); border-left: 3px solid var(--ink); padding: 10px 14px; margin: 0 0 16px; display: grid; gap: 6px; }
+  .mv-stands .t { font-size: 12px; color: var(--ink3); }
+  .mv-stands div b { display: inline-block; min-width: 150px; font-size: 11px; letter-spacing: .06em; }
   .mv-grid { display: grid; gap: 0; border-top: 1px solid var(--hair); min-width: 0; overflow-x: auto; }
   .mv-grid > div { padding: 9px 10px; border-bottom: 1px solid var(--hair); min-width: 0; }
   .mv-grid .hd { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink3); padding: 6px 10px; white-space: nowrap; }
@@ -1135,7 +1138,14 @@ function renderMap(force = true) {
     links.length ? h("ul", { class: "links" }, ...links.map((l) => h("li", {}, whoNode(l.from, l.from_name),
         h("i", {}, `${l.kind} ${l.n}× for`), whoNode(l.to, l.to_name))))
       : h("p", { class: "empty" }, "Nobody has checked, backed, answered or verified anything of another agent's yet."));
-  el.replaceChildren(tabsRow, head, h("div", { class: "mv-body" },
+  // Where the goal stands, by the latest round whose synthesis said: ruled out, still open, next.
+  const said = [...m.rounds].reverse().find((r) => r.progress !== null && r.progress !== undefined);
+  const standRows = said ? [["eliminated", "Eliminated"], ["open", "Where it can still be"], ["next", "Next"]]
+    .filter(([k]) => said[k]).map(([k, label]) => h("div", {}, h("b", { class: "caps" }, label), said[k])) : [];
+  const stands = standRows.length ? [h("div", { class: "mv-stands" },
+    h("div", { class: "t" }, `Where it stands, by round ${said.round}'s synthesis: the goal ${said.progress ? "moved" : "didn't move"}`),
+    ...standRows)] : [];
+  el.replaceChildren(tabsRow, head, ...stands, h("div", { class: "mv-body" },
     fronts.length ? grid : h("p", { class: "mv-empty" }, "No line yet on this goal: its agents are asked for one when they claim."), side));
 }
 function viewLine(ref) {

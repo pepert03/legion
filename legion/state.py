@@ -203,6 +203,10 @@ SIMILAR_LINE = 0.6  # the share of words in common that makes a proposed line th
 # moved (round.assessed). Confirmed findings alone weren't enough: in Erdős #902 every round confirmed a few narrow
 # claims, 22 rounds in a day and none moved a bound, and the count of dry rounds never left zero.
 DRY_REFRAME, DRY_SPENT = 2, 4
+# What a round's synthesis says besides whether it moved the goal: why; what the round ELIMINATED (a region of the
+# problem ruled out, and by what); where the answer can STILL be; what to do NEXT. The region left matters more than
+# the claims confirmed: a list of confirmed lemmas reads as progress whether or not anything was ruled out.
+ASSESSMENT = ("why", "eliminated", "open", "next")
 TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 # A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
 # stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
@@ -1074,8 +1078,8 @@ class State:
             return "unknown round on that task"
         if not isinstance(ev.get("progress"), bool):
             return "progress is true or false"
-        if not isinstance(ev.get("why", ""), str) or len(ev.get("why", "")) > MAX_FINDING:
-            return f"why is text of at most {MAX_FINDING} characters"
+        if not all(isinstance(ev.get(k, ""), str) and len(ev.get(k, "")) <= MAX_FINDING for k in ASSESSMENT):
+            return f"{', '.join(ASSESSMENT)} are text of at most {MAX_FINDING} characters each"
         if not any(p.author == ev["author"] for p in self.patches_for(synth.id)):
             return "a round is assessed by whoever submitted its synthesis"
         self.assessed[(task.id, rnd)] = ev
@@ -1296,7 +1300,8 @@ class State:
                         or bool(work) and all(self.done(t.id) or t.cancelled for t in work),
                         # Rounds launched since the synthesis is asked whether the goal moved: theirs say so.
                         "assess": any(t.attack.get("assess") for t in synth),
-                        "progress": said["progress"] if said else None, "why": said.get("why", "") if said else "",
+                        "progress": said["progress"] if said else None,
+                        **{k: (said or {}).get(k, "") for k in ASSESSMENT},
                         "lamport": max(t.lamport for t in pieces)})
         return out
 

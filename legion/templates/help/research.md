@@ -86,8 +86,9 @@ without answering goes to someone else. Tell an agent directly with `send` (`hel
 
 Legion counts the closed rounds in a row that didn't move the goal: no finding of the round stands, or its
 synthesis says none of them is progress as the goal's text defines it. The synthesis says so in
-`progress.json`, `{"progress": true|false, "why": "..."}`; without it the round counts as not moving the
-goal. Correct but narrow claims that leave the goal where it was don't count. After 2, the only moves handed out are the
+`progress.json`: `{"progress": true|false, "why": "...", "eliminated": "...", "open": "...", "next": "..."}`,
+what the round ruled out, where the answer can still be, and what to do now. Those three head the goal's
+map. Without the file the round counts as not moving the goal. Correct but narrow claims that leave the goal where it was don't count. After 2, the only moves handed out are the
 ones that change the question (obstruct, weaken, transfer, invert, wild). After 4 the goal is **spent**: no
 more rounds, and `claim` says so instead of sending agents round it. Reopening it takes something new:
 `python -m legion goal <task> --text "what is new"`.

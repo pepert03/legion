@@ -368,7 +368,7 @@ def test_the_viewer_gets_the_map_who_worked_for_whom_and_the_pulse():
     assert m["goal"] and m["task"] == "f" and [x["state"] for x in m["lines"]] == ["accepted", "proposed"]
     assert m["findings"][0]["state"] == "confirmed" and m["findings"][0]["line"] == m["lines"][0]["id"]
     assert m["rounds"] == [{"round": "r1", "lines": 1, "confirmed": 1, "closed": True, "progress": None, "why": "",
-                            "moved": False}] and m["methods"] == {"compute": 1}  # its synthesis didn't say it moved
+                            "eliminated": "", "open": "", "next": "", "moved": False}] and m["methods"] == {"compute": 1}  # its synthesis didn't say it moved
     assert {"from": viz.agent_id(BEA.author), "from_name": "bea", "to": viz.agent_id(CEL.author), "to_name": "cel",
             "kind": "checked", "n": 1} in snap["research"]["links"]
     assert set(snap["research"]["pulse"]) == {"fresh", "looks", "talk"}
@@ -584,14 +584,20 @@ def test_a_round_moves_its_goal_only_if_its_synthesis_says_so(monkeypatch):
     st = log.state()
     assert st.dry(tid) == 1 and "goal unmoved" in R.map_text(st, st.tasks[tid])
     # What the synthesis writes in its folder is recorded on submit.
-    monkeypatch.setattr(R, "_load", lambda repo, path: {"progress": True, "why": "f(4) >= 51"}
-                        if path.endswith(R.PROGRESS) else None)
+    said = {"progress": True, "why": "f(4) >= 51", "eliminated": "S4 tournaments on 51 vertices, by SAT",
+            "open": "f(4) in [52, 67]", "next": "the circulants on 53 vertices"}
+    monkeypatch.setattr(R, "_load", lambda repo, path: said if path.endswith(R.PROGRESS) else None)
     c = types.SimpleNamespace(st=st, repo=None, me=ANA.author, ident=types.SimpleNamespace(name="ana"),
                               emit=lambda type, **p: log.add(ANA, type, **p))
     assert R.lift(c, st.tasks[synth]) == 0
     st = log.state()
     assert st.dry(tid) == 0 and st.research_rounds(tid)[0]["why"] == "f(4) >= 51"
-    assert "moved the goal" in R.map_text(st, st.tasks[tid])
+    text = R.map_text(st, st.tasks[tid])
+    assert "moved the goal" in text and "WHERE IT STANDS (round r1's synthesis; the goal moved)" in text
+    assert "ELIMINATED: S4 tournaments on 51" in text and "STILL BE: f(4) in [52, 67]" in text
+    assert "NEXT: the circulants on 53" in text and text.index("WHERE IT STANDS") < text.index("ESTABLISHED")
+    log.add(ANA, "round.assessed", task=tid, round=name, progress=True, open="x" * (S.MAX_FINDING + 1))
+    assert "at most" in why(log)
     # Said to have moved it, with nothing of it standing: dry.
     st.findings[f["id"]]["verdicts"] = {}
     assert st.dry(tid) == 1

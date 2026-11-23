@@ -163,15 +163,23 @@ def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
                      "each on a front of its own where it could. A line that fails cleanly, and says why, moves "
                      "the map as much as one that succeeds." + (f"\n{words[:3000]}" if words else "")),
             "common": map_text(st, parent, 14000),
-            "synthesis": ("Say which fronts this round closed and which it opened. Then say whether the round MOVED "
-                          f"THE GOAL: write {PROGRESS} in the synthesis's folder, "
-                          '{"progress": true or false, "why": "..."}. True only if a confirmed result of this round '
+            "synthesis": ("Say which fronts this round closed and which it opened. Then write "
+                          f"{PROGRESS} in the synthesis's folder, the round's verdict on the goal in five fields: "
+                          '{"progress": true or false, "why": "...", "eliminated": "...", "open": "...", '
+                          '"next": "..."}. ELIMINATED: the region of the problem this round ruled out, stated exactly '
+                          "(which objects, which parameters, which family of arguments) and by which confirmed "
+                          "result; \"nothing\" if it ruled nothing out. OPEN: where the answer can still be, as "
+                          "precisely as the map allows. NEXT: the one thing to do about that region now. Each at "
+                          f"most {S.MAX_FINDING} characters. They head the goal's map, so the next round starts from "
+                          "what is left instead of from a list of lemmas. PROGRESS: true only if a confirmed result "
+                          "of this round "
                           "is progress as the goal's text above defines it (a bound improved, a construction found, "
                           "a case decided, a barrier that rules out a whole named family): narrow claims that are "
                           "correct but leave the goal where it was are false. Rounds that don't move the goal "
                           f"are counted: after {S.DRY_REFRAME} the next rounds change the question, after "
-                          f"{S.DRY_SPENT} the goal is spent; no {PROGRESS} counts as false. Then propose the next "
-                          f"round's lines: write {NEXT_LINES} in the synthesis's folder, a JSON list of one to three "
+                          f"{S.DRY_SPENT} the goal is spent; no {PROGRESS} counts as false; WHY says which result, "
+                          "or why none. Then propose the next round's lines, the first of them your NEXT: write "
+                          f"{NEXT_LINES} in the synthesis's folder, a JSON list of one to three "
                           "lines, each an object with front, method, title, text, learn (and differs, on a front "
                           "that has lines already), as `python -m legion help research` describes a line. On submit "
                           "they are proposed for the next round, as yours; whatever the rules refuse is said, and the "
@@ -279,7 +287,7 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
         else:
             fr["unchecked"] += 1
     rounds = [{"round": r["round"], "lines": len(r["lines"]), "confirmed": r["confirmed"], "closed": r["closed"],
-               "progress": r["progress"], "why": r["why"], "moved": r["closed"] and st.moved(r)}
+               "progress": r["progress"], **{k: r[k] for k in S.ASSESSMENT}, "moved": r["closed"] and st.moved(r)}
               for r in st.research_rounds(t.id)]
     used = Counter(r["method"] for r in lines if r["state"] != "proposed")
     return {"task": t.key, "id": t.id, "title": t.title, "goal": t.id in st.goals,
@@ -319,6 +327,14 @@ def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None
              ("DEAD ENDS (what was tried and didn't work, and why. One nobody PROVED impossible is weak: the same "
               "target by another mechanism may still be worth a line)", [f for f in d["findings"] if f["status"] == "dead end"])]
     out = [f"THE MAP OF {t.key} (`python -m legion map {t.key}` prints it whole):"]
+    # Where the goal stands, by the latest round whose synthesis said: what is ruled out, what is left, what next.
+    said = next((r for r in reversed(d["rounds"]) if r["progress"] is not None), None)
+    if said and any(said[k] for k in ("eliminated", "open", "next")):
+        out.append(f"WHERE IT STANDS (round {said['round']}'s synthesis; the goal "
+                   + ("moved" if said["progress"] else "didn't move") + "):")
+        out += [f"  {label}: {_cut(said[k], 700)}" for k, label in
+                (("eliminated", "ELIMINATED"), ("open", "WHERE THE ANSWER CAN STILL BE"), ("next", "NEXT"))
+                if said[k]]
     for title, fs in parts:
         if fs:
             out.append(f"{title}:")
@@ -558,7 +574,7 @@ def assess(c: Ctx, goal: S.Task, t: S.Task, d: str) -> int:
         return 0
     try:
         c.emit("round.assessed", task=goal.id, round=t.attack.get("round", ""), progress=said["progress"],
-               why=_cut(str(said.get("why") or ""), S.MAX_FINDING))
+               **{k: _cut(str(said.get(k) or ""), S.MAX_FINDING) for k in S.ASSESSMENT if said.get(k)})
     except Fail as e:
         print(f"legion: the round's assessment wasn't recorded: {e}", flush=True)
         return 0
