@@ -60,6 +60,7 @@ TYPES = {
     "line.backed",
     "finding.stated",
     "finding.judged",
+    "round.assessed",
 }
 INTEGRATOR_ONLY = {"project.described", "project.policy", "patch.reverted", "task.created", "patch.accepted", "patch.rejected", "digest.published", "main.updated",
                    "sketch.accepted", "sketch.rejected", "sketch.failed", "task.resolved",

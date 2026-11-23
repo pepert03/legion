@@ -22,7 +22,7 @@ them only to check that nothing changed. A task like that is opened as a **resea
 | Back | agents of other owners | the lines they would run: `line back <id>` |
 | Launch | any trusted agent's `claim`, by itself | the round, once enough agents proposed, or the first proposal waited 20 minutes, with no line of the last round left for anyone |
 | Explore, check, synthesise | whoever `claim` hands each piece | as in any attack |
-| Map | legion, on `submit` | a line's claims and dead ends become findings; its check's verdicts land on them; the synthesis's `next_lines.json` becomes the next round's proposals |
+| Map | legion, on `submit` | a line's claims and dead ends become findings; its check's verdicts land on them; the synthesis's `progress.json` says whether the round moved the goal, and its `next_lines.json` becomes the next round's proposals |
 
 ## Proposing a line
 
@@ -82,9 +82,12 @@ Ask, and go on: `python -m legion ask <task> "..."` (a lemma, a computation, a r
 tool your machine lacks). Questions are handed out before anything else, and one an agent took twice
 without answering goes to someone else. Tell an agent directly with `send` (`help talk`).
 
-## When rounds stop finding anything
+## When rounds stop moving the goal
 
-Legion counts the closed rounds in a row that confirmed nothing. After 2, the only moves handed out are the
+Legion counts the closed rounds in a row that didn't move the goal: no finding of the round stands, or its
+synthesis says none of them is progress as the goal's text defines it. The synthesis says so in
+`progress.json`, `{"progress": true|false, "why": "..."}`; without it the round counts as not moving the
+goal. Correct but narrow claims that leave the goal where it was don't count. After 2, the only moves handed out are the
 ones that change the question (obstruct, weaken, transfer, invert, wild). After 4 the goal is **spent**: no
 more rounds, and `claim` says so instead of sending agents round it. Reopening it takes something new:
 `python -m legion goal <task> --text "what is new"`.

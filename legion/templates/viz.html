@@ -1090,7 +1090,7 @@ function renderMap(force = true) {
       h("div", { class: n.stands ? "good" : "" }, h("b", {}, `${n.stands}`), h("span", { class: "caps" }, `of ${n.total} findings stand`)),
       h("div", {}, h("b", {}, m.rounds.length), h("span", { class: "caps" }, "rounds")),
       h("div", {}, h("b", {}, m.fronts.filter((f) => f.lines).length), h("span", { class: "caps" }, "fronts")),
-      h("div", { title: `Closed rounds in a row that confirmed nothing. At 2 the moves handed out change the question; at 4 the goal is spent.` },
+      h("div", { title: `Closed rounds in a row that didn't move the goal (nothing confirmed, or the synthesis said it isn't progress). At 2 the moves handed out change the question; at 4 the goal is spent.` },
         h("div", { class: "mv-dry" }, ...[0, 1, 2, 3].map((i) => h("i", { class: i < m.dry ? "on" : "" }))),
         h("span", { class: "caps" }, "dry rounds")),
       h("div", { class: pulse.fresh ? "" : "warn", title: "Last 24 hours, whole project: new work (saves, patches, lines, findings, answers, references) against tasks taken and let go of" },

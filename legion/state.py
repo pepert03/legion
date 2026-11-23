@@ -198,7 +198,11 @@ FINDING_STATUS = ("proved", "checked by computation", "partial", "unproved", "de
 VERDICTS = ("confirmed", "refuted", "not verified")
 MAX_LINE, MAX_FINDING, MAX_PROPOSALS = 2500, 800, 3  # characters; open proposals an agent may have on one goal
 SIMILAR_LINE = 0.6  # the share of words in common that makes a proposed line the same as an earlier one
-DRY_REFRAME, DRY_SPENT = 2, 4  # rounds in a row with nothing confirmed: only REFRAME moves; then the goal is spent
+# Rounds in a row that didn't move their goal: only REFRAME moves; then the goal is spent. A round moves it when a
+# finding of it stands AND its synthesis says, against the goal's text of what counts as progress, that the goal
+# moved (round.assessed). Confirmed findings alone weren't enough: in Erdős #902 every round confirmed a few narrow
+# claims, 22 rounds in a day and none moved a bound, and the count of dry rounds never left zero.
+DRY_REFRAME, DRY_SPENT = 2, 4
 TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 # A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
 # stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
@@ -449,6 +453,7 @@ class State:
         self.goals: dict[str, dict] = {}  # task -> the goal.opened that made it a research goal (see METHODS)
         self.lines: dict[str, dict] = {}  # id -> {ev, task, backed: {owner: name}, piece: its subtask once launched}
         self.findings: dict[str, dict] = {}  # id -> {ev, task, line, front, verdicts: {author: ev}, replaced}
+        self.assessed: dict[tuple[str, str], dict] = {}  # (goal, round) -> its synthesis's latest round.assessed
         self.news: dict[str, list[tuple]] = defaultdict(list)  # task -> (ts, author, name) of what was new on it
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
@@ -1060,6 +1065,22 @@ class State:
             self.goals[task.id] = ev
         return None
 
+    def _assessed(self, ev: dict, task: Task) -> str | None:
+        """Whether a round moved its goal, said by whoever submitted the round's synthesis (see dry)."""
+        rnd = ev.get("round")
+        synth = next((t for t in self.tasks.values() if t.parent == task.id and t.attack.get("role") == "synthesis"
+                      and t.attack.get("round") == rnd), None) if isinstance(rnd, str) else None
+        if synth is None:
+            return "unknown round on that task"
+        if not isinstance(ev.get("progress"), bool):
+            return "progress is true or false"
+        if not isinstance(ev.get("why", ""), str) or len(ev.get("why", "")) > MAX_FINDING:
+            return f"why is text of at most {MAX_FINDING} characters"
+        if not any(p.author == ev["author"] for p in self.patches_for(synth.id)):
+            return "a round is assessed by whoever submitted its synthesis"
+        self.assessed[(task.id, rnd)] = ev
+        return None
+
     def _line(self, ev: dict, task: Task) -> str | None:
         """A line of research proposed on a goal, or backed by another owner (see METHODS)."""
         if ev["type"] == "line.backed":
@@ -1269,19 +1290,28 @@ class State:
             ids = {t.id for t in lines}
             stand = [f for f in self.findings_for(tid) if f["line"] in ids and self.finding_state(f) == "confirmed"
                      and f["ev"]["status"] in ("proved", "checked by computation")]
+            said = self.assessed.get((tid, name))
             out.append({"round": name, "pieces": pieces, "lines": lines, "confirmed": len(stand),
                         "closed": bool(synth and all(self.done(t.id) for t in synth))
                         or bool(work) and all(self.done(t.id) or t.cancelled for t in work),
+                        # Rounds launched since the synthesis is asked whether the goal moved: theirs say so.
+                        "assess": any(t.attack.get("assess") for t in synth),
+                        "progress": said["progress"] if said else None, "why": said.get("why", "") if said else "",
                         "lamport": max(t.lamport for t in pieces)})
         return out
 
+    def moved(self, r: dict) -> bool:
+        """Whether a closed round moved its goal: a finding of it stands, and, for a round whose synthesis is asked,
+        that synthesis said the goal moved. One that didn't say counts as not."""
+        return bool(r["confirmed"]) and (r["progress"] is True or not r["assess"])
+
     def dry(self, tid: str) -> int:
-        """How many of the task's latest closed rounds, in a row, left nothing confirmed. What tells exploring from
-        going round: DRY_REFRAME of them and the next round's moves are the ones that change the question
+        """How many of the task's latest closed rounds, in a row, didn't move it (see moved). What tells exploring
+        from going round: DRY_REFRAME of them and the next round's moves are the ones that change the question
         (REFRAME); DRY_SPENT and the goal is spent, until someone reopens it with something new."""
         n = 0
         for r in reversed([r for r in self.research_rounds(tid) if r["closed"]]):
-            if r["confirmed"]:
+            if self.moved(r):
                 break
             n += 1
         return n
@@ -2086,6 +2116,8 @@ class State:
             return self._line(ev, task)
         elif t in ("finding.stated", "finding.judged"):
             return self._finding(ev, task)
+        elif t == "round.assessed":
+            return self._assessed(ev, task)
         elif t == "work.saved":
             # Unfinished work, published so it isn't lost when its author stops: whoever takes the task next starts
             # from it (`start --from`). It isn't a patch: nobody judges it, and it changes nothing by itself.
@@ -2258,7 +2290,7 @@ class State:
             return "apart names the tasks (1 to 8, already created) whose writers may not take this one"
         if attack is not None and (not isinstance(attack, dict) or attack.get("role") not in ATTACK_ROLES
                                    or not all(isinstance(attack.get(k, ""), str) and len(attack.get(k, "")) <= 40
-                                              for k in ("round", "line"))):
+                                              for k in ("round", "line", "assess"))):
             return "an attack's piece says its round, its line and its role (line, check or synthesis)"
         needs = ev.get("needs") or []
         if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and TOOL.fullmatch(n)
@@ -2288,7 +2320,8 @@ class State:
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
                                depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "",
                                holdout=ev.get("holdout") or "", apart=[self.find_task(a).id for a in apart or []],
-                               attack={k: attack[k] for k in ("round", "role", "line") if k in attack} if attack else {},
+                               attack={k: attack[k] for k in ("round", "role", "line", "assess") if k in attack}
+                               if attack else {},
                                needs=list(needs), ts=ev["ts"])
         # A round's line made from a proposed one (research.py): the proposal is in a round from here on.
         line = self.lines.get(ev.get("proposal")) if isinstance(ev.get("proposal"), str) else None

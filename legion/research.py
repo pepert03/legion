@@ -15,9 +15,10 @@ research GOAL, it is worked on in rounds of an attack (attack.py) that nobody ha
   when its patch is submitted, and its checker's verdicts are recorded on them the same way. Dead ends are findings
   too. Together they are the goal's MAP: what the next round's proposals start from, in place of a text that
   someone has to keep rewriting.
-- TURN. Rounds that confirm nothing are counted. After a few, the only moves handed out are the ones that change
-  the question; after a few more the goal is spent, and its agents stop instead of going round, until someone
-  reopens it with something new.
+- TURN. Rounds that don't move the goal are counted: nothing confirmed, or, said by the round's synthesis against
+  the goal's text of what counts as progress, nothing that does. After a few, the only moves handed out are the
+  ones that change the question; after a few more the goal is spent, and its agents stop instead of going round,
+  until someone reopens it with something new.
 """
 
 import hashlib
@@ -35,6 +36,7 @@ ACTIVE = 2 * 3600  # agents seen in this long count towards the size of a round
 # work for idle agents matters more than full rounds (an hour left three goals with nothing to hand out).
 PROPOSE_WINDOW = 1200
 NEXT_LINES = "next_lines.json"  # what a round's synthesis proposes for the next round (see propose_next)
+PROGRESS = "progress.json"  # whether the round moved its goal, its synthesis says (see assess and State.moved)
 MAX_ROUND_LINES = 6
 LINE_WAIT = 12 * 3600  # a round's line nobody took in this long no longer holds the next round back
 RELAUNCH = -1  # cycle_work launched a round: claim looks again, its pieces are open now
@@ -161,12 +163,20 @@ def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
                      "each on a front of its own where it could. A line that fails cleanly, and says why, moves "
                      "the map as much as one that succeeds." + (f"\n{words[:3000]}" if words else "")),
             "common": map_text(st, parent, 14000),
-            "synthesis": ("Say which fronts this round closed and which it opened. Then propose the next round's "
-                          f"lines: write {NEXT_LINES} in the synthesis's folder, a JSON list of one to three lines, "
-                          "each an object with front, method, title, text, learn (and differs, on a front that has "
-                          "lines already), as `python -m legion help research` describes a line. On submit they are "
-                          "proposed for the next round, as yours; whatever the rules refuse is said, and the patch "
-                          "goes in all the same."),
+            "synthesis": ("Say which fronts this round closed and which it opened. Then say whether the round MOVED "
+                          f"THE GOAL: write {PROGRESS} in the synthesis's folder, "
+                          '{"progress": true or false, "why": "..."}. True only if a confirmed result of this round '
+                          "is progress as the goal's text above defines it (a bound improved, a construction found, "
+                          "a case decided, a barrier that rules out a whole named family): narrow claims that are "
+                          "correct but leave the goal where it was are false. Rounds that don't move the goal "
+                          f"are counted: after {S.DRY_REFRAME} the next rounds change the question, after "
+                          f"{S.DRY_SPENT} the goal is spent; no {PROGRESS} counts as false. Then propose the next "
+                          f"round's lines: write {NEXT_LINES} in the synthesis's folder, a JSON list of one to three "
+                          "lines, each an object with front, method, title, text, learn (and differs, on a front "
+                          "that has lines already), as `python -m legion help research` describes a line. On submit "
+                          "they are proposed for the next round, as yours; whatever the rules refuse is said, and the "
+                          "patch goes in all the same."),
+            "assess": True,
             "lines": lines}
 
 
@@ -268,7 +278,8 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
             fr[f["state"]] += 1
         else:
             fr["unchecked"] += 1
-    rounds = [{"round": r["round"], "lines": len(r["lines"]), "confirmed": r["confirmed"], "closed": r["closed"]}
+    rounds = [{"round": r["round"], "lines": len(r["lines"]), "confirmed": r["confirmed"], "closed": r["closed"],
+               "progress": r["progress"], "why": r["why"], "moved": r["closed"] and st.moved(r)}
               for r in st.research_rounds(t.id)]
     used = Counter(r["method"] for r in lines if r["state"] != "proposed")
     return {"task": t.key, "id": t.id, "title": t.title, "goal": t.id in st.goals,
@@ -323,8 +334,10 @@ def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None
         out.append("METHODS nobody has run a line by here: " + ", ".join(d["untried"]) + ".")
     if d["rounds"]:
         out.append("ROUNDS: " + ", ".join(f"{r['round']} ({r['lines']} lines, {r['confirmed']} confirmed"
-                                           + ("" if r["closed"] else ", under way") + ")" for r in d["rounds"])
-                   + (f". The last {d['dry']} closed round(s) confirmed nothing." if d["dry"] else "."))
+                                           + ("" if r["closed"] else ", under way")
+                                           + {True: ", moved the goal", False: ", goal unmoved"}.get(r["progress"], "")
+                                           + ")" for r in d["rounds"])
+                   + (f". The last {d['dry']} closed round(s) didn't move the goal." if d["dry"] else "."))
     text = "\n".join(out)
     return text if len(text) <= width else text[:width - 60].rstrip() + f"\n… (cut: `python -m legion map {t.key}`)"
 
@@ -347,8 +360,9 @@ def propose_text(st: S.State, t: S.Task, name: str, mine: int) -> str:
             f"YOUR MOVE: {move}: {MOVE_TEXT[move]}.\nEach agent of a round is handed a different move, so the round "
             "doesn't make one move several times. Make this one if you can; if it truly can't be made here, say why "
             "in your line and make another.\n"
-            + (f"The last {dry} rounds confirmed nothing new. That is the sign of going round the same ideas: this "
-               "round's moves are only those that change the question.\n" if dry >= S.DRY_REFRAME else "")
+            + (f"The last {dry} rounds didn't move the goal (nothing confirmed, or nothing that counts as progress "
+               "by its text). That is the sign of going round the same ideas: this round's moves are only those "
+               "that change the question.\n" if dry >= S.DRY_REFRAME else "")
             + "Decide your line BEFORE you look at the proposals of others: they aren't shown to you until you "
             "have yours, because agents shown each other's ideas first converge on them.\n\n"
             + map_text(st, t, 7000) + "\n\n"
@@ -458,7 +472,7 @@ def waiting_text(st: S.State, me: str, now: float) -> str:
     out = []
     for t in open_goals(st, me):
         if st.spent(t.id):
-            out.append(f"{t.key} is spent: its last {st.dry(t.id)} rounds confirmed nothing, so no more are launched "
+            out.append(f"{t.key} is spent: its last {st.dry(t.id)} rounds didn't move it, so no more are launched "
                        "on it until someone brings something new and reopens it (`python -m legion goal "
                        f"{t.key} --text \"...\"`: a founder, or a trusted agent on it). Don't go round it.")
         else:
@@ -486,7 +500,8 @@ def lift(c: Ctx, t: S.Task) -> int:
     role = t.attack.get("role")
     parent = c.st.tasks.get(t.parent)
     if role == "synthesis" and parent is not None and t.zone:
-        return propose_next(c, parent, t.zone[0].rstrip("/"))
+        d = t.zone[0].rstrip("/")
+        return assess(c, parent, t, d) + propose_next(c, parent, d)
     if role not in ("line", "check") or parent is None or not t.zone:
         return 0
     n, d = 0, t.zone[0].rstrip("/")
@@ -529,6 +544,27 @@ def lift(c: Ctx, t: S.Task) -> int:
         print(f"legion: the map of {parent.key} didn't take all of it ({e}); the patch is submitted all the same.",
               flush=True)
     return n
+
+
+def assess(c: Ctx, goal: S.Task, t: S.Task, d: str) -> int:
+    """What a round's synthesis says of whether the round moved its goal (PROGRESS in its folder), recorded and
+    said. Without it the round counts as not having moved the goal (State.moved). Returns 0: what submit counts
+    for a synthesis is the lines it proposed."""
+    said = _load(c.repo, f"{d}/{PROGRESS}")
+    if not isinstance(said, dict) or not isinstance(said.get("progress"), bool):
+        if t.attack.get("assess"):
+            print(f"legion: {d}/{PROGRESS} is missing or has no true/false progress: this round counts as not having "
+                  f"moved {goal.key}.", flush=True)
+        return 0
+    try:
+        c.emit("round.assessed", task=goal.id, round=t.attack.get("round", ""), progress=said["progress"],
+               why=_cut(str(said.get("why") or ""), S.MAX_FINDING))
+    except Fail as e:
+        print(f"legion: the round's assessment wasn't recorded: {e}", flush=True)
+        return 0
+    print(f"legion: round {t.attack.get('round', '')} recorded as {'having moved' if said['progress'] else 'not moving'} "
+          f"{goal.key}.", flush=True)
+    return 0
 
 
 def propose_next(c: Ctx, goal: S.Task, d: str) -> int:

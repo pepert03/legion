@@ -198,6 +198,9 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
                           f"{ev.get('statement', '') if full else ev.get('statement', '').replace(chr(10), ' ')[:200]}",
         "finding.judged": f"judges finding {str(ev.get('finding', ''))[:8]} on {key} {ev.get('verdict')}: "
                           f"{ev.get('reason', '') if full else ev.get('reason', '').replace(chr(10), ' ')[:200]}",
+        "round.assessed": f"says round {ev.get('round', '')} on {key} "
+                          f"{'moved' if ev.get('progress') else 'did not move'} the goal: "
+                          f"{ev.get('why', '') if full else ev.get('why', '').replace(chr(10), ' ')[:200]}",
     }.get(t, t)  # an event type from a newer legion still shows up
 
 

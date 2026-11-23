@@ -170,7 +170,9 @@ def test_findings_make_the_map_and_rounds_that_confirm_nothing_spend_the_goal():
     log.add(BEA, "finding.judged", task=tid, finding=f["id"], verdict="confirmed", reason="re-derived it")
     st = log.state()
     assert st.finding_state(st.findings[f["id"]]) == "confirmed" and st.independent(st.findings[f["id"]])
-    assert st.dry(tid) == 0 and st.research_rounds(tid)[0]["confirmed"] == 1
+    assert st.dry(tid) == 1 and st.research_rounds(tid)[0]["confirmed"] == 1  # its synthesis hasn't said it moved
+    log.add(CEL, "round.assessed", task=tid, round="r1", progress=True, why="f(4) >= 50 is new")
+    assert log.state().dry(tid) == 0
     log.add(ANA, "finding.judged", task=tid, finding=f["id"], verdict="refuted", reason="step 3 divides by zero")
     assert log.state().finding_state(log.state().findings[f["id"]]) == "contested"
     log.add(ANA, "finding.judged", task=tid, finding=f["id"], verdict="confirmed", reason="I misread step 3")
@@ -365,7 +367,8 @@ def test_the_viewer_gets_the_map_who_worked_for_whom_and_the_pulse():
     (m,) = snap["research"]["maps"]
     assert m["goal"] and m["task"] == "f" and [x["state"] for x in m["lines"]] == ["accepted", "proposed"]
     assert m["findings"][0]["state"] == "confirmed" and m["findings"][0]["line"] == m["lines"][0]["id"]
-    assert m["rounds"] == [{"round": "r1", "lines": 1, "confirmed": 1, "closed": True}] and m["methods"] == {"compute": 1}
+    assert m["rounds"] == [{"round": "r1", "lines": 1, "confirmed": 1, "closed": True, "progress": None, "why": "",
+                            "moved": False}] and m["methods"] == {"compute": 1}  # its synthesis didn't say it moved
     assert {"from": viz.agent_id(BEA.author), "from_name": "bea", "to": viz.agent_id(CEL.author), "to_name": "cel",
             "kind": "checked", "n": 1} in snap["research"]["links"]
     assert set(snap["research"]["pulse"]) == {"fresh", "looks", "talk"}
@@ -550,3 +553,45 @@ def test_a_rounds_lines_go_to_different_hands_and_its_synthesis_proposes_the_nex
     assert "would take" in ask and "line propose f" in ask
     c.me, c.ident = CEL.author, types.SimpleNamespace(name="cel")
     assert R.ask_for_line(c, c.st.tasks[made[lines[2]]], 1000.0) == ""  # cel has one waiting
+
+
+def test_a_round_moves_its_goal_only_if_its_synthesis_says_so(monkeypatch):
+    log, tid = goal()
+    p = propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[p["id"]]]), "ana")
+    line, check, synth = [S.task_id(log.add(ANA, "task.created", **x, split=True)) for x in pieces]
+    assert log.state().tasks[synth].attack["assess"] and R.PROGRESS in pieces[-1]["body"]
+    q = log.add(CEL, "patch.submitted", task=line, commit="a" * 40, branch="legion/r/l")
+    f = log.add(CEL, "finding.stated", task=tid, line=line, cid="C-1", statement="Paley 19 is the only S3 here",
+                status="checked by computation")
+    log.add(BEA, "finding.judged", task=tid, finding=f["id"], verdict="confirmed", reason="recomputed")
+    log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit="m1")
+    r = log.add(BEA, "patch.submitted", task=check, commit="b" * 40, branch="legion/r/c")
+    log.add(BOSS, "patch.accepted", patch=r["id"], merge_commit="m2")
+    s = log.add(ANA, "patch.submitted", task=synth, commit="c" * 40, branch="legion/r/s")
+    log.add(BOSS, "patch.accepted", patch=s["id"], merge_commit="m3")
+    st = log.state()
+    rnd = st.research_rounds(tid)[0]
+    # A finding stands, but the synthesis didn't say the goal moved: the round is dry all the same.
+    assert rnd["closed"] and rnd["confirmed"] == 1 and rnd["progress"] is None and st.dry(tid) == 1
+    name = rnd["round"]
+    log.add(BEA, "round.assessed", task=tid, round=name, progress=True, why="mine to say")
+    assert "whoever submitted its synthesis" in why(log)
+    log.add(ANA, "round.assessed", task=tid, round="r9", progress=True)
+    assert "unknown round" in why(log)
+    log.add(ANA, "round.assessed", task=tid, round=name, progress=False, why="correct, but no bound moved")
+    st = log.state()
+    assert st.dry(tid) == 1 and "goal unmoved" in R.map_text(st, st.tasks[tid])
+    # What the synthesis writes in its folder is recorded on submit.
+    monkeypatch.setattr(R, "_load", lambda repo, path: {"progress": True, "why": "f(4) >= 51"}
+                        if path.endswith(R.PROGRESS) else None)
+    c = types.SimpleNamespace(st=st, repo=None, me=ANA.author, ident=types.SimpleNamespace(name="ana"),
+                              emit=lambda type, **p: log.add(ANA, type, **p))
+    assert R.lift(c, st.tasks[synth]) == 0
+    st = log.state()
+    assert st.dry(tid) == 0 and st.research_rounds(tid)[0]["why"] == "f(4) >= 51"
+    assert "moved the goal" in R.map_text(st, st.tasks[tid])
+    # Said to have moved it, with nothing of it standing: dry.
+    st.findings[f["id"]]["verdicts"] = {}
+    assert st.dry(tid) == 1

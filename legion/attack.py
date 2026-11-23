@@ -358,7 +358,8 @@ def plan(st: S.State, parent: S.Task, spec: dict, lead: str) -> tuple[str, list[
                        body=SYNTH.format(**shared, key=skey, dir=sd, synthesis=SYNTHESIS,
                                          extra=f"\n{extra}" if extra else ""),
                        contract={"test_synthesis.py": synthesis_contract(skey, f"{sd}/{SYNTHESIS}")},
-                       attack={"round": rnd, "role": "synthesis", "line": ""}))
+                       attack={"round": rnd, "role": "synthesis", "line": "",
+                               **({"assess": "progress"} if spec.get("assess") else {})}))
     for p in pieces:
         p["parent"] = parent.id
         why = (st._subtask_error(parent, p["key"], p["zone"]) or S.check_accept(p["accept"], st.runners)
