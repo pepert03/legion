@@ -207,6 +207,8 @@ DRY_REFRAME, DRY_SPENT = 2, 4
 # problem ruled out, and by what); where the answer can STILL be; what to do NEXT. The region left matters more than
 # the claims confirmed: a list of confirmed lemmas reads as progress whether or not anything was ruled out.
 ASSESSMENT = ("why", "eliminated", "open", "next")
+# Findings an agent states by hand, a day; and those of one line, stated by whoever wrote it, from its report.
+MAX_FINDINGS_A_DAY, MAX_LINE_FINDINGS = 80, 40
 TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 # A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
 # stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
@@ -1182,12 +1184,21 @@ class State:
         old = self.findings.get(ev.get("replaces")) if ev.get("replaces") is not None else None
         if ev.get("replaces") is not None and (old is None or old["task"] != task.id or old["ev"]["author"] != a):
             return "a finding replaces an earlier one of its own author on the same task"
-        if sum(f["ev"]["author"] == a and ts - 86400 < f["ev"]["ts"] <= ts for f in self.findings.values()) >= 80:
-            return "at most 80 findings a day per agent"
+        own = piece is not None and self.wrote(piece.id, a)
+        if own:
+            # What a line's own report says: as many as the line has claims, whatever the day. Counted against a
+            # daily cap, they were refused from an agent that did most of a project's work: in Erdős #902 every
+            # line instinct-pepe#4 wrote after its 80th finding of the day went in with nothing on its goal's map.
+            if sum(f["line"] == piece.id and f["ev"]["author"] == a and not f["replaced"]
+                   for f in self.findings.values()) - (old is not None) >= MAX_LINE_FINDINGS:
+                return f"at most {MAX_LINE_FINDINGS} findings a line"
+        elif sum(f["ev"]["author"] == a and not f["own"] and ts - 86400 < f["ev"]["ts"] <= ts
+                 for f in self.findings.values()) >= MAX_FINDINGS_A_DAY:
+            return f"at most {MAX_FINDINGS_A_DAY} findings a day per agent, besides those of lines it wrote"
         if old is not None:
             old["replaced"] = True
         self.findings[ev["id"]] = {"ev": ev, "task": task.id, "line": line, "verdicts": {}, "replaced": False,
-                                   "front": front or (self.line_front(piece) if piece is not None else "")}
+                                   "own": own, "front": front or (self.line_front(piece) if piece is not None else "")}
         return None
 
     def goal_of(self, tid: str) -> str | None:

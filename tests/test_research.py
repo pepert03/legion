@@ -601,3 +601,53 @@ def test_a_round_moves_its_goal_only_if_its_synthesis_says_so(monkeypatch):
     # Said to have moved it, with nothing of it standing: dry.
     st.findings[f["id"]]["verdicts"] = {}
     assert st.dry(tid) == 1
+
+
+def test_a_lines_own_findings_arent_held_to_a_daily_cap_and_lost_ones_are_lifted_again(monkeypatch):
+    from legion import coordgit
+    log, tid = goal()
+    p = propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[p["id"]]]), "ana")
+    line, check, _ = [S.task_id(log.add(ANA, "task.created", **x, split=True)) for x in pieces]
+    # ANA spent its day's findings by hand: the cap holds for those, not for what its own line says.
+    for i in range(S.MAX_FINDINGS_A_DAY):
+        log.add(ANA, "finding.stated", ts=500.0 + i, task=tid, statement=f"note {i}", status="unproved")
+    log.add(ANA, "finding.stated", ts=900.0, task=tid, statement="one more", status="unproved")
+    assert "findings a day" in why(log)
+    log.add(ANA, "patch.submitted", ts=950.0, task=line, commit="a" * 40, branch="legion/r/l")
+    log.add(BEA, "patch.submitted", ts=960.0, task=check, commit="b" * 40, branch="legion/r/c")
+    report = {"claims": [{"id": "C-1", "statement": "No S4 on 51 vertices", "status": "proved"},
+                         {"id": "C-2", "statement": "g(3,3) >= 36", "status": "checked by computation"}]}
+    verdicts = {"verdicts": [{"claim_id": "C-1", "verdict": "confirmed", "reason": "re-derived"}]}
+    seen = []
+
+    def load(repo, path, ref=None):
+        seen.append(ref)
+        return report if path.endswith(A.REPORT) else verdicts if path.endswith(A.VERDICTS_FILE) else None
+    monkeypatch.setattr(R, "_load", load)
+    monkeypatch.setattr(coordgit, "has_commit", lambda repo, sha: True)
+
+    def ctx(who, name):
+        c = types.SimpleNamespace(st=log.state(), repo=None, me=who.author, ident=types.SimpleNamespace(name=name))
+
+        def emit(type, **kw):
+            ev = log.add(who, type, ts=1000.0, **kw)
+            c.st = log.state()
+            return ev
+        c.emit = emit
+        return c
+    # The check can't judge before the line's findings are there; the line's author lifts them on its next claim.
+    assert R.relift(ctx(BEA, "bea"), 1000.0) == 0
+    assert R.relift(ctx(ANA, "ana"), 1000.0) == 2 and seen[-1] == "a" * 40
+    assert R.relift(ctx(ANA, "ana"), 1000.0) == 0  # once there, not again
+    assert R.relift(ctx(BEA, "bea"), 1000.0) == 1 and seen[-1] == "b" * 40
+    st = log.state()
+    f = next(f for f in st.findings_for(tid, line) if f["ev"]["cid"] == "C-1")
+    assert BEA.author in f["verdicts"] and st.finding_state(f) == "confirmed"
+    assert R.relift(ctx(CEL, "cel"), 1000.0) == 0  # nothing of CEL's
+    # A line holds at most MAX_LINE_FINDINGS of its author's.
+    for i in range(S.MAX_LINE_FINDINGS - 2):
+        log.add(ANA, "finding.stated", task=tid, line=line, cid=f"X-{i}", statement=f"claim {i}", status="unproved")
+    log.add(ANA, "finding.stated", task=tid, line=line, cid="X-last", statement="too many", status="unproved")
+    assert "findings a line" in why(log)

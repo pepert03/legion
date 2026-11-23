@@ -688,6 +688,11 @@ def cmd_claim(args):
     stop = budget_gate(c, args)
     if stop is not None:
         return stop
+    try:  # what this agent's round pieces say that never reached the map (research.relift)
+        research.relift(c, time.time())
+    except Exception as e:  # noqa: BLE001  never the reason a claim fails
+        print(f"legion: couldn't put your earlier lines' findings on the map ({e}); claiming all the same.",
+              file=sys.stderr)
     for tries in range(CLAIM_TRIES, 0, -1):
         # A race lost (exit 3) sent the agent round again: a whole turn of its own, its context and four syncs,
         # for another free task it could have been handed here.

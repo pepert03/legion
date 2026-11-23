@@ -503,19 +503,25 @@ def waiting_text(st: S.State, me: str, now: float) -> str:
 
 # --- from a line's report to the map -------------------------------------------------------------------------------
 
-def _load(repo, path: str):
+def _load(repo, path: str, ref: str | None = None):
+    """A JSON file of the working tree, or, with ref, as that commit has it."""
     try:
+        if ref:
+            from . import coordgit
+            p = coordgit.run(repo, "show", f"{ref}:{path}")
+            return json.loads(p.stdout.decode("utf-8")) if p.returncode == 0 else None
         return json.loads((repo / path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
 
-def lift(c: Ctx, t: S.Task) -> int:
+def lift(c: Ctx, t: S.Task, ref: str | None = None) -> int:
     """Record on the task's map what a round's piece just submitted says: a line's claims and dead ends as
-    findings, a check's verdicts on them. How many events it recorded. Never the reason a submit fails."""
+    findings, a check's verdicts on them. How many events it recorded. Never the reason a submit fails. With ref,
+    the piece's files as that commit has them (relift)."""
     role = t.attack.get("role")
     parent = c.st.tasks.get(t.parent)
-    if role == "synthesis" and parent is not None and t.zone:
+    if role == "synthesis" and parent is not None and t.zone and ref is None:
         d = t.zone[0].rstrip("/")
         return assess(c, parent, t, d) + propose_next(c, parent, d)
     if role not in ("line", "check") or parent is None or not t.zone:
@@ -523,7 +529,7 @@ def lift(c: Ctx, t: S.Task) -> int:
     n, d = 0, t.zone[0].rstrip("/")
     try:
         if role == "line":
-            report = _load(c.repo, f"{d}/{A.REPORT}")
+            report = _load(c.repo, f"{d}/{A.REPORT}", ref)
             if not isinstance(report, dict):
                 return 0
             mine = {f["ev"].get("cid"): f for f in c.st.findings_for(parent.id, t.id) if f["ev"]["author"] == c.me}
@@ -545,7 +551,7 @@ def lift(c: Ctx, t: S.Task) -> int:
                 n += 1
         else:
             line = next((c.st.tasks[a] for a in t.apart if a in c.st.tasks), None)
-            verdicts = _load(c.repo, f"{d}/{A.VERDICTS_FILE}")
+            verdicts = _load(c.repo, f"{d}/{A.VERDICTS_FILE}", ref)
             if line is None or not isinstance(verdicts, dict):
                 return 0
             fs = {f["ev"].get("cid"): f for f in c.st.findings_for(parent.id, line.id)}
@@ -559,6 +565,43 @@ def lift(c: Ctx, t: S.Task) -> int:
     except Fail as e:
         print(f"legion: the map of {parent.key} didn't take all of it ({e}); the patch is submitted all the same.",
               flush=True)
+    return n
+
+
+RELIFT_DAYS = 3
+
+
+def relift(c: Ctx, now: float) -> int:
+    """Record what this agent's own round pieces say that never reached the map: a line of its with a patch and
+    no finding of its on the map, a check of its with no verdict of its on its line's findings, read from the
+    patch's commit. Their findings were refused at submit (a daily cap counted them, until it no longer did) and
+    nothing ever lifted them again: in Erdős #902 the lines on f(4), f(5) and 9/16 went in with empty maps, their
+    checks had nothing to judge, and no round could count as moving its goal. How many events it recorded."""
+    from . import coordgit
+    st, n = c.st, 0
+    for t in [t for t in st.tasks.values() if t.attack.get("role") in ("line", "check") and t.parent in st.goals]:
+        mine = [p for p in st.patches_for(t.id) if p.author == c.me and p.verdict != "rejected"
+                and now - p.ts < RELIFT_DAYS * 86400]
+        if not mine:
+            continue
+        if t.attack["role"] == "line":
+            if any(f["ev"]["author"] == c.me for f in st.findings_for(t.parent, t.id)):
+                continue
+        else:
+            line = next((st.tasks[a] for a in t.apart if a in st.tasks), None)
+            fs = st.findings_for(t.parent, line.id) if line is not None else []
+            if not fs or any(c.me in f["verdicts"] for f in fs):
+                continue
+        ref = next((p.commit for p in reversed(mine) if coordgit.has_commit(c.repo, p.commit)), None)
+        if ref is None and any(p.verdict == "accepted" for p in mine):
+            ref = coordgit.base_ref(c.repo)
+        if ref:
+            got = lift(c, t, ref)
+            st = c.st
+            if got:
+                print(f"legion: {got} finding(s) or verdict(s) of your {t.key} recorded on the map: they hadn't "
+                      "reached it when you submitted.", flush=True)
+            n += got
     return n
 
 
