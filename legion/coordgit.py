@@ -571,6 +571,27 @@ def has_commit(repo, sha: str | None) -> bool:
     return bool(sha) and run(repo, "cat-file", "-e", sha + "^{commit}").returncode == 0
 
 
+_complete: set = set()  # (repo, sha) found whole by this process
+
+
+def complete(repo, sha: str | None) -> bool:
+    """The commit and every tree and file of it are here: what a checkout or a merge of it needs. A commit can be
+    here without them: through relays it comes as a pack of what it adds to the commits it was made on, and a
+    clone that holds those commits only in part gets it in part too. In Erdős #902 the Instinct agents' clones
+    held main that way: `start` failed on every check for a day ("unable to read tree"), and no check was done.
+    (About 0.15 s for a main of 5,500 objects; once found whole, not asked again by this process.)"""
+    if not sha:
+        return False
+    key = (str(repo), sha)
+    if key in _complete:
+        return True
+    p = run(repo, "rev-list", "--objects", "--missing=print", "--no-walk", sha)
+    whole = p.returncode == 0 and not any(line.startswith(b"?") for line in p.stdout.splitlines())
+    if whole:
+        _complete.add(key)
+    return whole
+
+
 def _sha(s) -> bool:
     return isinstance(s, str) and len(s) in (40, 64) and all(ch in "0123456789abcdef" for ch in s)
 
@@ -633,8 +654,9 @@ fetch_commit = None  # set by the transport: (repo, sha, ref, wait) -> whether i
 
 def need_commit(repo, sha: str | None, ref: str | None = None, wait: float = 0.0) -> bool:
     """has_commit, and when this clone lacks it, ask the transport for it: with relays, a commit an event names
-    isn't here until someone needs it (a verifier its patch, the next agent the saved work)."""
-    if has_commit(repo, sha):
+    isn't here until someone needs it (a verifier its patch, the next agent the saved work). Here means whole
+    (complete): a commit with trees missing is asked for again."""
+    if has_commit(repo, sha) and complete(repo, sha):
         return True
     if not sha or fetch_commit is None:
         return False
@@ -651,11 +673,11 @@ def update_main(repo, tip: str | None, fetch: bool = False) -> bool:
         return False
     out = run(repo, "for-each-ref", "--format=%(refname) %(objectname)", MAIN, PUB + "main").stdout.decode()
     at = dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
-    if at.get(MAIN) == tip and at.get(PUB + "main") == tip:
+    if at.get(MAIN) == tip and at.get(PUB + "main") == tip and (not fetch or complete(repo, tip)):
         return False  # where it was: nothing to move (every command asks)
     # (a few seconds for a node that stays to publish it, when the relays don't hold it: a main an older legion
-    # made went out by git alone)
-    if not (need_commit(repo, tip, wait=5) if fetch else has_commit(repo, tip)):
+    # made went out by git alone.) Never a main with trees missing: `start` checks out from it.
+    if not (need_commit(repo, tip, wait=5) if fetch else has_commit(repo, tip) and complete(repo, tip)):
         return False
     moved = at.get(PUB + "main") != tip
     git(repo, "update-ref", MAIN, tip)

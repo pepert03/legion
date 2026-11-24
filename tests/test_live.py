@@ -833,3 +833,23 @@ def test_when_no_relay_answers_git_carries_as_before_and_the_relays_arent_tried_
     assert not live.reachable(b)
     monkeypatch.setenv("LEGION_RELAYS", team_of.relay_url)
     assert cli.main(["relay"]) == 0 and live.reachable(b)
+
+
+def test_a_commit_held_in_part_is_filled_by_a_whole_pack_a_node_that_stays_publishes(relay, tmp_path):
+    """Through relays a commit comes as what it adds to the commits it was made on. A clone that never got one of
+    those has the commit but not all its files: in Erdos #902 `start` failed on every check for a day ("unable to
+    read tree"). Such a commit isn't taken as here, and a node that stays sends it whole."""
+    a, ana = clone(tmp_path, "ana#1")
+    b, luis = clone(tmp_path, "luis#1")
+    record(a, ana, "project.init", project="p", integrators=[ana.author])
+    base = commit(a, "a.txt", "one\n")
+    main2 = commit(a, "b.txt", "two\n")  # its tree has base's a.txt, which its pack leaves out
+    assert live.put_commit(a, main2, [base])  # base itself never went out
+    assert not live.get_commit(b, main2)
+    assert coordgit.has_commit(b, main2) and not coordgit.complete(b, main2)  # here, but in part
+    assert not coordgit.need_commit(b, main2)  # and not taken as here
+    w = live.Watcher(a, ana, serve=True)
+    until(lambda: w.connected())
+    assert live.get_commit(b, main2, wait=15) and coordgit.complete(b, main2)
+    assert git(b, "show", f"{main2}:a.txt") == "one"
+    w.close()

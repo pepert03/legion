@@ -518,11 +518,14 @@ def get_commit(repo, sha: str, ref: str | None = None, wait: float = 0.0, depth:
     on it, so git keeps it."""
     if not sha or depth > 30:
         return False
-    if not coordgit.has_commit(repo, sha):
+    if not (coordgit.has_commit(repo, sha) and coordgit.complete(repo, sha)):
         ch = channel(repo)
         missed = _missed(repo)
         if ch is None or sha in missed:
             return False
+        # Here in part (its trees missing: see coordgit.complete): what fills it is a pack made for what this
+        # clone holds whole, so ask for that, not for one on top of commits it only has in part.
+        partial = coordgit.has_commit(repo, sha)
         asked, end = False, time.time() + wait
         while not _fetch_pack(repo, ch, ch.blob(sha), sha, depth):
             if time.time() >= end:
@@ -534,10 +537,10 @@ def get_commit(repo, sha: str, ref: str | None = None, wait: float = 0.0, depth:
                         pass
                 return False
             if not asked:
-                want(repo, sha)
+                want(repo, sha, whole=partial)
                 asked = True
             time.sleep(min(1.0, max(0.1, end - time.time())))
-        if not coordgit.has_commit(repo, sha):
+        if not coordgit.complete(repo, sha):
             return False
     if ref and ref.startswith(coordgit.PATCHES):  # the name comes from someone's event: only where patches live
         coordgit.run(repo, "update-ref", ref, sha)
@@ -571,11 +574,14 @@ def _fetch_pack(repo, ch: Channel, tag: str, sha: str | None, depth: int = 0) ->
         p = subprocess.run(["git", "index-pack", "--stdin"], cwd=repo, input=pack, capture_output=True)
         if p.returncode or not coordgit.has_commit(repo, b["commit"]):
             continue
-        # The commits it was made on, if this clone doesn't have them either (it was away while main moved).
+        # The commits it was made on, if this clone doesn't have them either (it was away while main moved), or
+        # has them only in part.
         for base in b["have"]:
-            if isinstance(base, str) and not coordgit.has_commit(repo, base):
+            if isinstance(base, str) and not coordgit.complete(repo, base):
                 get_commit(repo, base, depth=depth + 1)
-        return b
+        if sha is None or coordgit.complete(repo, b["commit"]):
+            return b
+        # Still in part: an older pack of it may have been made on commits this clone holds whole.
     return None
 
 
@@ -683,14 +689,17 @@ def read_invitation(token: str) -> dict:
         raise ValueError("not a legion invitation") from None
 
 
-def want(repo, sha: str) -> None:
+def want(repo, sha: str, whole: bool = False) -> None:
     """Ask whoever is listening for a commit the relays don't hold: any node that has it publishes it (see
-    Watcher). A signal: relays pass it on and don't keep it."""
+    Watcher). A signal: relays pass it on and don't keep it. `have`: only commits this clone holds whole, or the
+    pack would leave out what it lacks. `whole`: this clone has the commit in part, and the packs on the relays
+    don't fill it: a node answers even though the relays hold one."""
     ch = channel(repo)
     if ch is None:
         return
-    have = [h for h in (coordgit.rev(repo, coordgit.MAIN),) if h]
-    ev = nostr.event(nsec(repo), SIGNAL, [["t", ch.signal]], ch.seal(json.dumps({"want": sha, "have": have}).encode()))
+    have = [h for h in (coordgit.rev(repo, coordgit.MAIN),) if h and h != sha and coordgit.complete(repo, h)]
+    msg = {"want": sha, "have": have, **({"whole": True} if whole else {})}
+    ev = nostr.event(nsec(repo), SIGNAL, [["t", ch.signal]], ch.seal(json.dumps(msg).encode()))
     nostr.publish(relays(repo), [ev], 4.0)
 
 
@@ -842,7 +851,8 @@ class Watcher:
 
         def answer():
             time.sleep(random.uniform(0.2, 2.0))  # several nodes hold it: whoever is first, the others see it there
-            if not on_relays(self.repo, sha, 4.0):
+            # Asked whole: the packs there are made on commits the asker holds in part, so one more is needed.
+            if msg.get("whole") is True or not on_relays(self.repo, sha, 4.0):
                 put_commit(self.repo, sha, [h for h in msg.get("have") or [] if isinstance(h, str)])
 
         threading.Thread(target=answer, daemon=True).start()
