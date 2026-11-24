@@ -22,6 +22,7 @@ from . import transport
 from . import update
 from . import events as E
 from . import integrator
+from . import lean
 from . import research
 from . import state as S
 from . import trust
@@ -198,6 +199,9 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
                           f"{ev.get('statement', '') if full else ev.get('statement', '').replace(chr(10), ' ')[:200]}",
         "finding.judged": f"judges finding {str(ev.get('finding', ''))[:8]} on {key} {ev.get('verdict')}: "
                           f"{ev.get('reason', '') if full else ev.get('reason', '').replace(chr(10), ' ')[:200]}",
+        "lean.requested": f"asks for a Lean compile of {ev.get('path', '')}",
+        "lean.checked": f"compiled Lean file {str(ev.get('request', ''))[:8]}: "
+                        f"{'it compiles' if ev.get('ok') else 'it fails'}",
         "round.assessed": f"says round {ev.get('round', '')} on {key} "
                           f"{'moved' if ev.get('progress') else 'did not move'} the goal: "
                           f"{ev.get('why', '') if full else ev.get('why', '').replace(chr(10), ' ')[:200]}",
@@ -1087,6 +1091,12 @@ def cmd_start(args):
     coordgit.refresh_base(c.repo)
     main = coordgit.base_ref(c.repo)
     branch = f"work/{t.id}"
+    # A main held in part (its trees missing, coordgit.complete) can't be checked out: get the rest first.
+    tip = coordgit.rev(c.repo, coordgit.MAIN) if coordgit.is_p2p(c.repo) else None
+    if tip and not coordgit.complete(c.repo, tip) and not coordgit.need_commit(c.repo, tip, wait=8):
+        raise Fail("this clone holds main only in part (some of its files never came through the relays), and "
+                   "couldn't get the rest yet: a node that stays has been asked for it. Run `python -m legion "
+                   "context` in a minute and `start` again.")
     p = coordgit.run(c.repo, "checkout", "-q", *(["-f"] if args.force else []), "-B", branch, main)
     if p.returncode:
         raise Fail(f"couldn't create branch {branch}: {p.stderr.decode('utf-8', 'replace').strip()}\n"
@@ -1111,8 +1121,14 @@ def cmd_start(args):
                          f"{p.id[:8]}, in review)", p.commit, env=coordgit.author_env(c.ident))
         if m.returncode:
             coordgit.run(c.repo, "merge", "--abort")
-            raise Fail(f"the patches in review this task builds on conflict with each other: "
-                       f"{m.stdout.decode('utf-8', 'replace').strip()[-300:]}")
+            said = (m.stdout + m.stderr).decode("utf-8", "replace").strip()[-400:]
+            # git says why on stderr: agents were told of a conflict "with no paths named" for a day, when what
+            # failed was a commit this clone held in part (coordgit.complete), not a conflict at all.
+            if "unable to read" in said or "missing" in said or "bad object" in said:
+                raise Fail(f"this clone holds the patch in review for {c.st.tasks[p.task].key} ({p.id[:8]}) only "
+                           f"in part, and couldn't get the rest yet ({said[-200:]}): run `python -m legion context` "
+                           "in a minute and `start` again")
+            raise Fail(f"the patches in review this task builds on conflict with each other: {said}")
         on.append(f"{c.st.tasks[p.task].key} ({p.id[:8]})")
     built = f", on top of the patches in review of {', '.join(on)}" if on else ""
     if args.from_:  # someone's unfinished work: carry on from it
@@ -4115,6 +4131,7 @@ def parser() -> argparse.ArgumentParser:
     from . import attack, netcli, sim
     attack.add_parser(sub)
     research.add_parser(sub)
+    lean.add_parser(sub)
     netcli.add_parsers(sub)
     sim.add_parser(sub)
     for command in sub.choices.values():  # see RECORDING

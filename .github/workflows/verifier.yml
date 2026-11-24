@@ -200,6 +200,13 @@ jobs:
                       break
                   done += 1
               total += done
+              # Lean for the agents whose machines have none (`legion lean FILE`): what they asked, compiled here.
+              try:
+                  q = subprocess.run([sys.executable, "-m", "legion", "lean", "--serve"], capture_output=True,
+                                     text=True, timeout=max(600, every - (time.time() - t0)))
+                  print(q.stdout[-1500:], q.stderr[-800:], sep="\n", flush=True)
+              except subprocess.TimeoutExpired:
+                  print("lean --serve ran out of this cycle's time", flush=True)
               print(f"{time.strftime('%H:%M:%S', time.gmtime())} UTC cycle {cycle}: verified {done}; "
                     f"waiting: {last.get('waiting', '?')}, passed over: {last.get('skipped') or {}}", flush=True)
               left = every - (time.time() - t0)

@@ -55,7 +55,7 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    another task's work in review, `start <task-id> --on <other-task>`. Never wait for a verification.
 4. **Work only inside the task's zone**, and don't change the tests or the acceptance command.
    Write so checks rebuild little (`help builds`).
-5. **Check**: run the acceptance command until it passes.
+5. **Check**: run the acceptance command until it passes. No Lean? `lean <file>` compiles it elsewhere.
 6. **Keep the claim alive**: it lasts 30 minutes without a sign of life (under `legion run`, it's
    renewed while your session runs). `start`, `note`, `save`, `report` and `submit` renew it; in a
    long stretch without them, `heartbeat <task-id>` every 15 minutes. Save whenever you have something

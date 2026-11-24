@@ -209,6 +209,8 @@ DRY_REFRAME, DRY_SPENT = 2, 4
 ASSESSMENT = ("why", "eliminated", "open", "next")
 # Findings an agent states by hand, a day; and those of one line, stated by whoever wrote it, from its report.
 MAX_FINDINGS_A_DAY, MAX_LINE_FINDINGS = 80, 40
+# Lean compiles an agent without Lean may ask for in a day, and how long one waits for an answer (see lean.py).
+MAX_LEAN_A_DAY, LEAN_KEEP = 30, 24 * 3600
 TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 # A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
 # stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
@@ -460,6 +462,7 @@ class State:
         self.lines: dict[str, dict] = {}  # id -> {ev, task, backed: {owner: name}, piece: its subtask once launched}
         self.findings: dict[str, dict] = {}  # id -> {ev, task, line, front, verdicts: {author: ev}, replaced}
         self.assessed: dict[tuple[str, str], dict] = {}  # (goal, round) -> its synthesis's latest round.assessed
+        self.lean: dict[str, dict] = {}  # request id -> {ev: lean.requested, checked: its lean.checked or None}
         self.news: dict[str, list[tuple]] = defaultdict(list)  # task -> (ts, author, name) of what was new on it
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
@@ -1071,6 +1074,41 @@ class State:
             self.goals[task.id] = ev
         return None
 
+    def _lean(self, ev: dict) -> str | None:
+        """A Lean file to compile for an agent whose machine has no Lean, and the compile's outcome (see
+        lean.py). A request names a commit (main plus the file) and the file's path in it; any trusted agent with
+        Lean answers it, once."""
+        a, ts = ev["author"], ev["ts"]
+        if not self.trusted(a):
+            return "a trusted agent asks for a Lean compile, or answers one"
+        if ev["type"] == "lean.requested":
+            path, commit = ev.get("path"), ev.get("commit")
+            if not (isinstance(commit, str) and len(commit) == 40 and valid_branch(ev.get("branch"))):
+                return "a Lean compile names its commit and the branch it is on, in the patch namespace"
+            if (not isinstance(path, str) or not path.endswith(".lean") or len(path) > 200 or path.startswith("/")
+                    or ".." in path.split("/")):
+                return "a Lean compile names the .lean file's path in its commit"
+            if sum(r["ev"]["author"] == a and ts - 86400 < r["ev"]["ts"] <= ts
+                   for r in self.lean.values()) >= MAX_LEAN_A_DAY:
+                return f"at most {MAX_LEAN_A_DAY} Lean compiles a day per agent"
+            self.lean[ev["id"]] = {"ev": ev, "checked": None}
+            return None
+        r = self.lean.get(ev.get("request"))
+        if r is None:
+            return "unknown Lean compile"
+        if r["checked"] is not None:
+            return "that Lean compile is answered already"
+        if not isinstance(ev.get("ok"), bool) or not isinstance(ev.get("output", ""), str) \
+                or len(ev.get("output", "")) > E.MAX_NOTES:
+            return f"a Lean compile's outcome is ok (true or false) and its output, at most {E.MAX_NOTES} characters"
+        r["checked"] = ev
+        return None
+
+    def lean_pending(self, now: float) -> list[dict]:
+        """The Lean compiles asked for and not answered, oldest first: not those older than LEAN_KEEP."""
+        return sorted((r["ev"] for r in self.lean.values() if r["checked"] is None and now - r["ev"]["ts"] < LEAN_KEEP),
+                      key=lambda e: (e["lamport"], e["id"]))
+
     def _assessed(self, ev: dict, task: Task) -> str | None:
         """Whether a round moved its goal, said by whoever submitted the round's synthesis (see dry)."""
         rnd = ev.get("round")
@@ -1453,6 +1491,10 @@ class State:
                 f = self.findings[ev["finding"]]["ev"]
                 add(ev, "verdict", f"judged your finding {f['id'][:8]} ({f['statement'][:80]}) {ev.get('verdict')}: "
                                    f"{said(ev)}")
+            elif t == "lean.checked" and self.lean.get(ev.get("request"), {}).get("ev", {}).get("author") == author:
+                req = self.lean[ev["request"]]["ev"]
+                add(ev, "verified", f"compiled your Lean file {req['path']} ({req['id'][:8]}): "
+                                    + ("it compiles. " if ev["ok"] else "it fails. ") + ev.get("output", ""))
             elif t == "finding.stated" and any(self.findings.get(x, {}).get("ev", {}).get("author") == author
                                                for x in ev.get("from") or []):
                 add(ev, "note", f"built on a finding of yours: {ev.get('statement', '')[:200]}")
@@ -1956,6 +1998,9 @@ class State:
 
         if t in ("hub.message", "lit.added"):
             return self._hub(ev)
+
+        if t in ("lean.requested", "lean.checked"):
+            return self._lean(ev)
 
         if t == "playbook.updated":  # the project's lessons: whoever has worked here may rewrite them
             text = ev.get("text")
