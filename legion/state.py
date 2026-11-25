@@ -1344,11 +1344,17 @@ class State:
             stand = [f for f in self.findings_for(tid) if f["line"] in ids and self.finding_state(f) == "confirmed"
                      and f["ev"]["status"] in ("proved", "checked by computation")]
             said = self.assessed.get((tid, name))
+            # Rounds launched since the synthesis is asked whether the goal moved: theirs say so.
+            assess = any(t.attack.get("assess") for t in synth)
+            synthesised = bool(synth and all(self.done(t.id) for t in synth))
+            worked = bool(work) and all(self.done(t.id) or t.cancelled for t in work)
+            # Such a round closes with its synthesis, not before: closed on its lines and checks alone, it counted
+            # as not moving the goal while its synthesis was still to say it did (in Erdős #902, the round that
+            # took the constant from 9/16 to 31/50 made its goal's second dry round).
+            waits = assess and any(not t.cancelled for t in synth)
             out.append({"round": name, "pieces": pieces, "lines": lines, "confirmed": len(stand),
-                        "closed": bool(synth and all(self.done(t.id) for t in synth))
-                        or bool(work) and all(self.done(t.id) or t.cancelled for t in work),
-                        # Rounds launched since the synthesis is asked whether the goal moved: theirs say so.
-                        "assess": any(t.attack.get("assess") for t in synth),
+                        "closed": synthesised or worked and not waits,
+                        "assess": assess,
                         "progress": said["progress"] if said else None,
                         **{k: (said or {}).get(k, "") for k in ASSESSMENT},
                         "lamport": max(t.lamport for t in pieces)})

@@ -651,3 +651,19 @@ def test_a_lines_own_findings_arent_held_to_a_daily_cap_and_lost_ones_are_lifted
         log.add(ANA, "finding.stated", task=tid, line=line, cid=f"X-{i}", statement=f"claim {i}", status="unproved")
     log.add(ANA, "finding.stated", task=tid, line=line, cid="X-last", statement="too many", status="unproved")
     assert "findings a line" in why(log)
+
+
+def test_a_round_whose_synthesis_is_asked_closes_with_it_not_with_its_checks():
+    log, tid = goal()
+    p = propose(log, ANA, tid, "sat", "Topic 1", "alpha beta gamma delta epsilon")
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[p["id"]]]), "ana")
+    line, check, synth = [S.task_id(log.add(ANA, "task.created", **x, split=True)) for x in pieces]
+    for task, who, c in ((line, CEL, "a"), (check, BEA, "b")):
+        q = log.add(who, "patch.submitted", task=task, commit=c * 40, branch=f"legion/r/{c}")
+        log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit=f"m{c}")
+    st = log.state()
+    assert not st.research_rounds(tid)[0]["closed"] and st.dry(tid) == 0  # its synthesis hasn't spoken yet
+    q = log.add(ANA, "patch.submitted", task=synth, commit="c" * 40, branch="legion/r/c")
+    log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit="mc")
+    assert log.state().research_rounds(tid)[0]["closed"] and log.state().dry(tid) == 1  # spoke, and said nothing
