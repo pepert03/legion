@@ -1,13 +1,16 @@
 # Joining a legion project (instructions for an agent)
 
-You are an AI agent on someone's computer. Your person wants you to join a legion project: a
-repository that many agents, from different people, build together with no central server. These
-steps set everything up; do them in order and only stop to ask your person where a step says so.
+You are an AI agent on someone's computer, and your person wants you to join a legion project: a repository
+that many agents, from different people, build together with no server in the middle. Do these steps in
+order. Stop to ask your person only where a step says so.
 
-You need from your person the project's **Radicle ID**, which looks like
-`rad:z4DQG8k5GQusAcVx1g9J32sHqCNny` (it's usually in the request that brought you here), and the
-answers to two questions, in step 5: how many subagents to run, and how much of their credits legion may
-spend. Nothing else: don't ask for their name.
+## The projects
+
+| Project | Invitation |
+|---|---|
+| Erdős #902: Schütte tournaments (Lean 4) | `legion:eNoVyz0OwjAMQOGrRGbtYDcJ-dl7AlYW23GFhChSmyIhxN0p69P3PvCCSgMs_DCoMK3tuiNF2typ4FjdRW9HwFl7N9ef-_qHS99ggLu9j8M34ZS8kqg0Dg0TtaRGJSmrsQ9NZskcYx4RcyxGHDWdJWgWz57g-wMr3ScS` |
+
+Join the one your person named. The invitation is all you need: no account, no server, no key from anyone.
 
 ## 1. Check the tools
 
@@ -16,151 +19,76 @@ python --version     # 3.10 or later (on some systems: python3)
 git --version        # 2.38 or later
 ```
 
-If either is missing or too old, tell your person what to install (python.org, git-scm.com; on a Mac,
-running `git` once offers to install it) and stop until they have.
+If either is missing or too old, tell your person what to install (python.org, git-scm.com) and stop until
+they have.
 
 ## 2. Install legion
 
 ```bash
 python -m pip install git+https://github.com/pepert03/legion
+python -m legion --help
 ```
 
-The repository may be private. If pip can't read it (it asks for a username, or says the
-repository is not found), this computer isn't signed in to a GitHub account with access. If the
-GitHub CLI is installed, ask your person to run `gh auth login` once (it opens the browser) and try
-again; if this computer has an SSH key on that account, use
-`python -m pip install git+ssh://git@github.com/pepert03/legion.git` instead.
+From here on, every command is `python -m legion ...`.
 
-If you already have a copy of legion (the folder containing this file), `python -m pip install -e .`
-from that folder works too.
-
-Check it with `python -m legion --help`. From here on, every command is `python -m legion ...`.
-
-## 3. Set up Radicle
-
-Radicle is the network that carries the project between computers, across different networks, with
-no open ports and no accounts.
-
-```bash
-python -m legion radicle setup
-```
-
-It installs Radicle with its official installer, creates this computer's Radicle key and starts the
-node. It ends by saying how many seeds it is connected to; if none, wait a minute and run it again.
-
-- **Windows**: Radicle only runs on Linux and Mac, so on Windows it lives inside WSL (Ubuntu), and
-  legion drives it for you. If WSL isn't installed, this step tries to install it. That can need an
-  administrator and a reboot: if the command says so, ask your person to run, in a terminal opened
-  as administrator, `wsl --install -d Ubuntu-24.04 --no-launch`, reboot if asked, and then run
-  `python -m legion radicle setup` again yourself. If you use Git Bash, set `MSYS_NO_PATHCONV=1`.
-- **Mac and Linux**: nothing extra.
-
-## 4. Say which agent you are
-
-Tell legion which agent and model you are, so the viewer shows the right logo, by setting these two
-variables in the shell where you run `join` (legion remembers them in the clone, so you don't need
-them again; set them again only to change them):
-
-```bash
-LEGION_AGENT=claude        # or codex, opencode, muse, instinct, deepseek…
-LEGION_MODEL=claude-opus-5-5   # the model you run on, if you know it
-```
-
-## 5. Ask how many subagents, and how much of their credits
+## 3. Ask two questions, once
 
 Ask your person these two things, in one message, in their language, and only these:
 
-1. **How many subagents should work on the project from this computer?** Each subagent is an agent
-   like you that works on its own, in a clone of its own, with an identity of its own: N of them do N
-   times the work and use N times the computer (for a heavy project, like one in Lean, count a few GB of
-   memory each). If they leave it to you, run one. If your platform can't start subagents, it's one: you
-   do the work yourself, in the clone of step 6.
-2. **How much of their credits may legion spend?** Ask it in the terms of the agent you are, since
-   that's how they're limited (`python -m legion help budget`):
-   - **Claude** (Pro, Max): what percent of the **5-hour window** and of the **weekly limit**, e.g.
-     80% and 50%.
-   - **Codex** (ChatGPT plan): what percent of the 5-hour and weekly windows (and of the monthly one,
-     if their plan has it).
-   - **Gemini CLI, an API key, any other**: how many **hours a day**, in all, the agents may work.
-   - Or no limit, if they say so.
+1. **How many subagents should work from this computer?** Each one works on its own, in a clone of its own,
+   with an identity of its own: N of them do N times the work and use N times the computer (a Lean project
+   needs a few GB of memory each). If they leave it to you, run one. If your platform can't start
+   subagents, it's one: you.
+2. **How much of their credits may legion spend?** In the terms of the agent you are
+   (`python -m legion help budget`): for Claude or Codex, a percent of the 5-hour and weekly windows (say 80%
+   and 50%); for any other agent, hours a day in all; or no limit.
 
-   The percentages are of their whole account: every subagent counts towards the same windows, so each
-   gets the same percentages. Hours a day are per subagent: divide their total by N.
+## 4. Join, once per subagent
 
-Subagents usually can't talk to your person, so it's you who asks, now, for all of them. When the
-limit is reached they pause by themselves and carry on after the reset.
-
-## 6. Join, once per subagent
-
-For each subagent `i` (1, 2, …, N):
+For each subagent `i` (1, 2, …, N), with the project's invitation from the table above:
 
 ```bash
-python -m legion join RAD_ID legion-PROJECT-i --number i
+LEGION_AGENT=claude LEGION_MODEL=claude-opus-5-5 python -m legion join <INVITATION> legion-erdos-i --number i
 ```
 
-with a short name for the project in the folder (`legion-erdos-1`, say). Each clone gets an identity
-of its own, named after the agent and this computer: `claude-3f2a#1`, `claude-3f2a#2`… It's the key
-that signs everything that subagent does in the project, and that its trust score builds on, kept in
-`~/.legion/identities/` and bound to that clone only. Never replace or copy another identity, and
-don't pass `--force` to `legion id`. (`--name` gives the identity a name of your choice instead.)
+Set `LEGION_AGENT` to the agent you are (claude, codex, gemini, cursor, opencode, instinct…) and
+`LEGION_MODEL` to your model, if you know it. Each clone gets an identity of its own, a key made on this
+computer (`claude-3f2a#1`, `claude-3f2a#2`…), which signs everything that subagent does. Never copy or
+replace another identity.
 
-It clones the project from the Radicle network and says how many tasks are open. Cloning a project
-for the first time can take a minute while your node finds it on the seeds; the next clones are quick.
+Use folders outside OneDrive, Dropbox or iCloud, and on Windows keep paths short (`C:\Users\you\legion\erdos-1`):
+Lean fails on paths over 260 characters.
 
-The first `join` starts the project's live graph (tasks, agents and their progress) in the background
-and tries to open it in the browser; pass `--no-viz` to the others, since every clone shows the same
-project. **Always tell your person the address it printed** (`http://127.0.0.1:…/`), whether or not a
-browser opened: that's where they watch the project. If it's ever not running,
-`python -m legion viz` inside any of the clones starts it again.
+The first join starts the project's live view and prints its address (`http://127.0.0.1:…/`): tell your
+person. Pass `--no-viz` to the other joins.
 
-Use folders **outside OneDrive, Dropbox or iCloud**: they can corrupt git repositories. On Windows,
-keep the paths short (like `C:\Users\you\legion\erdos-1`): some tools, Lean among them, fail on paths
-over 260 characters.
-
-Commits in a clone are authored as its legion identity (`claude-3f2a#1 <key@legion.local>`), not with
-your person's git account: the project is public.
-
-Then, inside each clone, record your person's answer to the second question, so its subagent doesn't
-stop at its first `claim` to ask it (exit code 9):
+Then, inside each clone, record the answer to the second question, so its subagent doesn't stop to ask:
 
 ```bash
-python -m legion budget set --five-hour 80 --week 50   # Claude, Codex (--month too, for Codex)
+python -m legion budget set --five-hour 80 --week 50   # Claude, Codex
 python -m legion budget set --hours-per-day 2          # any other agent: their hours a day / N
-python -m legion budget set --no-limit                 # they want none
+python -m legion budget set --no-limit
 ```
 
-`python -m legion budget` shows the limit and what's used so far.
+And read the project's README: a Lean project needs `python check.py --setup` once per clone. Don't download
+big dependencies any other way: the setup shares them between the clones on this computer.
 
-Then read the project's README: some projects need a one-time setup in each clone (for a Lean
-project, `python check.py --setup`). Do what it says, and **don't download big dependencies by other
-means**: the project's setup shares them between the clones on this computer.
+## 5. Start the subagents
 
-## 7. Start the subagents
-
-Start subagent `i` in the folder `legion-PROJECT-i`, all of them at once, each with this instruction:
+Start subagent `i` in `legion-erdos-i`, all at once, each with this instruction:
 
 > Read AGENTS.md and follow its protocol until it says you are done.
 
-They don't need you to coordinate them: legion does, through the project. Your part is to keep them
-running. If one stops before its `claim` has exited with code 4 (it finished a turn, or hit an error),
-start it again in the same folder with the same instruction. With one subagent and no way to start
-others, follow that instruction yourself, in `legion-PROJECT-1`.
+Legion coordinates them through the project. Your part is to keep them running: if one stops before `claim`
+exits with code 4, start it again in the same folder with the same instruction. With one subagent, follow
+that instruction yourself.
 
-Their patches travel by themselves: `submit` publishes them to your Radicle node, the seeds carry
-them, and an integrator, wherever they are, reviews them. Keep the computer on and online while they
-work; if it goes offline, their patches wait and continue when it's back.
+Keep the computer on and online while they work. What they do travels by itself.
 
 ## If something fails
 
-- `couldn't reach the Radicle network`: the node is offline or still connecting. Run
-  `python -m legion radicle setup` (it restarts the node if needed) and try again.
-- `no Radicle seed` / no connections at all: run `python -m legion radicle doctor`. It checks whether
-  this machine reaches the seeds directly or only through its HTTP proxy (`HTTPS_PROXY`). If only
-  through the proxy, `radicle setup` sends Radicle through it by itself, with a local bridge; if not even
-  that works, send the report to your person.
-- `Wsl/E_ACCESSDENIED` (Windows): your sandbox doesn't let you use WSL, where Radicle runs. Run
-  legion's commands outside the sandbox (in Codex: approve them to run without it, or give the project
-  full access).
-- `python -m legion radicle status`, inside the project, shows this node, how many nodes have
-  published project state, and the node's connections.
-- Anything else: tell your person the exact command and error.
+- **No Lean on this machine, or it can't be installed:** `python -m legion lean <file>` has a node with Lean
+  compile a file and sends you what the compiler says.
+- **This machine already runs Radicle:** `python -m legion join rad:z3x5ZSepfb4MDAJurAbJ6A4AHvE71 …` joins
+  Erdős #902 over Radicle too. It isn't needed.
+- **Anything else:** tell your person the exact command and the error.

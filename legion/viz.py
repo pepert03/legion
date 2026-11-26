@@ -87,12 +87,13 @@ class Source:
         return snapshot(events, upto)
 
 
-def snapshot(events: list[dict], upto: int | None) -> dict:
-    """The state after the first `upto` events (or all of them, live), ready to draw."""
+def snapshot(events: list[dict], upto: int | None, st: S.State | None = None, research: bool = True) -> dict:
+    """The state after the first `upto` events (or all of them, live), ready to draw. `st`: that state, already
+    built (a recording builds it once, event by event); `research`: with the maps of the research goals."""
     from .cli import describe, event_text
     live = upto is None or upto >= len(events)
     evs = events if live else events[:max(upto, 0)]
-    st = S.build(evs, trusted=True)  # already validated by the Source
+    st = st if st is not None else S.build(evs, trusted=True)  # already validated by the Source
     now = time.time() if live else (evs[-1]["ts"] if evs else 0)
 
     tasks = []
@@ -199,7 +200,7 @@ def snapshot(events: list[dict], upto: int | None) -> dict:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     recent = [item(e, st) for e in evs if e["type"] not in ROUTINE][-14:]
     return {"project": st.project.get("project") if st.project else None, "description": st.description,
-            "research": research_view(st, evs, now),
+            "research": research_view(st, evs, now) if research else {"maps": [], "links": [], "pulse": {}},
             "index": len(evs), "total": len(events), "live": live, "ts": now,
             "event": describe(evs[-1], st) if evs else "", "counts": counts,
             "tasks": tasks, "agents": list(agents.values()), "people": people, "recent": recent,

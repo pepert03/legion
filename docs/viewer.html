@@ -25,6 +25,10 @@
   body { font: 15px/1.45 var(--serif); color: var(--ink); background: var(--paper);
          background-image: radial-gradient(ellipse at 50% 46%, #ffffff 0%, var(--paper) 62%); }
   #graph { position: fixed; inset: 128px 0 64px 0; }  /* below the title, so it never runs under it */
+  /* Embedded in a page (?embed=1): the graph and its timeline, on the page's own paper. */
+  .embed body { background: var(--paper); background-image: none; }
+  .embed #graph { inset: 0 0 64px 0; }
+  .embed .title, .embed #openLog, .embed #openMap, .embed #mapView, .embed #notice { display: none !important; }
   .caps { font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); }
 
   .title { position: fixed; top: 30px; left: 40px; pointer-events: none; }
@@ -130,6 +134,92 @@
   .chat .tag.success { color: var(--accepted); border-color: var(--accepted); }
   .chat .tag.failure { color: var(--cancelled); border-color: var(--cancelled); }
 
+  /* The research map: a goal's fronts as lanes, its rounds as columns, its findings as a ledger */
+  .icon-btn.second { right: 80px; }
+  #mapView { position: fixed; inset: 124px 0 64px 0; padding: 0 40px 10px; overflow: auto; display: none; }
+  body.map #mapView { display: block; }
+  body.map #graph { visibility: hidden; }
+  .mv-tabs { display: flex; flex-wrap: wrap; gap: 6px 20px; border-bottom: 1px solid var(--hair); margin-bottom: 12px; }
+  .mv-tabs button { all: unset; cursor: pointer; padding: 0 0 6px; font-size: 15px; color: var(--ink3);
+    border-bottom: 1.5px solid transparent; margin-bottom: -1px; }
+  .mv-tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+  .mv-tabs button i { font-size: 12px; color: var(--ink3); margin-left: 5px; }
+  .mv-tabs .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: var(--c, var(--ink3)); }
+  .mv-head { display: grid; grid-template-columns: 1fr auto; gap: 8px 40px; align-items: end; margin-bottom: 14px; }
+  .mv-head h2 { font-weight: 400; font-size: 22px; margin: 0; line-height: 1.15; }
+  .mv-head .sub { font-style: italic; color: var(--ink2); font-size: 14px; max-width: 760px; }
+  .mv-stage { display: flex; align-items: center; gap: 0; margin-top: 10px; font-size: 13px; }
+  .mv-stage span { padding: 3px 12px; border: 1px solid var(--hair); margin-right: -1px; color: var(--ink3); background: var(--card); white-space: nowrap; }
+  .mv-stage span:first-child { border-radius: 12px 0 0 12px; } .mv-stage span:last-child { border-radius: 0 12px 12px 0; }
+  .mv-stage span.on { color: var(--card); background: var(--ink); border-color: var(--ink); }
+  .mv-stage span.spent { color: var(--card); background: var(--cancelled); border-color: var(--cancelled); }
+  .mv-stage span b { font-weight: 400; opacity: .7; margin-left: 5px; }
+  .mv-nums { display: flex; gap: 26px; align-items: flex-end; }
+  .mv-nums > div { display: flex; flex-direction: column; align-items: flex-start; }
+  .mv-nums b { font-weight: 400; font-size: 24px; line-height: 1.1; }
+  .mv-nums .warn b { color: var(--cancelled); } .mv-nums .good b { color: var(--accepted); }
+  .mv-nums .mv-dry { display: flex; flex-direction: row; gap: 4px; height: 26px; align-items: center; }
+  .mv-dry i { width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--ink3); }
+  .mv-dry i.on { background: var(--cancelled); border-color: var(--cancelled); }
+  .mv-body { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 28px; align-items: start; }
+  .mv-stands { border: 1px solid var(--hair); border-left: 3px solid var(--ink); padding: 10px 14px; margin: 0 0 16px; display: grid; gap: 6px; }
+  .mv-stands .t { font-size: 12px; color: var(--ink3); }
+  .mv-stands div b { display: inline-block; min-width: 150px; font-size: 11px; letter-spacing: .06em; }
+  .mv-grid { display: grid; gap: 0; border-top: 1px solid var(--hair); min-width: 0; overflow-x: auto; }
+  .mv-grid > div { padding: 9px 10px; border-bottom: 1px solid var(--hair); min-width: 0; }
+  .mv-grid .hd { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink3); padding: 6px 10px; white-space: nowrap; }
+  .mv-grid .hd.next { color: var(--claimed); }
+  .mv-grid .hd small { letter-spacing: 0; text-transform: none; font-style: italic; margin-left: 6px; }
+  .mv-grid .fr { padding-left: 0; }
+  .mv-grid .fr b { font-weight: 400; font-size: 16px; display: block; overflow-wrap: anywhere; }
+  .mv-grid .fr span { font-style: italic; color: var(--ink3); font-size: 12.5px; }
+  .mv-grid .cell { display: flex; flex-direction: column; gap: 7px; border-left: 1px dotted var(--hair); }
+  .mv-grid .cell.next { background: rgba(195, 138, 31, 0.045); }
+  .lc { cursor: pointer; background: var(--card); border: 1px solid var(--hair); border-left: 3px solid var(--c, var(--ink3));
+    border-radius: 3px; padding: 6px 9px 7px; min-width: 150px; max-width: 250px; box-shadow: 0 1px 2px rgba(60, 50, 30, .05); }
+  .lc:hover { border-color: var(--ink3); border-left-color: var(--c, var(--ink3)); }
+  .lc.proposed { border-style: dashed; border-left-style: solid; box-shadow: none; }
+  .lc .top { display: flex; justify-content: space-between; gap: 8px; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink3); }
+  .lc .top .st { color: var(--c, var(--ink3)); white-space: nowrap; }
+  .lc .tt { font-size: 14px; line-height: 1.25; margin: 3px 0 5px; overflow-wrap: anywhere; }
+  .lc .pair { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink2); flex-wrap: wrap; }
+  .lc .pair .arrow { color: var(--ink3); }
+  .mv-who { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .mv-who img { width: 17px; height: 17px; border-radius: 50%; }
+  .mv-who.none { font-style: italic; color: var(--ink3); }
+  .dots { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+  .fd { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--ink3); display: inline-block; flex: none; }
+  .fd.confirmed { background: var(--accepted); border-color: var(--accepted); }
+  .fd.refuted { background: var(--cancelled); border-color: var(--cancelled); }
+  .fd.contested { background: linear-gradient(90deg, var(--accepted) 50%, var(--cancelled) 50%); border-color: var(--ink2); }
+  .fd.dead { border-radius: 2px; border-color: var(--ink3); background:
+    linear-gradient(45deg, transparent 42%, var(--ink3) 42%, var(--ink3) 58%, transparent 58%),
+    linear-gradient(-45deg, transparent 42%, var(--ink3) 42%, var(--ink3) 58%, transparent 58%); }
+  .mv-side h3 { font-weight: 400; font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink3); margin: 16px 0 8px; }
+  .mv-side h3:first-child { margin-top: 6px; }
+  .mv-methods { display: flex; flex-wrap: wrap; gap: 5px; }
+  .mv-methods span { font-size: 12.5px; padding: 1px 9px; border-radius: 10px; border: 1px dashed var(--ink3); color: var(--ink3); }
+  .mv-methods span.used { border: 1px solid var(--ink); color: var(--ink); }
+  .mv-methods span b { font-weight: 400; color: var(--ink3); margin-left: 4px; }
+  .ledger { list-style: none; margin: 0; padding: 0; }
+  .ledger li { display: grid; grid-template-columns: 14px 1fr; gap: 0 8px; padding: 6px 0; border-bottom: 1px solid #efebe3; font-size: 13.5px; line-height: 1.4; }
+  .ledger li .fd { margin-top: 5px; }
+  .ledger li .st { overflow-wrap: anywhere; }
+  .ledger li .by { grid-column: 2; font-style: italic; color: var(--ink3); font-size: 12px; }
+  .links { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  .links li { display: flex; align-items: center; gap: 6px; padding: 3px 0; flex-wrap: wrap; }
+  .links li i { color: var(--ink3); }
+  .lc .act { font-size: 12px; font-style: italic; color: var(--ink3); margin-top: 3px; }
+  .now { list-style: none; margin: 0; padding: 0; }
+  .now li { padding: 6px 0; border-bottom: 1px solid #efebe3; cursor: pointer; font-size: 13.5px; }
+  .now li > div:first-child { display: flex; align-items: center; gap: 8px; }
+  .now .on { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--claimed); }
+  .now .when { margin-left: auto; font-style: italic; color: var(--ink3); font-size: 12px; white-space: nowrap; }
+  .now .what { color: var(--ink2); font-size: 12.5px; line-height: 1.35; overflow-wrap: anywhere; margin-top: 2px; }
+  .mv-empty { font-style: italic; color: var(--ink2); max-width: 620px; margin-top: 30px; line-height: 1.5; }
+  @media (max-width: 980px) { .mv-body { grid-template-columns: 1fr; } .mv-head { grid-template-columns: 1fr; } }
+  @media (max-width: 640px) { #mapView { inset: 104px 0 64px 0; padding: 0 16px 10px; } .icon-btn.second { right: 58px; } }
+
   #time { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; }
   #time svg { width: 100%; height: 100%; display: block; cursor: pointer; touch-action: none; }
   #time text { font-family: var(--serif); }
@@ -159,6 +249,12 @@
     <path d="M4 5.5h12M4 10h12M4 14.5h7.5"/>
   </svg>
 </button>
+<button class="icon-btn second" id="openMap" title="Research map: fronts, rounds and findings" aria-label="Research map">
+  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+    <path d="M3 5h4.5v3.5H3zM9.5 5H17M9.5 8.5h5M3 11.5h4.5V15H3zM9.5 11.5H17M9.5 15h3"/>
+  </svg>
+</button>
+<section id="mapView"></section>
 <section id="pop" aria-live="polite"><button class="close" id="close" title="Close" aria-label="Close">×</button><div id="popBody"></div></section>
 <div id="time"><svg id="tl" aria-label="Timeline"></svg></div>
 <div id="tip"></div>
@@ -230,7 +326,26 @@ const LOBE = "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.95.1/icon
 // landing page uses that), and with &autoplay=1 it plays it on a loop.
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.get("demo"), AUTOPLAY = PARAMS.get("autoplay") === "1";
-let demoRun = null;
+// &embed=1: only the graph and its timeline, for a page that shows the run as part of itself (no title, panels or
+// wheel zoom, which would take the page's scroll); &step=MS: the time between two marks when it plays.
+const EMBED = PARAMS.get("embed") === "1", STEP = Math.max(30, +PARAMS.get("step") || 900);
+if (EMBED) document.documentElement.classList.add("embed");
+let demoRun = null, demoAt = null;
+// A recording made of frames: each one the tasks and agents that changed since the one before (and the rest of
+// the snapshot when it changed), so a long run stays a small file. Built forward, from the last one asked for.
+function demoFrame(k) {
+  const R = demoRun;
+  if (!demoAt || k < demoAt.k) demoAt = { k: 0, tasks: new Map(), agents: new Map(), rest: { ...R.base } };
+  while (demoAt.k < k && demoAt.k < R.frames.length) {
+    const f = R.frames[demoAt.k];
+    for (const [id, t] of Object.entries(f.t || {})) t ? demoAt.tasks.set(id, t) : demoAt.tasks.delete(id);
+    for (const [id, a] of Object.entries(f.a || {})) a ? demoAt.agents.set(id, a) : demoAt.agents.delete(id);
+    Object.assign(demoAt.rest, f.x || {});
+    demoAt.k++;
+  }
+  return { ...demoAt.rest, tasks: [...demoAt.tasks.values()], agents: [...demoAt.agents.values()], index: demoAt.k,
+           total: R.total };
+}
 async function api(path, params = {}) {
   if (!DEMO) {
     const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
@@ -241,6 +356,7 @@ async function api(path, params = {}) {
   demoRun = demoRun || await (await fetch(DEMO)).json();
   if (path === "state.json") {  // the recorded snapshot at or just before that point
     const upto = params.upto == null ? demoRun.total : params.upto;
+    if (demoRun.frames) return { ...demoFrame(upto), live: params.upto == null };
     const snap = demoRun.snapshots.filter((x) => x.index <= upto).pop() || demoRun.snapshots[0];
     return { ...snap, live: params.upto == null };
   }
@@ -730,6 +846,17 @@ function trustBlock(a) {
   ];
 }
 
+// Signs it has plateaued, from what it published: edits that shrink, or claims and reports with no patch.
+const SPINNING = 20;  // claims and reports in a day with no patch
+function plateauNode(p) {
+  if (!p || !(p.flagged ?? (p.narrowing || p.spinning >= SPINNING))) return null;  // flagged: what the agent is told too
+  const say = [];
+  if (p.narrowing) say.push(`its edits are shrinking (${p.lines.join(" → ")} lines changed)`);
+  if (p.spinning >= SPINNING) say.push(`${p.spinning} claims and reports in a day, and no patch`);
+  return h("div", { style: `font-style:italic;color:${P.cancelled};margin:8px 0` },
+    `Plateaued? ${say.join("; ")}. A fresh session, or another task, usually unblocks it.`);
+}
+
 async function viewAgent(a) {
   const kind = kindOf(a), s = a.stats;
   const items = await history(a.id);
@@ -745,6 +872,7 @@ async function viewAgent(a) {
       h("div", {}, h("b", {}, s.rejected), h("span", { class: "caps" }, "rejected")),
       h("div", {}, h("b", {}, s.claims), h("span", { class: "caps" }, "claims"))),
     trustBlock(a),
+    plateauNode(a.plateau),
     a.done.length ? h("dl", { class: "kv" }, h("dt", {}, "finished"), h("dd", {}, a.done.map(taskKey).join(", "))) : null,
     h("h2", { class: "caps" }, "What it has done"),
     eventList(items, false),
@@ -800,7 +928,7 @@ function tabs(id, fallback, panes) {
   const on = openTab[id] || fallback, pane = panes.find(([k]) => k === on) || panes[0];
   return [
     h("div", { class: "tabs" }, ...panes.map(([k, label, count]) =>
-      h("button", { class: k === pane[0] ? "on" : null, onclick: () => { openTab[id] = k; renderPop(); } },
+      h("button", { class: k === pane[0] ? "on" : null, onclick: () => { openTab[id] = k; renderPop(); if (mapMode) renderMap(); } },
         label, h("small", {}, String(count))))),
     pane[3](),
   ];
@@ -898,6 +1026,186 @@ function viewAbout(g) {
   ];
 }
 
+// ---------------------------------------------------------------------------------------------
+// The research map: for a task worked on in rounds, its fronts (directions) as lanes, its rounds as columns, each
+// line with who explores it and who checks it, and what it found. It's what says, at a glance, whether the
+// project explores or goes round: new fronts, findings that stand, and rounds that leave nothing.
+// ---------------------------------------------------------------------------------------------
+let mapMode = false, mapSel = null, mapAuto = false, mapSig = "";
+const maps = () => (data && data.research && data.research.maps) || [];
+const agentById = (id) => (data ? data.agents.find((a) => a.id === id) : null);
+const lineState = (l) => (l.state === "open" && (l.n_saves || l.n_reports) ? "work saved, nobody on it now" : LINE_STATE[l.state] || l.state);
+const LINE_STATE = { proposed: "proposed", open: "nobody on it", claimed: "being explored", review: "in review",
+                     accepted: "reported", blocked: "blocked", cancelled: "cancelled", sketched: "split", refuted: "refuted" };
+const LINE_COLOR = { proposed: "claimed", open: "open", claimed: "claimed", review: "review", accepted: "accepted",
+                     blocked: "blocked", cancelled: "cancelled" };
+function whoNode(id, name, none) {
+  const a = id ? agentById(id) : null;
+  if (a) { loadLogo(kindOf(a)); return h("span", { class: "mv-who", title: a.name }, discImg(a, 17), nameNode(a)); }
+  return name ? h("span", { class: "mv-who" }, name) : h("span", { class: "mv-who none" }, none || "nobody yet");
+}
+const fdClass = (f) => (f.status === "dead end" ? "dead" : f.state);
+const fdTitle = (f) => `${f.status === "dead end" ? "dead end" : f.state}${f.independent ? " (by another owner)" : ""}: ${f.statement}`;
+function stageOf(m) {
+  if (m.spent) return "spent";
+  const ran = m.lines.filter((l) => l.state !== "proposed");
+  if (ran.some((l) => l.state === "open" || l.state === "claimed" || l.state === "review")) return "explore";
+  if (ran.some((l) => l.check && l.check !== "accepted" && l.check !== "cancelled")) return "check";
+  if (m.rounds.some((r) => !r.closed)) return "synthesise";
+  return "propose";
+}
+function mapCounts(m) {
+  const real = m.findings.filter((f) => f.status !== "dead end");
+  return { stands: real.filter((f) => f.state === "confirmed").length, total: real.length,
+           dead: m.findings.length - real.length, proposed: m.lines.filter((l) => l.state === "proposed").length };
+}
+function lineCard(l, m) {
+  const fs = m.findings.filter((f) => f.line === l.id), c = `var(--${LINE_COLOR[l.state] || "open"})`;
+  const pair = l.state === "proposed"
+    ? [h("span", {}, "by "), whoNode(l.agent, l.by), l.backed.length ? h("i", {}, ` · backed by ${l.backed.length}`) : null]
+    : [whoNode(l.worker_agent, l.worker), h("span", { class: "arrow", title: "explored by → checked by" }, "→"),
+       whoNode(l.checker_agent, l.checker, l.check === "accepted" ? "checked" : "no checker yet")];
+  return h("div", { class: `lc ${l.state === "proposed" ? "proposed" : ""}`, style: `--c:${c}`,
+                    onclick: () => openPop("line", `${m.id}|${l.id}`) },
+    h("div", { class: "top" }, h("span", {}, l.move || l.method), h("span", { class: "st" }, lineState(l))),
+    h("div", { class: "tt" }, l.title.replace(/^r\d+ line [^:]+: /, "")),
+    h("div", { class: "pair" }, ...pair.filter(Boolean)),
+    l.n_saves || l.n_reports ? h("div", { class: "act" },
+      [l.n_saves ? `${l.n_saves} save${l.n_saves > 1 ? "s" : ""}` : null, l.n_reports ? `${l.n_reports} report${l.n_reports > 1 ? "s" : ""}` : null,
+       l.hands && l.hands.length > 1 ? `${l.hands.length} agents` : null, l.active ? `last ${ago(l.active)}` : null].filter(Boolean).join(" · ")) : null,
+    fs.length ? h("div", { class: "dots" }, ...fs.map((f) => h("span", { class: `fd ${fdClass(f)}`, title: fdTitle(f) }))) : null);
+}
+function ledger(fs, empty) {
+  if (!fs.length) return h("p", { class: "empty" }, empty);
+  return h("ul", { class: "ledger" }, ...fs.map((f) => h("li", {},
+    h("span", { class: `fd ${fdClass(f)}`, title: f.state }), h("span", { class: "st" }, f.statement),
+    h("span", { class: "by" }, `${f.status} · ${f.front || "-"} · by ${f.by}`,
+      f.verdicts.length ? ` · ${f.verdicts.map((v) => `${v.name}: ${v.verdict}`).join(", ")}` : " · nobody checked it yet"))));
+}
+function renderMap(force = true) {
+  const el = $("mapView"), ms = maps();
+  if (!mapMode) return;
+  // Drawn again only when what it shows changed: the page reads the state every few seconds.
+  const sig = JSON.stringify([data.research, data.agents.map((a) => [a.id, a.last_ts, a.holds]), Object.keys(logos).filter((k) => logos[k])]);
+  if (!force && sig === mapSig) return;
+  mapSig = sig;
+  const pulse = (data.research && data.research.pulse) || { fresh: 0, looks: 0 };
+  if (!ms.length) {
+    el.replaceChildren(h("p", { class: "mv-empty" },
+      "No task here is worked on in rounds yet. A task that is an open problem is opened as a research goal ",
+      h("code", {}, "legion goal <task>"), ": its agents then propose lines of attack, rounds are made from them, each line is " +
+      "checked by another agent, and what stands is drawn here. In the last 24 hours this project had ",
+      h("b", {}, pulse.fresh), " new piece(s) of work and ", h("b", {}, pulse.looks), " task(s) taken and let go of."));
+    return;
+  }
+  const m = ms.find((x) => x.id === mapSel) || ms.find((x) => x.goal && x.lines.length) || ms.find((x) => x.goal) || ms[0];
+  mapSel = m.id;
+  const stage = stageOf(m), n = mapCounts(m);
+  const stageColor = { explore: "claimed", check: "review", synthesise: "sketched", propose: "open", spent: "cancelled" };
+  const tabsRow = h("div", { class: "mv-tabs" }, ...ms.map((x) => h("button", { class: x.id === m.id ? "on" : "",
+    onclick: () => { mapSel = x.id; renderMap(); } },
+    h("span", { class: "dot", style: `--c:var(--${stageColor[stageOf(x)]})` }), x.task,
+    h("i", {}, `${mapCounts(x).stands} stand${x.goal ? "" : " · by hand"}`))));
+  const working = m.lines.filter((l) => ["open", "claimed", "review"].includes(l.state)).length;
+  const checking = m.lines.filter((l) => l.state !== "proposed" && l.check && !["accepted", "cancelled"].includes(l.check) && l.state === "accepted").length;
+  const steps = [["propose", "Propose", n.proposed], ["explore", "Explore", working], ["check", "Check", checking], ["synthesise", "Synthesise", null]];
+  const head = h("div", { class: "mv-head" },
+    h("div", {}, h("h2", {}, m.title), m.text ? h("div", { class: "sub" }, m.text.length > 260 ? `${m.text.slice(0, 260)}…` : m.text) : null,
+      h("div", { class: "mv-stage" }, ...steps.map(([k, label, c]) => h("span", { class: stage === k ? "on" : "" }, label, c ? h("b", {}, c) : null)),
+        m.spent ? h("span", { class: "spent", title: "No more rounds until someone reopens it with something new" }, "Spent") : null)),
+    h("div", { class: "mv-nums" },
+      h("div", { class: n.stands ? "good" : "" }, h("b", {}, `${n.stands}`), h("span", { class: "caps" }, `of ${n.total} findings stand`)),
+      h("div", {}, h("b", {}, m.rounds.length), h("span", { class: "caps" }, "rounds")),
+      h("div", {}, h("b", {}, m.fronts.filter((f) => f.lines).length), h("span", { class: "caps" }, "fronts")),
+      h("div", { title: `Closed rounds in a row that didn't move the goal (nothing confirmed, or the synthesis said it isn't progress). At 2 the moves handed out change the question; at 4 the goal is spent.` },
+        h("div", { class: "mv-dry" }, ...[0, 1, 2, 3].map((i) => h("i", { class: i < m.dry ? "on" : "" }))),
+        h("span", { class: "caps" }, "dry rounds")),
+      h("div", { class: pulse.fresh ? "" : "warn", title: "Last 24 hours, whole project: new work (saves, patches, lines, findings, answers, references) against tasks taken and let go of" },
+        h("b", {}, `${pulse.fresh} / ${pulse.looks}`), h("span", { class: "caps" }, "new · look-and-leave, 24 h"))));
+  // The grid: a lane per front, a column per round, and one for what's proposed for the next.
+  const rounds = m.rounds.map((r) => r.round), cols = [...rounds, null];
+  const fronts = [...m.fronts].filter((f) => f.lines).sort((a, b) => (a.front < b.front ? -1 : 1));
+  const grid = h("div", { class: "mv-grid", style: `grid-template-columns: 150px repeat(${cols.length}, minmax(170px, 1fr))` },
+    h("div", { class: "hd" }, "front"),
+    ...m.rounds.map((r) => h("div", { class: "hd" }, r.round, h("small", {}, r.closed ? `${r.confirmed} confirmed` : "under way"))),
+    h("div", { class: "hd next" }, "next round", h("small", {}, n.proposed ? `${n.proposed} proposed` : "nothing proposed yet")),
+    ...fronts.flatMap((f) => [
+      h("div", { class: "fr" }, h("b", {}, f.front), h("span", {}, f.methods.join(", ") || "-",
+        f.dead ? ` · ${f.dead} dead end${f.dead > 1 ? "s" : ""}` : "")),
+      ...cols.map((r) => h("div", { class: `cell ${r === null ? "next" : ""}` },
+        ...m.lines.filter((l) => l.front === f.front && (r === null ? l.state === "proposed" : l.round === r && l.state !== "proposed"))
+          .map((l) => lineCard(l, m))))]));
+  const real = m.findings.filter((f) => f.status !== "dead end");
+  const links = ((data.research && data.research.links) || []).slice(0, 14);
+  const nowTs = data.live ? Date.now() / 1000 : data.ts;
+  const busy = data.agents.filter((a) => !a.gone && nowTs - a.last_ts < 6 * 3600).sort((a, b2) => b2.last_ts - a.last_ts).slice(0, 12);
+  const side = h("aside", { class: "mv-side" },
+    h("h3", {}, "Right now"),
+    busy.length ? h("ul", { class: "now" }, ...busy.map((a) => h("li", { onclick: () => openPop("item", a.id) },
+        h("div", {}, whoNode(a.id, a.name), a.holds.length && !a.silent ? h("span", { class: "on" }, "at work") : null,
+          h("span", { class: "when" }, ago(a.last_ts))),
+        h("div", { class: "what" }, doing(a, true) || "", doing(a, true) && a.last ? " · " : "", (a.last || "").slice(0, 170)))))
+      : h("p", { class: "empty" }, "No agent has published anything in the last six hours."),
+    h("h3", {}, "Methods tried on this goal"),
+    h("div", { class: "mv-methods" }, ...["construct", "random", "compute", "structure", "barrier", "transfer", "reduce"].map((k) =>
+      h("span", { class: m.methods[k] ? "used" : "", title: m.methods[k] ? `${m.methods[k]} line(s)` : "nobody has run a line by this method" },
+        k, m.methods[k] ? h("b", {}, m.methods[k]) : null))),
+    tabs(`map-${m.id}`, real.some((f) => f.state === "confirmed") ? "stands" : "open", [
+      ["stands", "Stands", real.filter((f) => f.state === "confirmed").length,
+        () => ledger(real.filter((f) => f.state === "confirmed"), "Nothing confirmed by another agent yet.")],
+      ["open", "Unchecked", real.filter((f) => f.state === "unchecked" || f.state === "contested").length,
+        () => ledger(real.filter((f) => f.state === "unchecked" || f.state === "contested"), "Nothing waits for a check.")],
+      ["fell", "Refuted", real.filter((f) => f.state === "refuted").length,
+        () => ledger(real.filter((f) => f.state === "refuted"), "Nothing refuted.")],
+      ["dead", "Dead ends", n.dead, () => ledger(m.findings.filter((f) => f.status === "dead end"), "No dead end recorded.")]]),
+    h("h3", {}, "Who works with whom"),
+    links.length ? h("ul", { class: "links" }, ...links.map((l) => h("li", {}, whoNode(l.from, l.from_name),
+        h("i", {}, `${l.kind} ${l.n}× for`), whoNode(l.to, l.to_name))))
+      : h("p", { class: "empty" }, "Nobody has checked, backed, answered or verified anything of another agent's yet."));
+  // Where the goal stands, by the latest round whose synthesis said: ruled out, still open, next.
+  const said = [...m.rounds].reverse().find((r) => r.progress !== null && r.progress !== undefined);
+  const standRows = said ? [["eliminated", "Eliminated"], ["open", "Where it can still be"], ["next", "Next"]]
+    .filter(([k]) => said[k]).map(([k, label]) => h("div", {}, h("b", { class: "caps" }, label), said[k])) : [];
+  const stands = standRows.length ? [h("div", { class: "mv-stands" },
+    h("div", { class: "t" }, `Where it stands, by round ${said.round}'s synthesis: the goal ${said.progress ? "moved" : "didn't move"}`),
+    ...standRows)] : [];
+  el.replaceChildren(tabsRow, head, ...stands, h("div", { class: "mv-body" },
+    fronts.length ? grid : h("p", { class: "mv-empty" }, "No line yet on this goal: its agents are asked for one when they claim."), side));
+}
+function viewLine(ref) {
+  const [mid, lid] = ref.split("|"), m = maps().find((x) => x.id === mid), l = m && m.lines.find((x) => x.id === lid);
+  if (!l) return null;
+  const fs = m.findings.filter((f) => f.line === l.id);
+  return [
+    h("div", { class: "caps" }, `${m.task} · front ${l.front}${l.round ? ` · round ${l.round}` : " · proposed"}`),
+    h("div", { class: "head" }, h("div", {}, h("div", { class: "name", style: "font-size:20px" }, l.title),
+      h("div", { class: "sub" }, `${l.method}${l.move ? ` · move: ${l.move}` : ""} · ${LINE_STATE[l.state] || l.state}`))),
+    h("dl", { class: "kv" },
+      l.by ? [h("dt", {}, "proposed by"), h("dd", {}, whoNode(l.agent, l.by))] : null,
+      l.state !== "proposed" ? [h("dt", {}, "explored by"), h("dd", {}, whoNode(l.worker_agent, l.worker))] : null,
+      l.state !== "proposed" ? [h("dt", {}, "checked by"), h("dd", {}, whoNode(l.checker_agent, l.checker, "no checker yet"))] : null,
+      l.backed.length ? [h("dt", {}, "backed by"), h("dd", {}, l.backed.join(", "))] : null,
+      l.needs.length ? [h("dt", {}, "needs"), h("dd", {}, h("code", {}, l.needs.join(", ")))] : null,
+      l.piece ? [h("dt", {}, "subtask"), h("dd", {}, h("code", {}, l.piece))] : null),
+    l.text ? [h("h2", { class: "caps" }, "The line"), h("p", { class: "desc" }, l.text)] : null,
+    l.learn ? [h("h2", { class: "caps" }, "If it fails, we learn"), h("p", { class: "desc" }, l.learn)] : null,
+    l.differs ? [h("h2", { class: "caps" }, "How it differs from the front's earlier lines"), h("p", { class: "desc" }, l.differs)] : null,
+    h("h2", { class: "caps" }, `What it found (${fs.length})`),
+    ledger(fs, l.state === "proposed" ? "Not run yet." : "Nothing on the map yet: a line's claims land here when its agent submits its report."),
+    (l.saves || []).length || (l.reports || []).length ? [
+      h("h2", { class: "caps" }, `Work on it (${l.n_saves} saves, ${l.n_reports} reports)`),
+      h("ul", { class: "events" }, ...[...(l.saves || []).map((x) => ({ ...x, what: "saved work" })),
+                                       ...(l.reports || []).map((x) => ({ ...x, what: `reported ${x.outcome || ""}` }))]
+        .sort((a, b2) => b2.ts - a.ts).map((x) => h("li", {}, whoNode(x.agent, x.name), ` ${x.what}: `, x.notes || "",
+          h("span", { class: "when" }, ago(x.ts)))))] : null,
+  ];
+}
+function toggleMap(on) {
+  mapMode = on; document.body.classList.toggle("map", on); $("openMap").classList.toggle("on", on);
+  $("tip").style.display = "none";
+  if (on) renderMap(); else if (Graph) { Graph.width($("graph").clientWidth).height($("graph").clientHeight); if (!userMoved) setTimeout(() => fit(500), 60); }
+}
+
 let popTimer = null;
 function renderPop() {
   clearTimeout(popTimer);
@@ -905,6 +1213,7 @@ function renderPop() {
     if (!data || !popMode) return;
     let kids;
     if (popMode === "log") kids = viewLog();
+    else if (popMode === "line") { kids = viewLine(selected); if (!kids) return closePop(); }
     else if (selected === GOAL) kids = await viewGoal();
     else {
       const a = data.agents.find((x) => x.id === selected), n = nodes.get(selected);
@@ -1016,6 +1325,9 @@ async function load(upto) {
   $("notice").textContent = "This repository has no legion project yet.";
   applySnapshot(data);
   renderTitle(data);
+  // A project with a research goal opens on its map: that's where what's going on can be read.
+  if (!mapAuto && maps().some((m) => m.goal)) { mapAuto = true; toggleMap(true); }
+  if (mapMode) renderMap(false);
   if (data.total !== marksTotal) { marksTotal = data.total; marks = await api("timeline.json"); }
   renderTimeline();
   if (data.index !== lastIndex || data.live !== lastLive) renderPop();
@@ -1038,7 +1350,7 @@ function play() {
       return;
     }
     load(i).catch(() => {});
-  }, 900);
+  }, STEP);
   renderTimeline();
 }
 
@@ -1053,6 +1365,7 @@ async function init() {
   try { localLogos = new Set(await api("logos.json")); } catch {}
   const el = $("graph"), tip = $("tip");
   Graph = ForceGraph()(el)
+    .enableZoomInteraction(!EMBED)  // embedded, the wheel scrolls the page
     .backgroundColor("rgba(0,0,0,0)")
     .nodeId("id")
     .nodeCanvasObject(drawNode)
@@ -1152,6 +1465,7 @@ async function init() {
   tl.addEventListener("pointerleave", () => { tip.style.display = "none"; });
 
   $("openLog").addEventListener("click", () => (popMode === "log" ? closePop() : openPop("log")));
+  $("openMap").addEventListener("click", () => { mapAuto = true; toggleMap(!mapMode); });
   $("close").addEventListener("click", closePop);
   addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") closePop();

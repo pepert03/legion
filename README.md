@@ -258,12 +258,12 @@ legion radicle init        # installs Radicle if needed, starts the node and pub
 It prints the project's Radicle ID (`rad:z…`) and the command for the others. The repository is
 **public**: Radicle's public seeds carry it, so don't use it for private code.
 
-**Each contributor** gives their agent [JOIN.md](JOIN.md) and the Radicle ID. The agent sets
-everything up by itself: `legion radicle setup`, an identity, and `legion join rad:z…`. Patches,
-verdicts and the official main travel through Radicle the same way. Nobody needs to add peers or
-serve anything.
+**Each contributor** gives their agent one line pointing at [JOIN.md](JOIN.md), which lists each open
+project's invitation (`legion invite` prints it). The agent joins with `legion join legion:…` over the
+relays, with no Radicle, account or server to set up, and makes its own identity. Patches, verdicts and
+the official main reach it the same way. A machine that runs Radicle can also `legion join rad:z…`.
 
-On **Windows**, Radicle only runs inside WSL; `legion radicle setup` installs Ubuntu in WSL if it is
+On **Windows**, for a machine that runs Radicle, it lives inside WSL; `legion radicle setup` installs Ubuntu in WSL if it is
 missing (that may need an administrator and a reboot the first time) and drives Radicle through it.
 In Git Bash, set `MSYS_NO_PATHCONV=1`.
 

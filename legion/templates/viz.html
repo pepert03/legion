@@ -25,6 +25,10 @@
   body { font: 15px/1.45 var(--serif); color: var(--ink); background: var(--paper);
          background-image: radial-gradient(ellipse at 50% 46%, #ffffff 0%, var(--paper) 62%); }
   #graph { position: fixed; inset: 128px 0 64px 0; }  /* below the title, so it never runs under it */
+  /* Embedded in a page (?embed=1): the graph and its timeline, on the page's own paper. */
+  .embed body { background: var(--paper); background-image: none; }
+  .embed #graph { inset: 0 0 64px 0; }
+  .embed .title, .embed #openLog, .embed #openMap, .embed #mapView, .embed #notice { display: none !important; }
   .caps { font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink3); }
 
   .title { position: fixed; top: 30px; left: 40px; pointer-events: none; }
@@ -322,7 +326,26 @@ const LOBE = "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.95.1/icon
 // landing page uses that), and with &autoplay=1 it plays it on a loop.
 const PARAMS = new URLSearchParams(location.search);
 const DEMO = PARAMS.get("demo"), AUTOPLAY = PARAMS.get("autoplay") === "1";
-let demoRun = null;
+// &embed=1: only the graph and its timeline, for a page that shows the run as part of itself (no title, panels or
+// wheel zoom, which would take the page's scroll); &step=MS: the time between two marks when it plays.
+const EMBED = PARAMS.get("embed") === "1", STEP = Math.max(30, +PARAMS.get("step") || 900);
+if (EMBED) document.documentElement.classList.add("embed");
+let demoRun = null, demoAt = null;
+// A recording made of frames: each one the tasks and agents that changed since the one before (and the rest of
+// the snapshot when it changed), so a long run stays a small file. Built forward, from the last one asked for.
+function demoFrame(k) {
+  const R = demoRun;
+  if (!demoAt || k < demoAt.k) demoAt = { k: 0, tasks: new Map(), agents: new Map(), rest: { ...R.base } };
+  while (demoAt.k < k && demoAt.k < R.frames.length) {
+    const f = R.frames[demoAt.k];
+    for (const [id, t] of Object.entries(f.t || {})) t ? demoAt.tasks.set(id, t) : demoAt.tasks.delete(id);
+    for (const [id, a] of Object.entries(f.a || {})) a ? demoAt.agents.set(id, a) : demoAt.agents.delete(id);
+    Object.assign(demoAt.rest, f.x || {});
+    demoAt.k++;
+  }
+  return { ...demoAt.rest, tasks: [...demoAt.tasks.values()], agents: [...demoAt.agents.values()], index: demoAt.k,
+           total: R.total };
+}
 async function api(path, params = {}) {
   if (!DEMO) {
     const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v != null)).toString();
@@ -333,6 +356,7 @@ async function api(path, params = {}) {
   demoRun = demoRun || await (await fetch(DEMO)).json();
   if (path === "state.json") {  // the recorded snapshot at or just before that point
     const upto = params.upto == null ? demoRun.total : params.upto;
+    if (demoRun.frames) return { ...demoFrame(upto), live: params.upto == null };
     const snap = demoRun.snapshots.filter((x) => x.index <= upto).pop() || demoRun.snapshots[0];
     return { ...snap, live: params.upto == null };
   }
@@ -1326,7 +1350,7 @@ function play() {
       return;
     }
     load(i).catch(() => {});
-  }, 900);
+  }, STEP);
   renderTimeline();
 }
 
@@ -1341,6 +1365,7 @@ async function init() {
   try { localLogos = new Set(await api("logos.json")); } catch {}
   const el = $("graph"), tip = $("tip");
   Graph = ForceGraph()(el)
+    .enableZoomInteraction(!EMBED)  // embedded, the wheel scrolls the page
     .backgroundColor("rgba(0,0,0,0)")
     .nodeId("id")
     .nodeCanvasObject(drawNode)

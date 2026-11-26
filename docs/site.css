@@ -1,0 +1,36 @@
+@font-face { font-family: "Latin Modern"; font-style: normal; font-weight: 400; font-display: swap;
+             src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-regular.woff2") format("woff2"); }
+@font-face { font-family: "Latin Modern"; font-style: italic; font-weight: 400; font-display: swap;
+             src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-italic.woff2") format("woff2"); }
+@font-face { font-family: "Latin Modern"; font-style: normal; font-weight: 700; font-display: swap;
+             src: url("https://cdn.jsdelivr.net/npm/latex.css@1.10.0/fonts/LM-bold.woff2") format("woff2"); }
+:root {
+  --paper: #fbfaf6; --card: #fffefb; --ink: #1c1b19; --ink2: #5e5a53; --ink3: #9a958c; --hair: #dcd7cd;
+  --green: #3d7a4f; --ochre: #c38a1f; --teal: #2d8a85;
+  --serif: "Latin Modern", "CMU Serif", "Computer Modern", Georgia, serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 18px/1.55 var(--serif); overflow-x: hidden; }
+a { color: inherit; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+.caps { font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink3); }
+header { display: flex; justify-content: space-between; align-items: center; padding: 22px 0; }
+header .home { text-decoration: none; color: var(--ink); }
+header nav a { margin-left: 22px; text-decoration: none; color: var(--ink2); font-style: italic; }
+header nav a:hover, header nav a[aria-current] { color: var(--ink); }
+.btn { display: inline-flex; align-items: center; gap: 10px; font: inherit; font-size: 17px; cursor: pointer;
+       padding: 11px 22px; border-radius: 999px; border: 1px solid var(--ink); text-decoration: none;
+       background: var(--ink); color: var(--paper); transition: transform .15s; }
+.btn:hover { transform: translateY(-1px); }
+.btn.ghost { background: transparent; color: var(--ink); }
+.copied { font-style: italic; color: var(--green); font-size: 15px; opacity: 0; transition: opacity .2s; }
+.copied.on { opacity: 1; }
+footer { margin: 90px 0 40px; padding-top: 22px; border-top: 1px solid var(--hair); display: flex;
+         justify-content: space-between; color: var(--ink3); font-size: 15px; flex-wrap: wrap; gap: 10px; }
+@media (max-width: 520px) {
+  body { font-size: 17px; }
+  .wrap { padding: 0 16px; }
+  header nav a { margin-left: 16px; }
+}
