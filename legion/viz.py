@@ -121,7 +121,7 @@ def snapshot(events: list[dict], upto: int | None, st: S.State | None = None, re
                       "children": len(kids), "children_done": sum(st.done(k.id) for k in kids),
                       "round": len(st.round_starts(t.id)) if t.mode == "competitive" else None})
 
-    agents = {}
+    agents, said = {}, {}
     for ev in evs:
         a = agents.setdefault(ev["author"], {
             "id": agent_id(ev["author"]), "author": ev["author"], "name": ev["name"], "kinds": [], "models": [],
@@ -131,7 +131,7 @@ def snapshot(events: list[dict], upto: int | None, st: S.State | None = None, re
         a["name"] = ev["name"]
         a["last_ts"] = max(a["last_ts"], ev["ts"])
         if ev["type"] not in ROUTINE:
-            a["last"] = event_text(ev, st)
+            said[ev["author"]] = ev  # its text is written once, for the last: one per event took most of a snapshot
             a["last_type"], a["last_type_ts"] = ev["type"], ev["ts"]
         for field, bucket in (("agent", "kinds"), ("model", "models")):
             if ev.get(field) and ev[field] not in a[bucket]:
@@ -140,6 +140,8 @@ def snapshot(events: list[dict], upto: int | None, st: S.State | None = None, re
                    "sketch.proposed": "sketches"}.get(ev["type"])
         if counter:
             a["stats"][counter] += 1
+    for author, ev in said.items():
+        agents[author]["last"] = event_text(ev, st)
     for p in st.patches.values():
         if p.verdict and p.author in agents:
             agents[p.author]["stats"][p.verdict] += 1
@@ -198,7 +200,13 @@ def snapshot(events: list[dict], upto: int | None, st: S.State | None = None, re
     counts = {}
     for t in tasks:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
-    recent = [item(e, st) for e in evs if e["type"] not in ROUTINE][-14:]
+    last = []  # the latest 14 that aren't routine, written out: not every event, to keep 14
+    for e in reversed(evs):
+        if e["type"] not in ROUTINE:
+            last.append(e)
+            if len(last) == 14:
+                break
+    recent = [item(e, st) for e in reversed(last)]
     return {"project": st.project.get("project") if st.project else None, "description": st.description,
             "research": research_view(st, evs, now) if research else {"maps": [], "links": [], "pulse": {}},
             "index": len(evs), "total": len(events), "live": live, "ts": now,

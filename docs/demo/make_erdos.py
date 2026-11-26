@@ -32,6 +32,7 @@ KEEP = {"project.init", "task.created", "patch.submitted", "patch.accepted", "pa
 SPECIAL = {"jose": "founder", "jose#9": "verifier"}
 KNOWN = ("instinct", "muse", "claude", "opencode", "codex", "gemini", "cursor", "deepseek")
 LEFT = re.compile(r"jose|pepe|sergi|peper", re.I)  # a person's handle, if any survived
+WORD = re.compile(r"[A-Za-z0-9_-]*(?:jose|pepe|sergi|peper)[A-Za-z0-9_-]*", re.I)  # the word that holds one
 
 
 def slim(t: dict) -> dict:
@@ -66,6 +67,11 @@ def rename(text: str, mapping: dict[str, str]) -> str:
     for old in sorted(mapping, key=len, reverse=True):
         text = re.sub(r"(?<![\w#-])" + re.escape(old) + r"(?![\w#-])", mapping[old], text)
     return text
+
+
+def scrub(text: str) -> str:
+    """What the renaming can't reach, a handle inside an agent's own words (a machine's name, a path): the word goes."""
+    return WORD.sub("…", text)
 
 
 def main(clone: str) -> None:
