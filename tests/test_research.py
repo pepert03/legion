@@ -684,3 +684,15 @@ def test_the_map_puts_what_stands_in_order_of_what_a_checker_cant_fake():
     text = R.map_text(st, st.tasks[tid])
     est = text.split("ESTABLISHED")[1]
     assert est.index("[Lean] in Lean") < est.index("[certified computation] a census") < est.index("on paper only")
+
+
+def test_a_goals_words_reach_whoever_proposes_for_it_and_its_reopening_reaches_whoever_worked_on_it():
+    log, tid = goal()
+    line = round_of(log, tid, "sat", 1)  # cel wrote the line, bea checked it
+    log.add(BOSS, "goal.opened", task=tid, text="We want the order of f. Work on the core conjecture.")
+    st = log.state()
+    assert "THE GOAL, in the words it was opened with:\nWe want the order of f" in R.propose_text(st, st.tasks[tid], "dan", 0)
+    said = [i["text"] for i in st.inbox(CEL.author, "cel", 1000.0) if i["kind"] == "note" and "opened with new words" in i["text"]]
+    assert said and "core conjecture" in said[-1]
+    assert not [i for i in st.inbox(Identity.generate("eve").author, "eve", 1000.0) if "opened with new words" in i["text"]]
+    assert line

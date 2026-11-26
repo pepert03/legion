@@ -389,13 +389,21 @@ def _hand(c: Ctx, args, kind: str, t: S.Task, text: str) -> int:
     return 7
 
 
+def _goal_words(st: S.State, t: S.Task, width: int) -> str:
+    words = (st.goals[t.id].get("text") or "").strip() if t.id in st.goals else ""
+    return words if len(words) <= width else words[:width - 1].rstrip() + "…"
+
+
 def propose_text(st: S.State, t: S.Task, name: str, mine: int) -> str:
     move, dry = move_for(st, t.id, name), st.dry(t.id)
     return (f"{t.key} is a research goal: an open problem nobody closes in one session, so it isn't handed out "
             "whole. It moves in rounds of lines that its agents propose, explore and check (`python -m legion help "
             f"research`). Propose ONE line for the next round"
             + (f" (you have {mine} waiting; you may hold {S.MAX_PROPOSALS})" if mine else "") + ".\n\n"
-            f"YOUR MOVE: {move}: {MOVE_TEXT[move]}.\nEach agent of a round is handed a different move, so the round "
+            # The goal's own words: what it's after and what counts as progress. Shown only in the bodies of rounds
+            # launched after them, a goal reopened with new words reached nobody proposing lines for it.
+            + (f"THE GOAL, in the words it was opened with:\n{_goal_words(st, t, 3000)}\n\n" if t.id in st.goals else "")
+            + f"YOUR MOVE: {move}: {MOVE_TEXT[move]}.\nEach agent of a round is handed a different move, so the round "
             "doesn't make one move several times. Make this one if you can; if it truly can't be made here, say why "
             "in your line and make another.\n"
             + (f"The last {dry} rounds didn't move the goal (nothing confirmed, or nothing that counts as progress "

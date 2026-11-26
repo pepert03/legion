@@ -1497,6 +1497,13 @@ class State:
                 f = self.findings[ev["finding"]]["ev"]
                 add(ev, "verdict", f"judged your finding {f['id'][:8]} ({f['statement'][:80]}) {ev.get('verdict')}: "
                                    f"{said(ev)}")
+            elif (t == "goal.opened" and not ev.get("closed") and tid in self.tasks
+                  and (self.took_part(tid, author, ev["ts"])
+                       or any(x.parent == tid and self.took_part(x.id, author, ev["ts"]) for x in self.tasks.values()))):
+                # A goal (re)opened with new words, told to the agents who worked on it: otherwise they read them
+                # only in the bodies of rounds launched later.
+                add(ev, "note", f"the goal {self.tasks[tid].key} was opened with new words; what counts as progress "
+                                f"on it now: {said(ev)[:1500]}")
             elif t == "lean.checked" and self.lean.get(ev.get("request"), {}).get("ev", {}).get("author") == author:
                 req = self.lean[ev["request"]]["ev"]
                 add(ev, "verified", f"compiled your Lean file {req['path']} ({req['id'][:8]}): "
