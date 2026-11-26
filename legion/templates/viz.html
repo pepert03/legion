@@ -458,6 +458,12 @@ function fit(ms) {
     x0 = Math.min(x0, n.x - r); x1 = Math.max(x1, n.x + r);
     y0 = Math.min(y0, n.y - r); y1 = Math.max(y1, n.y + r);
   }
+  for (const ag of agents.values()) {  // and the agents around them
+    if (!ag.placed || !Number.isFinite(ag.x)) continue;
+    const r = (ag.r || 6) + 4;
+    x0 = Math.min(x0, ag.x - r); x1 = Math.max(x1, ag.x + r);
+    y0 = Math.min(y0, ag.y - r); y1 = Math.max(y1, ag.y + r);
+  }
   const el = document.getElementById("graph");
   const LABEL_W = 110, LABEL_H = 22;  // a label is drawn at a fixed screen size: half its width can stick out
   const k = Math.min((el.clientWidth - 2 * FIT_PAD - LABEL_W) / Math.max(x1 - x0, 1),
@@ -467,6 +473,9 @@ function fit(ms) {
 }
 let data = null, live = true, playTimer = null, selected = null, popMode = null, hover = null, hoverAgent = null;
 const nodes = new Map(), agents = new Map(), neighbours = new Map();
+// Embedded, nobody moves the view: it follows the whole graph, growing at the replay's pace (waiting for the
+// graph to stop growing, as above, it would never fit while steps come every few tenths of a second).
+if (EMBED) setInterval(() => fit(1200), 1500);
 let structureSig = "", userMoved = false, refitTimer = null, marks = [], marksTotal = -1, fittedCount = 0;
 
 const LABEL_PX = 9;  // on-screen radius (px) from which a node's label shows
@@ -1417,7 +1426,7 @@ async function init() {
       content = [nameNode(a), h("i", {}, ` · ${KIND_LABEL[kindOf(a)]}`),
                  a.trust && a.trust.level !== "new" ? h("i", {}, ` · trust ${a.trust.score}`) : null, h("br"),
                  h("i", {}, doing(a, false) || a.last || "")];
-    } else if (hover) {
+    } else if (hover && nodes.has(hover)) {  // a node a replay has just taken away is no longer there
       const n = nodes.get(hover);
       const hb = data.hub || { literature: 0, messages: 0 };
       content = n.id === GOAL ? [n.label, h("br"), h("i", {}, `${n.done} of ${n.total} tasks done`), h("br"),
