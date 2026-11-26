@@ -1342,15 +1342,19 @@ async function load(upto) {
   if (data.index !== lastIndex || data.live !== lastLive) renderPop();
   lastIndex = data.index; lastLive = data.live;
 }
-function stopPlay() { if (playTimer) { clearInterval(playTimer); playTimer = null; } TL.playing = false; }
+function stopPlay() { if (playTimer) { clearTimeout(playTimer); playTimer = null; } TL.playing = false; }
 function goLive() { stopPlay(); live = true; load(null).catch(() => {}); }
 function seek(i) { stopPlay(); live = false; if (i >= data.total) return goLive(); load(Math.max(0, i)).catch(() => {}); }
 function play() {
   if (TL.playing) { stopPlay(); renderTimeline(); return; }
   live = false; TL.playing = true;
   let i = data && !data.live ? data.index : 0;
+  // Played on its own from the start, it sets off slowly and speeds up to its pace over its first RAMP steps.
+  const ramp = AUTOPLAY && i === 0, SLOW = Math.max(STEP, 700), RAMP = 50;
+  let n = 0;
+  const wait = () => (ramp ? STEP + (SLOW - STEP) * Math.max(0, 1 - n / RAMP) ** 2 : STEP);
   // From one timeline mark to the next: the events in between (heartbeats, lease renewals) show nothing new.
-  playTimer = setInterval(() => {
+  const step = () => {
     const next = marks.find((m) => m.i > i);
     i = next ? next.i : (data ? data.total : 0);
     if (!data || i >= data.total) {
@@ -1359,7 +1363,9 @@ function play() {
       return;
     }
     load(i).catch(() => {});
-  }, STEP);
+    n++; playTimer = setTimeout(step, wait());
+  };
+  playTimer = setTimeout(step, wait());
   renderTimeline();
 }
 
@@ -1396,7 +1402,7 @@ async function init() {
     .onRenderFramePost(drawAgents)
     .autoPauseRedraw(false)
     .cooldownTime(Infinity)
-    .d3VelocityDecay(0.3)
+    .d3VelocityDecay(0.6)
     .d3AlphaDecay(0.012)
     .maxZoom(4).minZoom(0.3)
     .onNodeHover((n) => { hover = n ? n.id : null; el.style.cursor = n ? "pointer" : null; })
@@ -1414,6 +1420,19 @@ async function init() {
     const g = nodes.get(GOAL);
     if (g && g.fx == null) { g.vx = (g.vx || 0) - g.x * 0.12; g.vy = (g.vy || 0) - g.y * 0.12; }
   });
+  // force-graph reheats its layout to the full (alpha 1) with every change of the graph: a task every few tenths
+  // of a second and everything shook. Last of the forces, this one scales what they all added to each speed this
+  // tick down to what alpha CALM would have added (they all scale with alpha): a change only reheats to CALM.
+  const CALM = 0.1;
+  Graph.d3Force("calm", (alpha) => {
+    if (alpha <= CALM) return;
+    const k = CALM / alpha;
+    for (const n of Graph.graphData().nodes) {
+      if (n.pvx === undefined) continue;
+      n.vx = n.pvx + (n.vx - n.pvx) * k; n.vy = n.pvy + (n.vy - n.pvy) * k;
+    }
+  });
+  Graph.onEngineTick(() => { for (const n of Graph.graphData().nodes) { n.pvx = n.vx; n.pvy = n.vy; } });
   const fitSize = () => { Graph.width(el.clientWidth).height(el.clientHeight); renderTimeline(); };
   fitSize(); new ResizeObserver(fitSize).observe(el);
 
@@ -1483,9 +1502,11 @@ async function init() {
   });
 
   try {
-    await load(null);
+    // Played on its own, it opens on the project's node alone, and the graph grows from it.
+    if (AUTOPLAY) live = false;
+    await load(AUTOPLAY ? 0 : null);
     for (const [ms, anim] of [[300, 0], [1500, 600], [3500, 800]]) setTimeout(() => !userMoved && fit(anim), ms);
-    if (AUTOPLAY) setTimeout(() => { seek(0); setTimeout(play, 1200); }, 2500);
+    if (AUTOPLAY) setTimeout(play, 1000);
   } catch (e) {
     $("notice").style.display = "block"; $("notice").textContent = `Couldn't read the state: ${e.message}`;
   }
