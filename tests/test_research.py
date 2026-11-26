@@ -667,3 +667,20 @@ def test_a_round_whose_synthesis_is_asked_closes_with_it_not_with_its_checks():
     q = log.add(ANA, "patch.submitted", task=synth, commit="c" * 40, branch="legion/r/c")
     log.add(BOSS, "patch.accepted", patch=q["id"], merge_commit="mc")
     assert log.state().research_rounds(tid)[0]["closed"] and log.state().dry(tid) == 1  # spoke, and said nothing
+
+
+def test_the_map_puts_what_stands_in_order_of_what_a_checker_cant_fake():
+    log, tid = goal()
+    line = round_of(log, tid, "sat", 1)
+    found = [log.add(CEL, "finding.stated", task=tid, line=line, cid=f"C-{i}", statement=s, status=status,
+                     evidence=ev)
+             for i, (s, status, ev) in enumerate((("on paper only", "proved", "proof.md"),
+                                                  ("a census", "checked by computation", "census.py"),
+                                                  ("in Lean", "proved", "Erdos902/X/Y.lean (theorem t)")))]
+    for f in found:
+        log.add(BEA, "finding.judged", task=tid, finding=f["id"], verdict="confirmed", reason="re-derived")
+    st = log.state()
+    assert [R.solidity(st.findings[f["id"]], False) for f in found] == [3, 1, 0]
+    text = R.map_text(st, st.tasks[tid])
+    est = text.split("ESTABLISHED")[1]
+    assert est.index("[Lean] in Lean") < est.index("[certified computation] a census") < est.index("on paper only")

@@ -23,6 +23,7 @@ research GOAL, it is worked on in rounds of an attack (attack.py) that nobody ha
 
 import hashlib
 import json
+import re
 import shutil
 import time
 from collections import Counter, defaultdict
@@ -264,6 +265,7 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
         ev = f["ev"]
         findings.append({"id": ev["id"], "cid": ev.get("cid", ""), "statement": ev["statement"],
                          "status": ev["status"], "kind": ev.get("kind", ""), "state": st.finding_state(f),
+                         "solidity": solidity(f, st.independent(f)),
                          "independent": st.independent(f), "front": f["front"], "line": key_of.get(f["line"]),
                          "by": ev["name"], "agent": agent(ev["author"]), "evidence": ev.get("evidence", ""),
                          "from": list(ev.get("from") or []), "ts": ev["ts"],
@@ -297,6 +299,23 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
             "untried": [m for m in S.METHODS if m != "other" and not used[m]]}
 
 
+# How much a finding that stands can carry, from what a checker's leaning can't fake: a Lean file it cites (the
+# compiler judged it), a computation anyone reruns, a re-derivation by another owner's agent, or one agent's word
+# on paper. Where checkers confirm nearly everything, a verdict alone no longer tells them apart.
+SOLIDITY = ("Lean", "certified computation", "checked by another owner", "paper")
+LEAN_FILE = re.compile(r"\.lean\b")
+
+
+def solidity(f: dict, independent: bool) -> int:
+    """Index in SOLIDITY of a finding: 0 the most solid."""
+    ev = f["ev"]
+    if ev["status"] == "proved" and LEAN_FILE.search(ev.get("evidence") or ""):
+        return 0
+    if ev["status"] == "checked by computation":
+        return 1
+    return 2 if independent else 3
+
+
 def _cut(text: str, n: int) -> str:
     text = " ".join(text.split())
     return text if len(text) <= n else text[:n - 1].rstrip() + "…"
@@ -318,7 +337,10 @@ def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None
                 + f") {_cut(f['statement'], per)}" + (f" [{_cut(f['evidence'], 90)}]" if f["evidence"] else ""))
 
     real = [f for f in d["findings"] if f["status"] != "dead end"]
-    parts = [("ESTABLISHED (confirmed by an agent other than its author)", [f for f in real if f["state"] == "confirmed"]),
+    stands = sorted((f for f in real if f["state"] == "confirmed"), key=lambda f: f["solidity"])
+    parts = [("ESTABLISHED (confirmed by an agent other than its author), the most solid first: build on the first "
+              "kinds before the last, since a claim on paper one agent confirmed can still be wrong",
+              [dict(f, statement=f"[{SOLIDITY[f['solidity']]}] {f['statement']}") for f in stands]),
              ("REFUTED (don't build on these)", [f for f in real if f["state"] == "refuted"]),
              ("CONTESTED (confirmed by one checker, refuted by another: settle it)",
               [f for f in real if f["state"] == "contested"]),
