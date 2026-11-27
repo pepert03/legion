@@ -189,8 +189,8 @@ jobs:
           if [ ! -x "$HOME/sat/drat-trim" ]; then
             git clone -q https://github.com/marijnheule/drat-trim /tmp/drat-trim
             git -C /tmp/drat-trim checkout -q 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
-            make -C /tmp/drat-trim > /dev/null
-            cp /tmp/drat-trim/drat-trim "$HOME/sat/"
+            # Its makefile asks for strict C99, which hides getc_unlocked, and a recent gcc refuses the call.
+            gcc -O2 -o "$HOME/sat/drat-trim" /tmp/drat-trim/drat-trim.c
           fi
           echo "$HOME/sat" >> "$GITHUB_PATH"
           echo "kissat $("$HOME/sat/kissat" --version), drat-trim ready"
