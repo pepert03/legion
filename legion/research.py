@@ -55,7 +55,66 @@ MOVE_TEXT = {
               "statement forbids, and say what its absence would prove",
     "recombine": "combine two confirmed findings from different fronts into something neither gives alone",
     "wild": "open a front, by a method, that nobody has tried on this goal: a real attempt, not a variation",
+    "exemplar": "find the smallest or the most symmetric objects that exist for a case of the problem (a SAT search "
+                "with `python -m legion sat`, a search under an assumed symmetry), and describe their structure: "
+                "what a general construction could copy from them",
 }
+
+BARRIERS = "barriers.json"  # what a round's synthesis says is now known not to work (see State.barriers_for)
+
+# Where the ideas of an idea round are to come from: each agent is handed one, the ones a goal's earlier idea rounds
+# used least first. Told only "a new idea", agents propose the variation of the map they were going to propose anyway.
+FIELDS = {
+    "coding theory": "codes and their bounds and constructions: linear, concatenated and algebraic-geometry codes, "
+                     "list decoding, covering codes",
+    "extremal set theory": "intersecting families, transversals and covers, shadows and Kruskal-Katona, the "
+                           "sunflower lemma, the delta-system method",
+    "algebraic constructions": "finite fields, quadratic residues and characters, Cayley graphs and tournaments, "
+                               "character sum bounds (Weil), explicit pseudorandom objects",
+    "the polynomial method": "the Combinatorial Nullstellensatz, slice rank, the cap-set method, Alon-Furedi, "
+                             "polynomials vanishing on the objects you count",
+    "entropy": "Shearer's lemma, entropy compression, information-theoretic counting and its stability versions",
+    "hypergraph containers": "container lemmas, counting independent sets, supersaturation, the method of "
+                             "graph containers",
+    "the probabilistic method": "beyond the first moment: alterations, the Lovasz Local Lemma, the Rodl nibble, "
+                                "dependent random choice, Janson and Talagrand, random greedy processes",
+    "spectral methods": "eigenvalues and expanders, the expander mixing lemma, interlacing, quasirandomness",
+    "Fourier analysis": "Boolean functions on the hypercube, hypercontractivity, influences, KKL, Fourier on finite "
+                        "abelian groups",
+    "design theory": "block designs, Steiner systems, finite geometries and their incidence structures, Latin "
+                     "squares, absorbing constructions",
+    "LP and SDP duality": "Delsarte's linear programming bound, flag algebras, the Lovasz theta function, "
+                          "dual certificates for extremal problems",
+    "topological methods": "Borsuk-Ulam, Kneser-type colouring arguments, nerve theorems, fixed points",
+    "computational exemplars": "the smallest or most symmetric objects that exist for small cases, found by SAT "
+                               "(`python -m legion sat`) or by a search under an assumed symmetry, and a "
+                               "construction read off their structure",
+}
+
+IDEAS_SYNTHESIS = ("This was a round of IDEAS: `python -m legion attack digest {parent} --round {round}` shows each "
+                   "idea and its judgement. (1) Rank them: an idea whose kill test killed it, or of novelty 0, is out; "
+                   "then by novelty plus plausibility, and whether its escapes hold. Say in your report which you "
+                   "keep and why, and what the others taught. (2) Make DEEP LINES of the best, at most "
+                   f"{S.MAX_DEEP}: write {NEXT_LINES} in the synthesis's folder, one line per kept idea, each with "
+                   '"deep": true, its kill test as the first thing the text asks, then its first step, its "escapes" '
+                   'as the idea gave them and the judge confirmed, "move": "wild" or "transfer", and a new "front" '
+                   "(as `python -m legion help research` describes a line). On submit they are proposed for the "
+                   "next round, as yours. (3) What a killed idea showed CAN'T work, if it bars a whole family of "
+                   f"arguments: write {BARRIERS} in the folder, a JSON list of objects with \"name\" (a short key) and "
+                   '"statement" (which family, and what stops it). Write no progress verdict: a round of ideas '
+                   "neither moves its goal nor counts against it.")
+
+
+def barriers_text(st: S.State, t: S.Task, width: int = 4000) -> str:
+    """A goal's barriers in words: what is known not to work on it, that a line says it escapes."""
+    bars = st.barriers_for(t.id)
+    if not bars:
+        return ""
+    per = max(160, min(600, width // max(1, len(bars))))
+    return ("BARRIERS (what is known not to work on this goal: a line says, in its escapes, why it doesn't fall into "
+            "them):\n" + "\n".join(f"  {b['barrier']}: {_cut(b['statement'], per)}"
+                                   + (f" [{', '.join(x[:8] for x in b.get('from') or [])}]" if b.get("from") else "")
+                                   for b in bars))
 
 
 def move_for(st: S.State, goal: str, name: str) -> str:
@@ -152,13 +211,16 @@ def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
                 f"IF IT FAILS, THE PROJECT LEARNS: {ev['learn'].strip()}"
                 + (f"\nHOW IT DIFFERS from earlier lines on this front: {ev['differs'].strip()}"
                    if ev.get("differs", "").strip() else "")
+                + (f"\nWHY IT ESCAPES the goal's barriers: {ev['escapes'].strip()}" if ev.get("escapes", "").strip()
+                   else "")
                 + ("\nIT BUILDS ON the findings " + ", ".join(x[:8] for x in ev["from"])
                    + f" (`python -m legion map {parent.key}`)." if ev.get("from") else "")
                 + f"\nProposed by {ev['name']}. Need something from another agent on the way (a lemma, a "
                   f"computation, a reference, a check with a tool you lack)? Ask for it, and go on: `python -m legion "
                   f"ask {parent.key} \"...\"` is handed out before anything else.")
         lines.append({"key": line_key(p), "title": ev["title"].strip(), "front": ev["front"], "task": task[:A.MAX_TEXT],
-                      **({"needs": ev["needs"]} if ev.get("needs") else {}), "proposal": ev["id"]})
+                      **({"needs": ev["needs"]} if ev.get("needs") else {}), "proposal": ev["id"],
+                      **({"deep": True} if ev.get("deep") is True else {})})
     words = (st.goals[parent.id].get("text") or "").strip() if parent.id in st.goals else ""
     return {"goal": (f"A round of the research cycle on {parent.key} ({parent.title}): lines its agents proposed, "
                      "each on a front of its own where it could. A line that fails cleanly, and says why, moves "
@@ -182,11 +244,54 @@ def spec_for(st: S.State, parent: S.Task, chosen: list[dict]) -> dict:
                           "or why none. Then propose the next round's lines, the first of them your NEXT: write "
                           f"{NEXT_LINES} in the synthesis's folder, a JSON list of one to three "
                           "lines, each an object with front, method, title, text, learn (and differs, on a front "
-                          "that has lines already), as `python -m legion help research` describes a line. On submit "
-                          "they are proposed for the next round, as yours; whatever the rules refuse is said, and the "
-                          "patch goes in all the same."),
+                          "that has lines already; escapes, on a goal with barriers; \"deep\": true for one approach "
+                          "to work on over several sessions, its kill test first), as `python -m legion help "
+                          "research` describes a line. On submit they are proposed for the next round, as yours; "
+                          "whatever the rules refuse is said, and the patch goes in all the same. And if this round "
+                          "showed that a whole family of arguments or objects can't work: write " + BARRIERS + " too, "
+                          "a JSON list of objects with \"name\" (a short key) and \"statement\" (which family, and "
+                          "what stops it): the goal's barriers, which every later line must say it escapes."),
             "assess": True,
             "lines": lines}
+
+
+def fields_for(st: S.State, goal: str, n: int) -> list[str]:
+    """The fields the next idea round's agents are handed: those its earlier idea rounds used least, in an order
+    of the goal's own."""
+    used = Counter(t.attack.get("field") for t in st.tasks.values() if t.parent == goal
+                   and t.attack.get("kind") == "idea" and t.attack.get("role") == "line")
+    k = len(st.research_rounds(goal))
+    order = sorted(FIELDS, key=lambda f: (used[f], hashlib.sha256(f"{goal}|{k}|{f}".encode()).hexdigest()))
+    return order[:n]
+
+
+def idea_spec(st: S.State, parent: S.Task, now: float) -> dict:
+    """The spec of a round of ideas on a goal: one idea per field handed out, each judged; the round's common text
+    is the goal and its barriers, not its map (see State.ideas_due)."""
+    n = max(3, round_size(st, now))
+    words = _goal_words(st, parent, 3000)
+    bars = barriers_text(st, parent, 8000) or ("BARRIERS: none named yet. What the rounds so far ruled out is on the "
+                                               "map, which you read only after writing your idea.")
+    lines = []
+    for f in fields_for(st, parent.id, n):
+        key = re.sub(r"[^a-z0-9]+", "-", f.lower()).strip("-")[:30]
+        lines.append({"key": f"idea-{key}", "kind": "idea", "field": f, "field_text": FIELDS[f],
+                      "title": f"a new approach from {f}", "task": FIELDS[f], "front": "ideas"})
+    return {"goal": (f"{parent.key} ({parent.title}). " + (words or parent.title)),
+            "common": bars, "synthesis": IDEAS_SYNTHESIS.format(parent=parent.key, round="{round}"), "lines": lines}
+
+
+def launch_ideas(c: Ctx, parent: S.Task, now: float) -> str:
+    """Make a round of ideas on the goal: its pieces are subtasks, as any round's."""
+    spec = idea_spec(c.st, parent, now)
+    rnd = A.next_round(c.st, parent)
+    spec["synthesis"] = spec["synthesis"].replace("{round}", rnd)
+    rnd, pieces = A.plan(c.st, parent, dict(spec, round=rnd), c.ident.name)
+    for p in pieces:
+        c.emit("task.created", **p, split=True)
+    A.announce(c, parent, rnd, pieces, now)
+    c.sync()
+    return rnd
 
 
 def may_launch(st: S.State, parent: S.Task, author: str, now: float) -> bool:
@@ -295,6 +400,8 @@ def map_data(st: S.State, t: S.Task, now: float) -> dict:
     return {"task": t.key, "id": t.id, "title": t.title, "goal": t.id in st.goals,
             "text": (st.goals[t.id].get("text") or "") if t.id in st.goals else "",
             "dry": st.dry(t.id), "spent": st.spent(t.id), "fronts": list(fronts.values()), "lines": lines,
+            "barriers": [{"name": b["barrier"], "statement": b["statement"], "from": list(b.get("from") or []),
+                          "by": b["name"]} for b in st.barriers_for(t.id)],
             "findings": findings, "rounds": rounds, "methods": dict(used),
             "untried": [m for m in S.METHODS if m != "other" and not used[m]]}
 
@@ -325,7 +432,7 @@ def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None
     """The map in words: what stands, what fell, what nobody checked, what failed, and where the fronts are. It
     is computed from the findings and their verdicts, so nobody has to rewrite it, and it can't drift from them."""
     d = map_data(st, t, now or time.time())
-    if not d["findings"] and not d["lines"]:
+    if not d["findings"] and not d["lines"] and not st.barriers_for(t.id):
         return (f"(The map of {t.key} is empty: no findings and no lines yet. Its state of the art, if someone "
                 f"wrote one: `python -m legion brief {t.key}`.)")
     per = max(160, min(700, width // max(8, len(d["findings"]) + len(d["fronts"]) + 4)))
@@ -357,6 +464,9 @@ def map_text(st: S.State, t: S.Task, width: int = 6000, now: float | None = None
         out += [f"  {label}: {_cut(said[k], 700)}" for k, label in
                 (("eliminated", "ELIMINATED"), ("open", "WHERE THE ANSWER CAN STILL BE"), ("next", "NEXT"))
                 if said[k]]
+    bars = barriers_text(st, t, max(1500, width // 4))
+    if bars:
+        out.append(bars)
     for title, fs in parts:
         if fs:
             out.append(f"{title}:")
@@ -421,6 +531,11 @@ def propose_text(st: S.State, t: S.Task, name: str, mine: int) -> str:
             "  --learn    what the project learns if it FAILS: a line that teaches nothing when it fails isn't "
             f"worth a round (at most {S.MAX_FINDING} characters, as --differs)\n"
             "  --differs  on a front that has lines already: what yours does that they didn't (required there)\n"
+            + (f"  --escapes  which of the goal's barriers your line could fall into, and why it doesn't "
+               f"(required here: the goal has barriers; {S.MIN_ESCAPES} characters or more)\n"
+               if st.barriers_for(t.id) else "")
+            + "  --deep     one approach to work on over several sessions, its kill test first (at most "
+            f"{S.MAX_DEEP} on a goal): for an idea that needs time, not for a computation\n"
             "  --needs    programs its work takes (lake, kissat...), so it goes to a machine that has them\n"
             "  --from     ids of the findings it builds on\n"
             f"`python -m legion line propose {t.key} --front F --method M --title \"...\" --file line.txt "
@@ -478,6 +593,16 @@ def launch_due(c: Ctx, now: float) -> bool:
     """Launch the rounds that are due, if this agent may: True if it launched one."""
     made = False
     for t in open_goals(c.st, c.me):
+        if c.st.ideas_due(t.id) and may_launch(c.st, t, c.me, now):
+            try:
+                rnd = launch_ideas(c, t, now)
+            except Fail as e:
+                print(f"legion: the round of ideas due on {t.key} wasn't launched here: {e}", flush=True)
+            else:
+                print(f"legion: round {rnd} on {t.key} launched: a round of ideas, its rounds having stopped "
+                      "moving it.", flush=True)
+                made = True
+                continue
         chosen = due(c.st, t.id, now)
         if chosen and may_launch(c.st, t, c.me, now):
             try:
@@ -495,7 +620,7 @@ def cycle_work(c: Ctx, args, now: float) -> int | None:
     again), a line proposed, others' lines backed. None if they want nothing from it now."""
     st, name = c.st, c.ident.name
     goals = [t for t in open_goals(st, c.me) if not st.spent(t.id)]
-    if goals and launch_due(c, now):
+    if launch_due(c, now):  # a spent goal too: a round of ideas may be due on it
         return RELAUNCH
     for t in goals:
         waiting = st.open_lines(t.id)
@@ -553,8 +678,8 @@ def lift(c: Ctx, t: S.Task, ref: str | None = None) -> int:
     parent = c.st.tasks.get(t.parent)
     if role == "synthesis" and parent is not None and t.zone and ref is None:
         d = t.zone[0].rstrip("/")
-        return assess(c, parent, t, d) + propose_next(c, parent, d)
-    if role not in ("line", "check") or parent is None or not t.zone:
+        return assess(c, parent, t, d) + propose_next(c, parent, d) + take_barriers(c, parent, d)
+    if role not in ("line", "check") or parent is None or not t.zone or t.attack.get("kind") == "idea":
         return 0
     n, d = 0, t.zone[0].rstrip("/")
     try:
@@ -609,7 +734,8 @@ def relift(c: Ctx, now: float) -> int:
     checks had nothing to judge, and no round could count as moving its goal. How many events it recorded."""
     from . import coordgit
     st, n = c.st, 0
-    for t in [t for t in st.tasks.values() if t.attack.get("role") in ("line", "check") and t.parent in st.goals]:
+    for t in [t for t in st.tasks.values() if t.attack.get("role") in ("line", "check") and t.parent in st.goals
+              and t.attack.get("kind") != "idea"]:
         mine = [p for p in st.patches_for(t.id) if p.author == c.me and p.verdict != "rejected"
                 and now - p.ts < RELIFT_DAYS * 86400]
         if not mine:
@@ -656,6 +782,30 @@ def assess(c: Ctx, goal: S.Task, t: S.Task, d: str) -> int:
     return 0
 
 
+def take_barriers(c: Ctx, goal: S.Task, d: str) -> int:
+    """The barriers a round's synthesis says it found (BARRIERS in its folder), as the goal's. How many went in."""
+    if goal.id not in c.st.goals:
+        return 0
+    rows = _load(c.repo, f"{d}/{BARRIERS}")
+    if not isinstance(rows, list):
+        return 0
+    n = 0
+    for x in rows[:6]:
+        if not isinstance(x, dict):
+            continue
+        name = re.sub(r"[^a-z0-9-]+", "-", str(x.get("name", "")).lower()).strip("-")[:40]
+        try:
+            c.emit("goal.barrier", task=goal.id, barrier=name, statement=_cut(str(x.get("statement") or ""), S.MAX_FINDING),
+                   **({"from": [f for f in x["from"] if f in c.st.findings][:8]} if isinstance(x.get("from"), list)
+                      else {}))
+            n += 1
+        except Fail as e:
+            print(f"legion: a barrier of {d}/{BARRIERS} wasn't recorded: {e}", flush=True)
+    if n:
+        print(f"legion: {n} barrier(s) of {goal.key} recorded: every later line says why it escapes them.", flush=True)
+    return n
+
+
 def propose_next(c: Ctx, goal: S.Task, d: str) -> int:
     """The lines a round's synthesis proposes for the next round (NEXT_LINES in its folder), as its agent's own.
     How many went in. Its agent knows the round best: in Erdős #902 the syntheses named next steps that nobody
@@ -674,7 +824,9 @@ def propose_next(c: Ctx, goal: S.Task, d: str) -> int:
                    move=x.get("move") if x.get("move") in S.MOVES else move_for(c.st, goal.id, c.ident.name),
                    title=str(x.get("title", "")).strip(), text=str(x.get("text", "")).strip(),
                    learn=str(x.get("learn", "")).strip(),
-                   **({"differs": str(x["differs"]).strip()} if x.get("differs") else {}))
+                   **({"differs": str(x["differs"]).strip()} if x.get("differs") else {}),
+                   **({"escapes": str(x["escapes"]).strip()} if x.get("escapes") else {}),
+                   **({"deep": True} if x.get("deep") is True else {}))
             n += 1
         except Fail as e:
             print(f"legion: a line of {d}/{NEXT_LINES} wasn't proposed: {e}", flush=True)
@@ -685,7 +837,8 @@ def ask_for_line(c: Ctx, t: S.Task, now: float) -> str:
     """After a round's line or check is submitted: if the goal's next round would take more lines, and its agent
     has none waiting there, the ask to propose one now, when it knows that front best. "" otherwise."""
     goal = c.st.tasks.get(t.parent)
-    if goal is None or goal.id not in c.st.goals or c.st.spent(goal.id) or t.attack.get("role") not in ("line", "check"):
+    if (goal is None or goal.id not in c.st.goals or c.st.spent(goal.id) or t.attack.get("role") not in ("line", "check")
+            or t.attack.get("kind") == "idea"):
         return ""
     if any(x["ev"]["author"] == c.me for x in c.st.open_lines(goal.id)) or not wanted(c.st, goal.id, now):
         return ""
@@ -770,6 +923,7 @@ def cmd_line(args):
     ev = c.emit("line.proposed", task=t.id, front=args.front, method=args.method,
                 move=args.move or move_for(c.st, t.id, c.ident.name), title=args.title.strip(), text=text,
                 learn=args.learn.strip(), **({"differs": args.differs.strip()} if args.differs else {}),
+                **({"escapes": args.escapes.strip()} if args.escapes else {}), **({"deep": True} if args.deep else {}),
                 **({"needs": args.needs} if args.needs else {}), **({"from": frm} if frm else {}))
     made = launch_due(c, now)
     c.sync()
@@ -826,6 +980,20 @@ def cmd_map(args):
 def cmd_round(args):
     c = Ctx(sync=not args.no_sync)
     t, now = c.task(args.task), time.time()
+    if args.ideas:
+        if t.id not in c.st.goals:
+            raise Fail(f"{t.key} isn't a research goal", 3)
+        if not may_launch(c.st, t, c.me, now):
+            raise Fail(f"a round is launched by a founder or a trusted agent that works on {t.key}", 3)
+        if args.dry_run:
+            spec = idea_spec(c.st, t, now)
+            print(f"A round of ideas on {t.key} would hand out {len(spec['lines'])} field(s): "
+                  + ", ".join(x["field"] for x in spec["lines"]) + ".\n\nWhat its agents are shown:\n" + spec["common"])
+            return 0
+        rnd = launch_ideas(c, t, now)
+        print(f"Round {rnd} on {t.key}: a round of ideas, each from a field of its own and judged by another agent, "
+              f"then a synthesis that makes deep lines of the best. `python -m legion attack status {t.key}`.")
+        return 0
     props = c.st.open_lines(t.id)
     if not props:
         raise Fail(f"no line is proposed on {t.key}: `python -m legion line propose {t.key} ...`", 3)
@@ -839,6 +1007,29 @@ def cmd_round(args):
     rnd = launch(c, t, chosen, now)
     print(f"Round {rnd} on {t.key}: {len(chosen)} line(s), each with its check, and a synthesis. `claim` hands "
           f"them out; `python -m legion attack status {t.key}` follows it.")
+    return 0
+
+
+def cmd_barrier(args):
+    from .cli import out
+    c = Ctx(sync=not args.no_sync)
+    t = c.task(args.task)
+    if args.retire:
+        c.emit("goal.barrier", task=t.id, barrier=args.retire, retired=True)
+        c.sync()
+        print(f"The barrier {args.retire} of {t.key} is retired.")
+        return 0
+    if args.name:
+        statement = (args.statement or "").strip() or _text(args)
+        frm = [_find(c.st.findings, x, "finding")["ev"]["id"] for x in args.frm or []]
+        c.emit("goal.barrier", task=t.id, barrier=args.name, statement=statement, **({"from": frm} if frm else {}))
+        c.sync()
+        print(f"{t.key} has the barrier {args.name}: every line proposed on it from now on says why it escapes it.")
+        return 0
+    bars = c.st.barriers_for(t.id)
+    out(args, {"task": t.key, "barriers": bars},
+        barriers_text(c.st, t, 10**6) or f"{t.key} has no barriers named. `python -m legion barrier {t.key} NAME "
+                                         "\"what doesn't work, and why\" --from <findings>` names one.")
     return 0
 
 
@@ -863,6 +1054,8 @@ def add_parser(sub) -> None:
     s.add_argument("--file", help="the line's text: what to do, what counts as a result, where it gets hard")
     s.add_argument("--learn", help="what the project learns if the line fails")
     s.add_argument("--differs", help="what it does that earlier lines on its front didn't")
+    s.add_argument("--escapes", help="which of the goal's barriers it could fall into, and why it doesn't")
+    s.add_argument("--deep", action="store_true", help="one approach worked on over several sessions, kill test first")
     s.add_argument("--needs", nargs="*", help="programs its work takes on the machine")
     s.add_argument("--from", dest="frm", nargs="*", help="findings it builds on")
     s.add_argument("--all", action="store_true", help="list: the others' too, before you have proposed")
@@ -890,9 +1083,22 @@ def add_parser(sub) -> None:
     s.add_argument("--json", action="store_true")
     s.add_argument("--no-sync", action="store_true")
     s.set_defaults(func=cmd_map)
-    s = sub.add_parser("round", help="launch a goal's next round now, from the lines proposed")
+    s = sub.add_parser("round", help="launch a goal's next round now, from the lines proposed; or a round of ideas")
     s.add_argument("task")
+    s.add_argument("--ideas", action="store_true", help="a round of ideas: each agent, shown only the goal and its "
+                                                        "barriers, proposes an approach from a field it is handed")
     s.add_argument("--lines", type=int, help="how many lines (default: by the agents active)")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--no-sync", action="store_true")
     s.set_defaults(func=cmd_round)
+    s = sub.add_parser("barrier", help="a research goal's barriers: what is known not to work on it")
+    s.add_argument("task", help="the goal")
+    s.add_argument("name", nargs="?", help="name a barrier (a short key): with its statement")
+    s.add_argument("statement", nargs="?", help="which family of arguments or objects doesn't work, and what stops it")
+    s.add_argument("--from", dest="frm", nargs="*", help="the findings it rests on")
+    s.add_argument("--retire", metavar="NAME", help="it turned out not to bar what it said")
+    s.add_argument("--file")
+    s.add_argument("--text")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-sync", action="store_true")
+    s.set_defaults(func=cmd_barrier)

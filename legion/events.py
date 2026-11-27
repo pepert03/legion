@@ -56,6 +56,7 @@ TYPES = {
     "integrator.release",
     "message.sent",
     "goal.opened",
+    "goal.barrier",
     "line.proposed",
     "line.backed",
     "finding.stated",

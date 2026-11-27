@@ -22,6 +22,9 @@ PATCH_PREFIXES = ("legion/", "refs/legion/patches/")  # never main or anyone els
 SKETCH_DIR = "legion_sketches"
 MAX_CHILDREN, MAX_DEPTH = 8, 3
 ATTACK_ROLES = ("line", "check", "synthesis")  # the pieces of an attack (attack.py)
+# What else a piece says of itself: an idea round's (kind "idea", the field its idea is to come from) and whether a
+# line is deep (see MAX_DEEP).
+ATTACK_TEXT = ("round", "line", "assess", "kind", "field")
 # A task may carry its contract: test files (a sketch's tests, but in the task itself) that pin what its patch
 # must do. They live in the task's event, so whoever votes on a proposed task reads them, and legion writes them
 # into CONTRACT_DIR/<key>/ before every run of its acceptance command: outside the zone, so no patch can change
@@ -192,8 +195,21 @@ VERIFIED_AFTER = 4
 # kept as findings (finding.stated: a precise statement, its status, where its evidence is), each judged by agents
 # other than its author (finding.judged): the task's map, which is what the next round starts from.
 METHODS = ("construct", "random", "compute", "structure", "barrier", "transfer", "reduce", "other")
-MOVES = ("extend", "obstruct", "specialise", "weaken", "transfer", "invert", "recombine", "wild")
-REFRAME = ("obstruct", "weaken", "transfer", "invert", "wild")  # the moves left once rounds stop finding anything
+MOVES = ("extend", "obstruct", "specialise", "weaken", "transfer", "invert", "recombine", "wild", "exemplar")
+REFRAME = ("obstruct", "weaken", "transfer", "invert", "wild", "exemplar")  # the moves left once rounds stop finding anything
+# A goal's BARRIERS (goal.barrier): what is known not to work on it, each named, stated and resting on findings, said
+# by its agents or lifted from a round's synthesis. A line proposed on a goal that has some says, in `escapes`, why it
+# doesn't fall into them: the lines of Erdős #902 went round the same families (moments, local LPs, small cases) for
+# twenty rounds, each a variation of the last. At most MAX_BARRIERS standing on a goal.
+MAX_BARRIERS, MIN_ESCAPES = 24, 40
+# DEEP lines: one approach worked on over several sessions, its kill test first, without a result each session. It
+# doesn't hold its round back, and letting it go between sessions doesn't make it stale. At most MAX_DEEP under way
+# on one goal.
+MAX_DEEP = 2
+# IDEA rounds: when a goal's rounds stop moving it (DRY_REFRAME), a round of ideas instead of lines: each agent, shown
+# only the goal and its barriers, proposes an approach from a field it is handed, others judge them against the map,
+# and the synthesis makes deep lines of the best. At most MAX_IDEA_ROUNDS in one dry streak.
+MAX_IDEA_ROUNDS = 3
 FINDING_STATUS = ("proved", "checked by computation", "partial", "unproved", "dead end")
 VERDICTS = ("confirmed", "refuted", "not verified")
 MAX_LINE, MAX_FINDING, MAX_PROPOSALS = 2500, 800, 3  # characters; open proposals an agent may have on one goal
@@ -223,7 +239,8 @@ TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 NOOP_AFTER = 2
 # What counts as new on a task: work, not talk about having looked. Notes and failed reports don't.
 NEWS = {"work.saved", "patch.submitted", "idea.proposed", "question.answered", "result.submitted",
-        "line.proposed", "finding.stated", "finding.judged", "lit.added", "path.proposed", "sketch.proposed"}
+        "line.proposed", "finding.stated", "finding.judged", "lit.added", "path.proposed", "sketch.proposed",
+        "goal.barrier"}
 QUESTION_TAKES = 2  # times an agent is handed one question without answering it (one was taken 543 times)
 # A finding stands once an agent other than its author confirms it, and nothing asked anyone to: claim hands one
 # to judge to an agent with nothing to take, until JUDGES_WANTED agents have said (a "not verified" is a say: the
@@ -269,7 +286,8 @@ class Task:
     # Tasks whose writers may not take this one: an attack's check of a line is done by an agent that didn't
     # write the line (see attack.py), as a reviewer isn't the author.
     apart: list = field(default_factory=list)
-    attack: dict = field(default_factory=dict)  # an attack's piece: {"round", "role" (line|check|synthesis), "line"}
+    attack: dict = field(default_factory=dict)  # an attack's piece: {"round", "role" (line|check|synthesis), "line",
+    #                                             and "kind", "field", "deep", "assess" when they apply}
     # Programs its work needs on the machine (lake, kissat...): claim doesn't hand it to an agent whose machine
     # lacks one. In Erdős #902 the only agents left ran where Lean doesn't, and were handed tasks only Lean closes.
     needs: list = field(default_factory=list)
@@ -469,6 +487,7 @@ class State:
         self.assessed: dict[tuple[str, str], dict] = {}  # (goal, round) -> its synthesis's latest round.assessed
         self.lean: dict[str, dict] = {}  # request id -> {ev: lean.requested, checked: its lean.checked or None}
         self.sat: dict[str, dict] = {}  # request id -> {ev: sat.requested, checked: its sat.checked or None}
+        self.barriers: dict[str, dict[str, dict]] = {}  # goal -> barrier name -> its goal.barrier (see MAX_BARRIERS)
         self.news: dict[str, list[tuple]] = defaultdict(list)  # task -> (ts, author, name) of what was new on it
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
@@ -734,7 +753,8 @@ class State:
         out = set()
         for tid in {a.get("task") for a in self.attempts if a["author"] == author} | {
                 tid for tid, cs in self.claims.items() if any(cl.author == author for cl in cs)}:
-            if tid in self.tasks:
+            # A deep line is let go of at the end of every session, by design (see MAX_DEEP): that isn't giving up.
+            if tid in self.tasks and not self.tasks[tid].attack.get("deep"):
                 since = self.news_for(author, tid)
                 if sum(ts > since for ts in self.let_go(author, tid)) >= NOOP_AFTER:
                     out.add(tid)
@@ -1080,6 +1100,39 @@ class State:
             self.goals[task.id] = ev
         return None
 
+    def _barrier(self, ev: dict, task: Task) -> str | None:
+        """A barrier of a research goal: what is known not to work on it, named and stated, resting on findings; or
+        one retired (retired: true), when it turns out not to bar what it said (see MAX_BARRIERS)."""
+        if task.id not in self.goals:
+            return "barriers are said of a research goal"
+        a, ts = ev["author"], ev["ts"]
+        if not (a in self.integrators or self.trusted(a) and (self.took_part(task.id, a, ts) or any(
+                self.took_part(k.id, a, ts) for k in self.children(task.id)))):
+            return "a founder, or a trusted agent that works on the goal or its rounds, says its barriers"
+        name, statement, frm = ev.get("barrier"), ev.get("statement", ""), ev.get("from") or []
+        if not isinstance(name, str) or not CHILD_KEY.match(name) or len(name) > 40:
+            return "a barrier's name is a short key: lowercase letters, digits and hyphens, at most 40"
+        mine = self.barriers.setdefault(task.id, {})
+        if ev.get("retired") is True:
+            if name not in mine:
+                return f"the goal has no barrier {name}"
+            mine.pop(name)
+            return None
+        if not isinstance(statement, str) or len(statement.strip()) < 20 or len(statement) > MAX_FINDING:
+            return (f"a barrier states what doesn't work and why, precisely: from 20 to {MAX_FINDING} characters "
+                    "(which family of arguments or objects, and what stops it)")
+        if not isinstance(frm, list) or len(frm) > 8 or not all(self.findings.get(x, {}).get("task") == task.id
+                                                                for x in frm):
+            return "a barrier rests on findings of the same goal (at most 8)"
+        if name not in mine and len(mine) >= MAX_BARRIERS:
+            return f"the goal has {MAX_BARRIERS} barriers already: retire or restate one (same name) first"
+        mine[name] = ev
+        return None
+
+    def barriers_for(self, tid: str) -> list[dict]:
+        """A goal's standing barriers, oldest first (each a goal.barrier: its name is in "barrier")."""
+        return sorted(self.barriers.get(tid, {}).values(), key=lambda e: (e["lamport"], e["id"]))
+
     def _lean(self, ev: dict) -> str | None:
         """A Lean file to compile for an agent whose machine has no Lean, and the compile's outcome (see
         lean.py). A request names a commit (main plus the file) and the file's path in it; any trusted agent with
@@ -1210,6 +1263,21 @@ class State:
             return f"say what the project learns if the line fails (learn), in at most {MAX_FINDING} characters"
         if not isinstance(differs, str) or len(differs) > MAX_FINDING:
             return f"differs is text of at most {MAX_FINDING} characters"
+        escapes, deep = ev.get("escapes", ""), ev.get("deep", False)
+        if not isinstance(escapes, str) or len(escapes) > MAX_FINDING:
+            return f"escapes is text of at most {MAX_FINDING} characters"
+        bars = self.barriers_for(task.id)
+        if bars and len(escapes.strip()) < MIN_ESCAPES:
+            return (f"{task.key} has barriers, what is known not to work on it ("
+                    + ", ".join(b["barrier"] for b in bars[:12]) + f"; `python -m legion barrier {task.key}`): say in "
+                    f"`escapes` ({MIN_ESCAPES} characters or more) which of them your line could fall into, and why "
+                    "it doesn't")
+        if not isinstance(deep, bool):
+            return "deep is true or false"
+        if deep and sum(1 for t in self.tasks.values() if t.parent == task.id and t.attack.get("deep")
+                        and t.attack.get("role") == "line" and not t.cancelled and not self.done(t.id)) \
+                + sum(1 for x in self.open_lines(task.id) if x["ev"].get("deep")) >= MAX_DEEP:
+            return f"at most {MAX_DEEP} deep lines under way or proposed on one goal: propose an ordinary one"
         if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and TOOL.fullmatch(n)
                                                                     for n in needs):
             return "needs lists at most 5 programs the line's work takes (lake, kissat...)"
@@ -1391,7 +1459,8 @@ class State:
         for name, pieces in by.items():
             lines = [t for t in pieces if t.attack.get("role") == "line"]
             synth = [t for t in pieces if t.attack.get("role") == "synthesis"]
-            work = [t for t in pieces if t.attack.get("role") != "synthesis"]
+            # A deep line and its check don't hold their round back: they go on for days (see MAX_DEEP).
+            work = [t for t in pieces if t.attack.get("role") != "synthesis" and not t.attack.get("deep")]
             ids = {t.id for t in lines}
             stand = [f for f in self.findings_for(tid) if f["line"] in ids and self.finding_state(f) == "confirmed"
                      and f["ev"]["status"] in ("proved", "checked by computation")]
@@ -1406,7 +1475,7 @@ class State:
             waits = assess and any(not t.cancelled for t in synth)
             out.append({"round": name, "pieces": pieces, "lines": lines, "confirmed": len(stand),
                         "closed": synthesised or worked and not waits,
-                        "assess": assess,
+                        "assess": assess, "ideas": any(t.attack.get("kind") == "idea" for t in pieces),
                         "progress": said["progress"] if said else None,
                         **{k: (said or {}).get(k, "") for k in ASSESSMENT},
                         "lamport": max(t.lamport for t in pieces)})
@@ -1422,19 +1491,39 @@ class State:
         from going round: DRY_REFRAME of them and the next round's moves are the ones that change the question
         (REFRAME); DRY_SPENT and the goal is spent, until someone reopens it with something new."""
         n = 0
-        for r in reversed([r for r in self.research_rounds(tid) if r["closed"]]):
+        # A round of ideas finds nothing to confirm, by design: it neither moves its goal nor counts against it.
+        for r in reversed([r for r in self.research_rounds(tid) if r["closed"] and not r["ideas"]]):
             if self.moved(r):
                 break
             n += 1
         return n
+
+    def ideas_due(self, tid: str) -> bool:
+        """Whether the goal's next round is one of ideas (see MAX_IDEA_ROUNDS): its rounds stopped moving it
+        (DRY_REFRAME), no round of ideas was launched since its last closed round of lines, none is under way, and
+        its dry streak has had fewer than MAX_IDEA_ROUNDS."""
+        if tid not in self.goals or self.dry(tid) < DRY_REFRAME:
+            return False
+        rs = self.research_rounds(tid)
+        if any(r["ideas"] and not r["closed"] for r in rs):
+            return False
+        closed = [r for r in rs if r["closed"] and not r["ideas"]]
+        last = closed[-1]["lamport"] if closed else -1
+        if any(r["ideas"] and r["lamport"] > last for r in rs):
+            return False
+        streak = closed[-self.dry(tid)]["lamport"] if closed else -1  # the first dry round of the streak
+        return sum(r["ideas"] and r["lamport"] > streak for r in rs) < MAX_IDEA_ROUNDS
 
     def spent(self, tid: str) -> bool:
         """DRY_SPENT dry rounds, and nobody reopened the goal since the last of them: no more rounds are launched
         on it, and its agents stop instead of going round. `goal <task> --text` with what is new opens it again."""
         if tid not in self.goals or self.dry(tid) < DRY_SPENT:
             return False
-        closed = [r for r in self.research_rounds(tid) if r["closed"]]
-        return self.goals[tid]["lamport"] < closed[-1]["lamport"]
+        rs = self.research_rounds(tid)
+        closed = [r for r in rs if r["closed"] and not r["ideas"]]
+        # A round of ideas since the last round of lines is something new: the lines it proposes may run.
+        return (self.goals[tid]["lamport"] < closed[-1]["lamport"]
+                and not any(r["ideas"] and r["lamport"] > closed[-1]["lamport"] for r in rs))
 
     def _hub(self, ev: dict) -> str | None:
         if sum(ev["ts"] - 86400 < ts <= ev["ts"] for ts in self.hub_by[ev["author"]]) >= MAX_HUB_PER_DAY:
@@ -2247,6 +2336,8 @@ class State:
             return self._idea(ev, task)
         elif t == "goal.opened":
             return self._goal(ev, task)
+        elif t == "goal.barrier":
+            return self._barrier(ev, task)
         elif t in ("line.proposed", "line.backed"):
             return self._line(ev, task)
         elif t in ("finding.stated", "finding.judged"):
@@ -2425,8 +2516,11 @@ class State:
             return "apart names the tasks (1 to 8, already created) whose writers may not take this one"
         if attack is not None and (not isinstance(attack, dict) or attack.get("role") not in ATTACK_ROLES
                                    or not all(isinstance(attack.get(k, ""), str) and len(attack.get(k, "")) <= 40
-                                              for k in ("round", "line", "assess"))):
-            return "an attack's piece says its round, its line and its role (line, check or synthesis)"
+                                              for k in ATTACK_TEXT)
+                                   or attack.get("kind", "") not in ("", "idea")
+                                   or not isinstance(attack.get("deep", False), bool)):
+            return ("an attack's piece says its round, its line and its role (line, check or synthesis); kind is "
+                    "idea or nothing, deep true or false")
         needs = ev.get("needs") or []
         if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and TOOL.fullmatch(n)
                                                                     for n in needs):
@@ -2455,7 +2549,7 @@ class State:
                                ev.get("body", ""), ev["lamport"], ev.get("parent"), sketch.id if sketch else None,
                                depth, contract=dict(ev.get("contract") or {}), refute=ev.get("refute") or "",
                                holdout=ev.get("holdout") or "", apart=[self.find_task(a).id for a in apart or []],
-                               attack={k: attack[k] for k in ("round", "role", "line", "assess") if k in attack}
+                               attack={k: attack[k] for k in (*ATTACK_TEXT, "role", "deep") if k in attack}
                                if attack else {},
                                needs=list(needs), ts=ev["ts"])
         # A round's line made from a proposed one (research.py): the proposal is in a round from here on.

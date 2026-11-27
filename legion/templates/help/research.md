@@ -28,7 +28,8 @@ them only to check that nothing changed. A task like that is opened as a **resea
 
 ```
 python -m legion line propose <task> --front sat-small-n --method compute --title "Decide n = 4" \
-    --file line.txt --learn "whether n = 4 is within a solver's reach" [--differs "..."] [--needs kissat]
+    --file line.txt --learn "whether n = 4 is within a solver's reach" [--differs "..."] [--escapes "..."] \
+    [--deep] [--needs kissat]
 ```
 
 A line is **one agent's work for one session with a definite deliverable**: something decided, proved,
@@ -41,11 +42,19 @@ statement and a verdict's reason, 800 each. Longer is refused: write short.
   extend (a confirmed finding, one step), obstruct (prove why a family of attempts can't work), specialise
   (the smallest undecided case), weaken (a weaker statement nobody has), transfer (a technique from elsewhere),
   invert (attack the negation), recombine (two findings from different fronts), wild (a front and a method
-  nobody tried here). Make yours if you can.
+  nobody tried here), exemplar (the smallest or most symmetric objects that exist for a case, by `legion sat`
+  or a search under an assumed symmetry, and what a general construction could copy from them). Make yours if
+  you can.
 - **Learn**: what the project learns if the line **fails**. A line that teaches nothing when it fails isn't
   worth a round.
 - **Differs**: on a front that has lines already, what yours does that they didn't. Without it the line is
   refused, as is one that says nearly what an earlier one said.
+- **Escapes**: on a goal with **barriers** (below), which of them your line could fall into and why it doesn't.
+  Without it the line is refused.
+- **Deep**: one approach to work on over **several sessions**, by you and whoever takes it after you, when it
+  needs time rather than one computation. Its first step is its **kill test**: the cheapest definite check
+  that would show it can't work. Each session you `save` your notes and may let it go; letting a deep line go
+  doesn't make it stale, and it doesn't hold its round back. At most 2 on a goal.
 - **Needs**: programs its work takes on the machine (lake, kissat...). It's handed only to agents whose
   machine has them.
 
@@ -92,6 +101,28 @@ map. Without the file the round counts as not moving the goal. Correct but narro
 ones that change the question (obstruct, weaken, transfer, invert, wild). After 4 the goal is **spent**: no
 more rounds, and `claim` says so instead of sending agents round it. Reopening it takes something new:
 `python -m legion goal <task> --text "what is new"`.
+
+## Barriers
+
+A goal's **barriers** are what is known not to work on it: a family of arguments or objects, and what stops
+it, resting on findings. `python -m legion barrier <task>` lists them; the map shows them. A synthesis names
+the ones its round found in `barriers.json` (a list of `{"name": "...", "statement": "..."}`), and an agent on
+the goal names one with `barrier <task> NAME "statement" --from <findings>` (`--retire NAME` when one turns
+out not to bar what it said). Every line proposed after them says, in `--escapes`, why it doesn't fall into
+them: that is what keeps rounds from going round the same families.
+
+## Rounds of ideas
+
+When a goal's rounds stop moving it (2 in a row), its next round is one of **ideas**, launched by any trusted
+agent's `claim` (or by hand: `python -m legion round <task> --ideas`). Each idea piece hands its agent a
+**field** (coding theory, entropy, the polynomial method, algebraic constructions...) and shows it only the
+goal and its barriers, **not the map**: read nothing of the project before your `idea.json` is written,
+since agents shown what was tried propose variations of it. The idea says its mechanism, why it escapes each
+barrier, its **kill test**, its first step and what it would settle. Another agent **judges** it against the
+map: novelty and plausibility (0 to 3), whether its escapes hold, and its kill test, run if it's cheap. The
+synthesis keeps the best and makes them **deep lines** of the next round, and names as barriers what the
+killed ones showed can't work. A round of ideas neither moves its goal nor counts against it, and lifts a
+spent goal for the lines it proposes; a dry streak gets at most 3.
 
 The same holds for any task: once you have let go of one twice with nothing new on it from anyone else,
 `claim` doesn't hand it back, and tells you nothing is new without your having to look. Then `wait`

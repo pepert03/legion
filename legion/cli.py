@@ -193,6 +193,9 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "integrator.renew": "renews the integration lease",
         "integrator.release": "hands over the integration lease",
         "goal.opened": (f"closes {key} as a research goal" if ev.get("closed") else f"opens {key} as a research goal"),
+        "goal.barrier": (f"retires the barrier {ev.get('barrier', '')} of {key}" if ev.get("retired") else
+                         f"says {key} has a barrier, {ev.get('barrier', '')}: "
+                         f"{ev.get('statement', '') if full else ev.get('statement', '').replace(chr(10), ' ')[:200]}"),
         "line.proposed": f"proposes a line on {key}, front {ev.get('front')} ({ev.get('method')}, {ev.get('move')}): "
                          f"{ev.get('title', '')}",
         "line.backed": f"backs line {str(ev.get('line', ''))[:8]} on {key}",

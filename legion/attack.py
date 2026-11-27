@@ -121,6 +121,74 @@ yet), leave it in {dir}/brief.txt in the same patch, and say so to {lead};
 - tell {lead}, who launched the round: `python -m legion send {lead} "..."`."""
 
 
+DEEP = """
+THIS IS A DEEP LINE: one approach, worked on over several sessions, by you and whoever takes it after you. It doesn't \
+hold its round back, and nobody expects a result from each session. FIRST its KILL TEST (in the line above): the \
+cheapest definite computation or argument that would show the approach CAN'T work. Do it before anything else and \
+write its outcome at the top of {dir}/notes.txt. Killed: report that as the line's result (a claim, and why, in \
+dead_ends) and submit; that is a good outcome. Survived: go on with the approach. Every session: `save {key} --notes \
+"..."` with what is done and what is next, so the next session (yours or another agent's) goes on from there; \
+then let it go if your session ends (`release {key}` after saving): a deep line let go of isn't stale. Submit when \
+you have something definite, at the latest after about {budget} steps in all."""
+
+IDEA = """ATTACK {round} ON {parent}, IDEA {line}: a new approach, from {field}
+This round asks for an IDEA, not a result. The rounds before it stopped moving {parent}: their lines were \
+variations of one another. You are one of several agents each proposing, alone, an approach the map doesn't have.
+
+YOU SEE ONLY THE GOAL AND ITS BARRIERS, ON PURPOSE. Don't read the map, the state of the art, the hub, or the lines \
+and reports of {parent} before {dir}/{idea} is written and committed: agents shown what was tried propose \
+variations of it. The literature outside the project you may read, and should.
+
+THE GOAL: {goal}
+
+{common}
+
+YOUR FIELD: {field}: {field_text}. Find there a tool, a theorem or a construction that could decide the goal, and \
+make it an approach to it. If nothing in that field can, say why in {dir}/{idea} and give your best idea from \
+another field.
+
+WHERE. {dir}/ is your zone: notes, references, a small computation if one helps you judge your idea. Add what you \
+read to the hub (`python -m legion lit add ...`). Aim to finish within about {budget} steps.
+
+THE IDEA: {dir}/{idea}, one JSON object (the contract checks its form), each value text:
+  "title": the approach in one line;
+  "field": where it comes from, and the theorem, tool or construction it takes from there, with a reference;
+  "mechanism": how it would get past the core difficulty of the goal (the gap between the bounds, not a constant): \
+the step that does the work, concretely;
+  "escapes": for each barrier above, by name, why it doesn't stop this approach;
+  "kill_test": the cheapest definite computation or argument, one session's work, whose outcome would show the \
+approach CAN'T work;
+  "first_step": what to do first if it survives;
+  "would_settle": what it proves if it works, exactly.
+Then commit and `submit {key}`. Another agent judges it against the map, in {key}-check."""
+
+JUDGE = """ATTACK {round} ON {parent}, JUDGING IDEA {line}
+Another agent proposed, without seeing the map, a new approach to {parent}: {line_dir}/{idea}. Judge it against \
+everything the project knows. NOW read the map (`python -m legion map {parent}`), its barriers (`python -m legion \
+barrier {parent}`) and what the idea cites.
+
+WHAT THE ROUND IS FOR: {goal}
+
+  NOVELTY, 0 to 3: 0 the map has it already, or it is a known result in disguise (say which); 1 a variation of a \
+line run here; 2 new here but known to fail elsewhere; 3 nothing like it was tried.
+  PLAUSIBILITY, 0 to 3: whether its mechanism can do what it says, step by step. Look for the step that fails.
+  ESCAPES: whether each "escapes" holds, barrier by barrier.
+  THE KILL TEST: run it if it takes you at most about 30 steps; say "killed" (with what killed it), "survived", or \
+"not run" (and why).
+Be fair and hard: most new ideas fail, and an idea killed now costs one round, not ten.
+
+WHERE. {dir}/ is your zone. Aim to finish within about {budget} steps.
+
+THE JUDGEMENT: {dir}/{judgement}, one JSON object: "novelty" and "plausibility" (integers 0 to 3), "escapes_hold" \
+(true or false), "kill_test" ("killed", "survived" or "not run"), "reason" (what you checked and found, at most 200 \
+words). Then commit and `submit {key}`. Legion doesn't let whoever wrote the idea take this."""
+
+IDEA_FILE, JUDGEMENT_FILE = "idea.json", "judgement.json"
+IDEA_KEYS = ("title", "field", "mechanism", "escapes", "kill_test", "first_step", "would_settle")
+KILL = ("killed", "survived", "not run")
+BUDGET_MORE = {"idea": 40, "judge": 40, "deep": 400}
+
+
 def load_spec(path: str) -> dict:
     """The round's spec, from a JSON file; common_file is read relative to it."""
     p = Path(path)
@@ -171,6 +239,11 @@ def check_spec(spec: dict) -> str | None:
         if not isinstance(needs, list) or len(needs) > 5 or not all(isinstance(n, str) and S.TOOL.fullmatch(n)
                                                                     for n in needs):
             return f"line {key}: needs lists at most 5 programs its work takes (lake, kissat...)"
+        if ln.get("kind", "") not in ("", "idea") or not isinstance(ln.get("deep", False), bool):
+            return f"line {key}: kind is idea or nothing, deep true or false"
+        if ln.get("kind") == "idea" and not (isinstance(ln.get("field"), str) and ln["field"].strip()
+                                             and len(ln["field"]) <= 40 and isinstance(ln.get("field_text", ""), str)):
+            return f"line {key}: an idea names the field it is to come from (at most 40 characters)"
     if spec.get("round") is not None and (not isinstance(spec["round"], str) or not S.CHILD_KEY.match(spec["round"])):
         return "round is a short name: lowercase letters, digits and hyphens"
     if spec.get("folder") is not None and (not isinstance(spec["folder"], str) or not spec["folder"].strip("/")
@@ -306,6 +379,64 @@ if __name__ == "__main__":
 '''
 
 
+def idea_contract(key: str, path: str) -> str:
+    return f'''"""The contract of an idea round's idea: every field of it, as text."""
+import json
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[{_contract_root(key)}]
+IDEA = {path!r}
+KEYS = {IDEA_KEYS!r}
+
+
+class Idea(unittest.TestCase):
+    def test_the_idea_is_there_and_complete(self):
+        f = ROOT / IDEA
+        self.assertTrue(f.is_file(), f"write the idea in {{IDEA}}")
+        x = json.loads(f.read_text(encoding="utf-8"))
+        self.assertIsInstance(x, dict, "the idea is one JSON object")
+        for k in KEYS:
+            self.assertIsInstance(x.get(k), str, f"the idea needs {{k}}, as text")
+            self.assertGreaterEqual(len(x[k].strip()), 20, f"say more in {{k}}")
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+
+
+def judgement_contract(key: str, path: str) -> str:
+    return f'''"""The contract of the judging of an idea: scores, whether its escapes hold, its kill test, why."""
+import json
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[{_contract_root(key)}]
+JUDGEMENT = {path!r}
+KILL = {KILL!r}
+
+
+class Judgement(unittest.TestCase):
+    def test_the_judgement_is_there_and_complete(self):
+        f = ROOT / JUDGEMENT
+        self.assertTrue(f.is_file(), f"write the judgement in {{JUDGEMENT}}")
+        x = json.loads(f.read_text(encoding="utf-8"))
+        self.assertIsInstance(x, dict, "the judgement is one JSON object")
+        for k in ("novelty", "plausibility"):
+            self.assertIsInstance(x.get(k), int, f"{{k}} is an integer, 0 to 3")
+            self.assertIn(x[k], (0, 1, 2, 3), f"{{k}} is 0, 1, 2 or 3")
+        self.assertIsInstance(x.get("escapes_hold"), bool, "escapes_hold is true or false")
+        self.assertIn(x.get("kill_test"), KILL, f"kill_test is one of {{KILL}}")
+        self.assertIsInstance(x.get("reason"), str, "say why, in reason")
+        self.assertTrue(x["reason"].strip(), "reason is empty")
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+
+
 def plan(st: S.State, parent: S.Task, spec: dict, lead: str) -> tuple[str, list[dict]]:
     """The round's name and its subtasks, as task.created payloads in the order they're created."""
     err = check_spec(spec)
@@ -319,47 +450,68 @@ def plan(st: S.State, parent: S.Task, spec: dict, lead: str) -> tuple[str, list[
         raise Fail(f"{parent.key}'s zone has no folder for the round's files: say where (`folder` in the spec), "
                    f"inside {', '.join(parent.zone)}", 2)
     base = f"{folder}/{rnd}"
-    budget = dict(BUDGET, **spec.get("budget", {}))
+    budget = {**BUDGET_MORE, **BUDGET, **spec.get("budget", {})}
     shared = dict(round=rnd, parent=parent.key, goal=spec["goal"].strip(), lead=lead,
                   common=(spec.get("common") or "").strip() or "(No common text: read the task and its state of the "
                                                                f"art, `python -m legion brief {parent.key}`.)")
     accept = lambda key: f"python -m unittest discover -s {S.contract_dir(key)} -p test_*.py"  # noqa: E731
     pieces, checks = [], []
+    deep_checks = []
     for ln in spec["lines"]:
         key = f"{parent.key}/{rnd}-{ln['key']}"
         d = f"{base}/{ln['key']}"
         front = (ln.get("front") or "").strip() or "line"
-        body = LINE.format(**shared, key=key, line=ln["key"], front=front, title=ln["title"].strip(),
-                           task=ln["task"].strip(), dir=d, budget=budget["line"], rigor=RIGOR, report=REPORT,
-                           kinds=", ".join(KINDS), statuses=", ".join(STATUSES))
-        pieces.append(dict(key=key, title=f"{rnd} line {ln['key']}: {ln['title'].strip()}"[:200], zone=[d + "/"],
-                           accept=accept(key), body=body, size="L", mode="exclusive", deps=[],
-                           contract={"test_report.py": report_contract(key, f"{d}/{REPORT}")},
-                           attack={"round": rnd, "role": "line", "line": ln["key"]}))
+        ckey, cd = f"{key}-check", f"{d}-check"
+        mark = {"round": rnd, "line": ln["key"]}
+        if ln.get("kind") == "idea":
+            # An idea, from the field it was handed, by an agent shown only the goal and its barriers; judged by
+            # another against the map. Its own text is the round's common one: the barriers, not the map.
+            mark.update(kind="idea", field=ln["field"].strip()[:40])
+            body = IDEA.format(**shared, key=key, line=ln["key"], field=ln["field"].strip(),
+                               field_text=(ln.get("field_text") or ln["task"]).strip(), dir=d, idea=IDEA_FILE,
+                               budget=budget["idea"])
+            contract = {"test_idea.py": idea_contract(key, f"{d}/{IDEA_FILE}")}
+            cbody = JUDGE.format(**shared, key=ckey, line=ln["key"], dir=cd, line_dir=d, idea=IDEA_FILE,
+                                 judgement=JUDGEMENT_FILE, budget=budget["judge"])
+            ccontract = {"test_judgement.py": judgement_contract(ckey, f"{cd}/{JUDGEMENT_FILE}")}
+            title, ctitle = f"{rnd} idea {ln['key']} ({ln['field'].strip()})", f"{rnd} judging idea {ln['key']}"
+        else:
+            if ln.get("deep"):
+                mark["deep"] = True
+            body = LINE.format(**shared, key=key, line=ln["key"], front=front, title=ln["title"].strip(),
+                               task=ln["task"].strip(), dir=d, budget=budget["deep" if ln.get("deep") else "line"],
+                               rigor=RIGOR, report=REPORT, kinds=", ".join(KINDS), statuses=", ".join(STATUSES))
+            if ln.get("deep"):
+                body += "\n" + DEEP.format(dir=d, key=key, budget=budget["deep"])
+            contract = {"test_report.py": report_contract(key, f"{d}/{REPORT}")}
+            extra = spec.get("check", "").strip()
+            cbody = CHECK.format(**shared, key=ckey, line=ln["key"], front=front, title=ln["title"].strip(),
+                                 task=ln["task"].strip(), dir=cd, line_dir=d, budget=budget["check"], report=REPORT,
+                                 verdicts=VERDICTS_FILE, verdict_words=", ".join(VERDICTS),
+                                 extra=f"\n{extra}" if extra else "")
+            ccontract = {"test_verdicts.py": verdicts_contract(ckey, f"{d}/{REPORT}", f"{cd}/{VERDICTS_FILE}")}
+            title = f"{rnd} {'deep line' if ln.get('deep') else 'line'} {ln['key']}: {ln['title'].strip()}"
+            ctitle = f"{rnd} check of {ln['key']}: {ln['title'].strip()}"
+        pieces.append(dict(key=key, title=title[:200], zone=[d + "/"], accept=accept(key), body=body, size="L",
+                           mode="exclusive", deps=[], contract=contract, attack=dict(mark, role="line")))
         # What the line's work takes on the machine, and the proposal it was made from (research.py), if any.
         pieces[-1].update({k: ln[k] for k in ("needs", "proposal") if ln.get(k)})
-        ckey, cd = f"{key}-check", f"{d}-check"
-        extra = spec.get("check", "").strip()
-        cbody = CHECK.format(**shared, key=ckey, line=ln["key"], front=front, title=ln["title"].strip(),
-                             task=ln["task"].strip(), dir=cd, line_dir=d, budget=budget["check"], report=REPORT,
-                             verdicts=VERDICTS_FILE, verdict_words=", ".join(VERDICTS),
-                             extra=f"\n{extra}" if extra else "")
-        pieces.append(dict(key=ckey, title=f"{rnd} check of {ln['key']}: {ln['title'].strip()}"[:200],
-                           zone=[cd + "/"], accept=accept(ckey), body=cbody, size="M", mode="exclusive", deps=[key],
-                           apart=[key],
-                           contract={"test_verdicts.py": verdicts_contract(ckey, f"{d}/{REPORT}",
-                                                                           f"{cd}/{VERDICTS_FILE}")},
-                           attack={"round": rnd, "role": "check", "line": ln["key"]}))
-        checks.append(ckey)
+        pieces.append(dict(key=ckey, title=ctitle[:200], zone=[cd + "/"], accept=accept(ckey), body=cbody, size="M",
+                           mode="exclusive", deps=[key], apart=[key], contract=ccontract,
+                           attack=dict(mark, role="check")))
+        (deep_checks if ln.get("deep") else checks).append(ckey)
     skey, sd = f"{parent.key}/{rnd}-synthesis", f"{base}/synthesis"
     extra = spec.get("synthesis", "").strip()
+    ideas = any(ln.get("kind") == "idea" for ln in spec["lines"])
+    # A deep line's check doesn't hold the synthesis back, unless the round has nothing else.
     pieces.append(dict(key=skey, title=f"{rnd} synthesis: the consolidated report", zone=[sd + "/"],
-                       accept=accept(skey), deps=checks, size="M", mode="exclusive",
+                       accept=accept(skey), deps=checks or deep_checks, size="M", mode="exclusive",
                        body=SYNTH.format(**shared, key=skey, dir=sd, synthesis=SYNTHESIS,
                                          extra=f"\n{extra}" if extra else ""),
                        contract={"test_synthesis.py": synthesis_contract(skey, f"{sd}/{SYNTHESIS}")},
                        attack={"round": rnd, "role": "synthesis", "line": "",
-                               **({"assess": "progress"} if spec.get("assess") else {})}))
+                               **({"assess": "progress"} if spec.get("assess") and not ideas else {}),
+                               **({"kind": "idea"} if ideas else {})}))
     for p in pieces:
         p["parent"] = parent.id
         why = (st._subtask_error(parent, p["key"], p["zone"]) or S.check_accept(p["accept"], st.runners)
@@ -386,6 +538,17 @@ def digest(c: Ctx, parent: S.Task, rnd: str, ref: str) -> list[dict]:
         d = line.zone[0].rstrip("/")
         entry = {"line": line.attack.get("line"), "title": line.title, "status": c.st.status(line.id, now),
                  "check_status": c.st.status(check.id, now) if check else None, "folder": d}
+        if line.attack.get("kind") == "idea":  # an idea and its judgement, not claims and verdicts
+            for k, path in (("idea", f"{d}/{IDEA_FILE}"),
+                            ("judgement", f"{check.zone[0].rstrip('/')}/{JUDGEMENT_FILE}" if check else None)):
+                try:
+                    got = json.loads(_read(c.repo, ref, path) or "null") if path else None
+                except ValueError:
+                    got = None
+                if isinstance(got, dict):
+                    entry[k] = got
+            out.append(entry)
+            continue
         try:
             report = json.loads(_read(c.repo, ref, f"{d}/{REPORT}") or "null")
         except ValueError:
@@ -415,6 +578,18 @@ def digest_text(entries: list[dict]) -> str:
     out = []
     for e in entries:
         out.append(f"== line {e['line']}: {e['title']}  [line {e['status']}, check {e['check_status']}]")
+        if "idea" in e or "judgement" in e:
+            for k in IDEA_KEYS:
+                if (e.get("idea") or {}).get(k):
+                    out.append(f"   {k}: {e['idea'][k]}")
+            j = e.get("judgement")
+            if j:
+                out.append(f"   JUDGED: novelty {j.get('novelty')}/3, plausibility {j.get('plausibility')}/3, escapes "
+                           f"{'hold' if j.get('escapes_hold') else 'do not hold'}, kill test {j.get('kill_test')}: "
+                           f"{j.get('reason', '')}")
+            else:
+                out.append("   (not judged yet)")
+            continue
         if "summary" not in e:
             out.append("   (its report isn't in main yet)")
             continue
