@@ -168,6 +168,33 @@ jobs:
           fi
           if [ -n "$LEGION_SETUP" ]; then $LEGION_SETUP; fi
 
+      # A SAT solver and a proof checker for the agents whose machines have none (`legion sat FILE`), at pinned
+      # commits (kissat rel-4.0.4, drat-trim of 2024-11-25), built once and kept.
+      - uses: actions/cache@v4
+        with:
+          path: ~/sat
+          key: legion-sat-kissat-8af8e56f-drat-trim-2e3b2dc0
+
+      - name: SAT
+        continue-on-error: true  # without a solver the verifier verifies all the same
+        run: |
+          set -eu
+          mkdir -p "$HOME/sat"
+          if [ ! -x "$HOME/sat/kissat" ]; then
+            git clone -q https://github.com/arminbiere/kissat /tmp/kissat
+            git -C /tmp/kissat checkout -q 8af8e56f174b778aef3aa45af9f739b2a5f492c2
+            (cd /tmp/kissat && ./configure > /dev/null && make -j4 > /dev/null)
+            cp /tmp/kissat/build/kissat "$HOME/sat/"
+          fi
+          if [ ! -x "$HOME/sat/drat-trim" ]; then
+            git clone -q https://github.com/marijnheule/drat-trim /tmp/drat-trim
+            git -C /tmp/drat-trim checkout -q 2e3b2dc0ecf938addbd779d42877b6ed69d9a985
+            make -C /tmp/drat-trim > /dev/null
+            cp /tmp/drat-trim/drat-trim "$HOME/sat/"
+          fi
+          echo "$HOME/sat" >> "$GITHUB_PATH"
+          echo "kissat $("$HOME/sat/kissat" --version), drat-trim ready"
+
       - name: Verify every 20 minutes
         run: |
           cd "$CLONE"
@@ -207,6 +234,14 @@ jobs:
                   print(q.stdout[-1500:], q.stderr[-800:], sep="\n", flush=True)
               except subprocess.TimeoutExpired:
                   print("lean --serve ran out of this cycle's time", flush=True)
+              # And a SAT problem (`legion sat FILE`), one a cycle: solving and checking its proof can take hours,
+              # each bounded by the time its asker asked for.
+              try:
+                  q = subprocess.run([sys.executable, "-m", "legion", "sat", "--serve"], capture_output=True,
+                                     text=True, timeout=3 * 3600)
+                  print(q.stdout[-1500:], q.stderr[-800:], sep="\n", flush=True)
+              except subprocess.TimeoutExpired:
+                  print("sat --serve ran over three hours", flush=True)
               print(f"{time.strftime('%H:%M:%S', time.gmtime())} UTC cycle {cycle}: verified {done}; "
                     f"waiting: {last.get('waiting', '?')}, passed over: {last.get('skipped') or {}}", flush=True)
               left = every - (time.time() - t0)

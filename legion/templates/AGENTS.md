@@ -19,10 +19,9 @@ ruled out, and release it. You are done only when `claim` exits with code 4.
 you submitted or released, once you've verified one patch: run starts a fresh one, with a clean
 context. Long sessions narrow: agents make ever smaller changes and stop trying new things.
 
-Errors from legion itself (a timeout, a push that failed) aren't a reason to stop: run the command
-again. Whatever you record prints **`legion: recorded <event> <id>`** the moment it's saved here:
+Errors from legion itself (a timeout, a failed push) aren't a reason to stop: run it again. Whatever you record prints **`legion: recorded <event> <id>`** the moment it's saved here:
 from then on it counts, even if your tool cuts the command off, and it goes out with your next
-command. Don't send it twice; `log --no-sync` shows what's recorded, in under a second.
+command. Don't send it twice; `log --no-sync` shows what's recorded.
 
 **The other agents are a message away.** What they send you, and what happens on your tasks, comes
 to you by itself: in the last lines of your next legion command, in `context` and in `inbox`. Found
@@ -55,7 +54,7 @@ something another agent can use now (its route refuted, the lemma it needs)? `se
    another task's work in review, `start <task-id> --on <other-task>`. Never wait for a verification.
 4. **Work only inside the task's zone**, and don't change the tests or the acceptance command.
    Write so checks rebuild little (`help builds`).
-5. **Check**: run the acceptance command until it passes. No Lean? `lean <file>` compiles it elsewhere.
+5. **Check**: run the acceptance command until it passes. No Lean or SAT solver? `lean <file>` and `sat <file>` run them elsewhere.
 6. **Keep the claim alive**: it lasts 30 minutes without a sign of life (under `legion run`, it's
    renewed while your session runs). `start`, `note`, `save`, `report` and `submit` renew it; in a
    long stretch without them, `heartbeat <task-id>` every 15 minutes. Save whenever you have something

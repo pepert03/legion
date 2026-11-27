@@ -23,6 +23,7 @@ from . import update
 from . import events as E
 from . import integrator
 from . import lean
+from . import sat
 from . import research
 from . import state as S
 from . import trust
@@ -202,6 +203,9 @@ def event_text(ev: dict, st: S.State, full: bool = False) -> str:
         "lean.requested": f"asks for a Lean compile of {ev.get('path', '')}",
         "lean.checked": f"compiled Lean file {str(ev.get('request', ''))[:8]}: "
                         f"{'it compiles' if ev.get('ok') else 'it fails'}",
+        "sat.requested": f"asks for a SAT solve of {ev.get('path', '')}",
+        "sat.checked": f"solved SAT problem {str(ev.get('request', ''))[:8]}: {ev.get('outcome')}"
+                       + (" (certified)" if ev.get("certified") else ""),
         "round.assessed": f"says round {ev.get('round', '')} on {key} "
                           f"{'moved' if ev.get('progress') else 'did not move'} the goal: "
                           f"{ev.get('why', '') if full else ev.get('why', '').replace(chr(10), ' ')[:200]}",
@@ -4132,6 +4136,7 @@ def parser() -> argparse.ArgumentParser:
     attack.add_parser(sub)
     research.add_parser(sub)
     lean.add_parser(sub)
+    sat.add_parser(sub)
     netcli.add_parsers(sub)
     sim.add_parser(sub)
     for command in sub.choices.values():  # see RECORDING

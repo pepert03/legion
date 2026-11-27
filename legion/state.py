@@ -211,6 +211,11 @@ ASSESSMENT = ("why", "eliminated", "open", "next")
 MAX_FINDINGS_A_DAY, MAX_LINE_FINDINGS = 80, 40
 # Lean compiles an agent without Lean may ask for in a day, and how long one waits for an answer (see lean.py).
 MAX_LEAN_A_DAY, LEAN_KEEP = 30, 24 * 3600
+# SAT problems an agent without a solver may ask for in a day, how long one waits for an answer, the solving time
+# one may ask for, and how many of a model's variables come back in the answer (see sat.py).
+MAX_SAT_A_DAY, SAT_KEEP, SAT_MAX_SECONDS, SAT_MAX_VARS = 6, 24 * 3600, 3600, 2000
+SAT_INPUT = (".cnf", ".cnf.gz", ".cnf.xz", ".py")  # a CNF, compressed or not, or a script that prints one
+SAT_OUTCOMES = ("sat", "unsat", "unknown", "error")
 TOOL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,30}")
 # A task let go of NOOP_AFTER times by one agent with nothing new on it from anyone else, in between or since, is
 # stale for that agent: claim doesn't hand it back, at any interval, until something new comes (see State.stale).
@@ -463,6 +468,7 @@ class State:
         self.findings: dict[str, dict] = {}  # id -> {ev, task, line, front, verdicts: {author: ev}, replaced}
         self.assessed: dict[tuple[str, str], dict] = {}  # (goal, round) -> its synthesis's latest round.assessed
         self.lean: dict[str, dict] = {}  # request id -> {ev: lean.requested, checked: its lean.checked or None}
+        self.sat: dict[str, dict] = {}  # request id -> {ev: sat.requested, checked: its sat.checked or None}
         self.news: dict[str, list[tuple]] = defaultdict(list)  # task -> (ts, author, name) of what was new on it
         self.digest: dict | None = None
         self.description: str = ""  # what the project is about, set by an integrator
@@ -1104,6 +1110,52 @@ class State:
         r["checked"] = ev
         return None
 
+    def _sat(self, ev: dict) -> str | None:
+        """A SAT problem to solve for an agent whose machine has no solver, and the outcome (see sat.py). A request
+        names a commit (main plus the problem) and the problem's path in it; any trusted agent with a solver answers
+        it, once, saying whether its answer is certified: a model checked against every clause, or a refutation
+        whose proof a checker verified."""
+        a, ts = ev["author"], ev["ts"]
+        if not self.trusted(a):
+            return "a trusted agent asks for a SAT solve, or answers one"
+        if ev["type"] == "sat.requested":
+            path, commit = ev.get("path"), ev.get("commit")
+            if not (isinstance(commit, str) and len(commit) == 40 and valid_branch(ev.get("branch"))):
+                return "a SAT solve names its commit and the branch it is on, in the patch namespace"
+            if (not isinstance(path, str) or not path.endswith(SAT_INPUT) or len(path) > 200 or path.startswith("/")
+                    or ".." in path.split("/")):
+                return "a SAT solve names the path in its commit of a CNF (.cnf, .cnf.gz, .cnf.xz) or of a .py printing one"
+            seconds, n = ev.get("seconds"), ev.get("vars", 0)
+            if not (isinstance(seconds, int) and not isinstance(seconds, bool) and 60 <= seconds <= SAT_MAX_SECONDS):
+                return f"a SAT solve asks for 60 to {SAT_MAX_SECONDS} seconds"
+            if not (isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= SAT_MAX_VARS):
+                return f"a SAT solve asks for the values of at most {SAT_MAX_VARS} variables"
+            if sum(r["ev"]["author"] == a and ts - 86400 < r["ev"]["ts"] <= ts
+                   for r in self.sat.values()) >= MAX_SAT_A_DAY:
+                return f"at most {MAX_SAT_A_DAY} SAT solves a day per agent"
+            self.sat[ev["id"]] = {"ev": ev, "checked": None}
+            return None
+        r = self.sat.get(ev.get("request"))
+        if r is None:
+            return "unknown SAT solve"
+        if r["checked"] is not None:
+            return "that SAT solve is answered already"
+        assignment = ev.get("assignment", "")
+        if (ev.get("outcome") not in SAT_OUTCOMES or not isinstance(ev.get("certified"), bool)
+                or not isinstance(ev.get("output", ""), str) or len(ev.get("output", "")) > E.MAX_NOTES
+                or not isinstance(assignment, str) or len(assignment) > 8 * SAT_MAX_VARS):
+            return (f"a SAT solve's outcome is one of {', '.join(SAT_OUTCOMES)}, whether it is certified, its output "
+                    f"(at most {E.MAX_NOTES} characters) and the model asked for")
+        if ev.get("certified") and ev["outcome"] not in ("sat", "unsat"):
+            return "only a model or a refutation is certified"
+        r["checked"] = ev
+        return None
+
+    def sat_pending(self, now: float) -> list[dict]:
+        """The SAT solves asked for and not answered, oldest first: not those older than SAT_KEEP."""
+        return sorted((r["ev"] for r in self.sat.values() if r["checked"] is None and now - r["ev"]["ts"] < SAT_KEEP),
+                      key=lambda e: (e["lamport"], e["id"]))
+
     def lean_pending(self, now: float) -> list[dict]:
         """The Lean compiles asked for and not answered, oldest first: not those older than LEAN_KEEP."""
         return sorted((r["ev"] for r in self.lean.values() if r["checked"] is None and now - r["ev"]["ts"] < LEAN_KEEP),
@@ -1508,6 +1560,12 @@ class State:
                 req = self.lean[ev["request"]]["ev"]
                 add(ev, "verified", f"compiled your Lean file {req['path']} ({req['id'][:8]}): "
                                     + ("it compiles. " if ev["ok"] else "it fails. ") + ev.get("output", ""))
+            elif t == "sat.checked" and self.sat.get(ev.get("request"), {}).get("ev", {}).get("author") == author:
+                req = self.sat[ev["request"]]["ev"]
+                cert = (" certified" if ev["certified"] else " NOT certified") if ev["outcome"] in ("sat", "unsat") else ""
+                add(ev, "verified", f"solved your SAT problem {req['path']} ({req['id'][:8]}): {ev['outcome']}{cert}. "
+                                    + ev.get("output", "")
+                                    + (f" Model: {ev['assignment']}" if ev.get("assignment") else ""))
             elif t == "finding.stated" and any(self.findings.get(x, {}).get("ev", {}).get("author") == author
                                                for x in ev.get("from") or []):
                 add(ev, "note", f"built on a finding of yours: {ev.get('statement', '')[:200]}")
@@ -2014,6 +2072,9 @@ class State:
 
         if t in ("lean.requested", "lean.checked"):
             return self._lean(ev)
+
+        if t in ("sat.requested", "sat.checked"):
+            return self._sat(ev)
 
         if t == "playbook.updated":  # the project's lessons: whoever has worked here may rewrite them
             text = ev.get("text")
