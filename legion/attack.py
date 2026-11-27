@@ -142,6 +142,8 @@ variations of it. The literature outside the project you may read, and should.
 THE GOAL: {goal}
 
 {common}
+The barriers as they stand now (more may have been named since this round was launched): `python -m legion barrier \
+{parent}`. Read that, and only that, before writing.
 
 YOUR FIELD: {field}: {field_text}. Find there a tool, a theorem or a construction that could decide the goal, and \
 make it an approach to it. If nothing in that field can, say why in {dir}/{idea} and give your best idea from \
