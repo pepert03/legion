@@ -714,6 +714,19 @@ def cmd_claim(args):
     return code
 
 
+def claim_rank(st: S.State, t: S.Task, me: str, now: float, circled=frozenset()) -> tuple:
+    """Where a free task comes in the order claim hands them to this agent: the lowest first. What it already tried
+    since the task last advanced goes last. A round of ideas' pieces come first: short, and what a goal stuck in its
+    rounds waits on (in Erdős #902, with 43 tasks open for five agents, its ideas and their judging sat untaken for
+    four hours). Then a round's lines go to hands that have none in it yet. Then each agent's own order, so they
+    collide less."""
+    return (st.attempts_by(t.id, me) > 0 or t.id in circled,
+            t.attack.get("kind") != "idea",
+            st.has_line_in_round(t, me, now),
+            st.has_line_in_round(t, me, now, same_owner=True),
+            hashlib.sha256((me + t.id).encode()).hexdigest())
+
+
 def claim(c: Ctx, args, last: bool = True) -> int:
     now = time.time()
     # A newcomer gets work at once, and says hello in the hub as its first step on it: sent to the hub before it
@@ -859,10 +872,7 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # A line of a round where this agent, then its owner, has none yet comes before one where it has:
                 # a round's lines go to different hands first. A preference, not a rule: with nobody else to take
                 # them, the same agent takes the next, since speed matters more than spread (S.has_line_in_round).
-                t = min(free, key=lambda t: (c.st.attempts_by(t.id, c.me) > 0 or t.id in circled,
-                                             c.st.has_line_in_round(t, c.me, now),
-                                             c.st.has_line_in_round(t, c.me, now, same_owner=True),
-                                             hashlib.sha256((c.me + t.id).encode()).hexdigest()))
+                t = min(free, key=lambda t: claim_rank(c.st, t, c.me, now, circled))
     clean = c.st.stalled(t.id) and c.st.clean_view(c.me)  # the fresh view of a stuck task (S.FRESH_VIEWS)
     if not c.holder_is_me(t.id):
         c.emit("task.claimed", task=t.id, ttl=args.ttl, **({"join": True} if join else {}),

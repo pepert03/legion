@@ -318,3 +318,22 @@ def test_a_record_missing_accepts_doesnt_hand_out_or_finalize_what_main_has(tmp_
     c = types.SimpleNamespace(st=types.SimpleNamespace(policy={"mode": "open"}, trusted=lambda a: True),
                               me="ed25519:aa", reload=lambda: None, ahead=lambda: {"f/r1-a-check"})
     assert integrator.finalize(c, log=said.append) == 0 and "not finalizing" in said[0]
+
+
+def test_claim_hands_out_a_round_of_ideas_pieces_before_other_open_work():
+    from legion import cli
+    log, tid = goal()
+    for n in (1, 2):
+        round_of(log, tid, f"front-{n}", n)
+    p = propose(log, BEA, tid, "census", "Topic 9", "lambda mu nu xi omicron")
+    st = log.state()
+    _, pieces = A.plan(st, st.tasks[tid], R.spec_for(st, st.tasks[tid], [st.lines[p["id"]]]), "ana")
+    _, ideas = A.plan(st, st.tasks[tid], dict(R.idea_spec(st, st.tasks[tid], 1000.0), round="r9"), "ana")
+    for x in pieces + ideas:
+        log.add(ANA, "task.created", **x, split=True)
+    st = log.state()
+    free = [t for t in st.claimable(1000.0) if t.parent == tid]
+    assert {t.attack.get("kind") for t in free} == {None, "idea"}
+    for who in (ANA, BEA, CEL):
+        first = min(free, key=lambda t: cli.claim_rank(st, t, who.author, 1000.0))
+        assert first.attack.get("kind") == "idea"
