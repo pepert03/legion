@@ -1208,6 +1208,12 @@ def finalize(c: Ctx, log=print, keep_branches: bool = False, timeout: int = 600)
     if c.st.policy["mode"] != "open" or not c.st.trusted(c.me):
         return 0
     mine = lambda tid: True  # noqa: E731 - no subtrees, no lease: every trusted node finalizes everything
+    ahead = c.ahead()
+    if ahead:
+        # Its record misses accepts the others have: merged on its main, every verdict would be refused (stale base).
+        log(f"legion: not finalizing: main, as trusted nodes publish it, has {len(ahead)} task(s) accepted that this "
+            f"record hasn't received yet ({', '.join(sorted(ahead)[:3])}...). It waits for those events.")
+        return 0
     follow_main(c)
     finish_interrupted(c, log)
     done = review_sketches(c, log, keep_branches, mine)

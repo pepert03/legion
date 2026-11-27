@@ -246,6 +246,10 @@ def check_spec(spec: dict) -> str | None:
         if ln.get("kind") == "idea" and not (isinstance(ln.get("field"), str) and ln["field"].strip()
                                              and len(ln["field"]) <= 40 and isinstance(ln.get("field_text", ""), str)):
             return f"line {key}: an idea names the field it is to come from (at most 40 characters)"
+    bars = spec.get("barriers", [])
+    if not isinstance(bars, list) or len(bars) > S.MAX_BARRIERS or not all(isinstance(b, str) and S.CHILD_KEY.match(b)
+                                                                            for b in bars):
+        return "barriers lists the names of the goal's barriers"
     if spec.get("round") is not None and (not isinstance(spec["round"], str) or not S.CHILD_KEY.match(spec["round"])):
         return "round is a short name: lowercase letters, digits and hyphens"
     if spec.get("folder") is not None and (not isinstance(spec["folder"], str) or not spec["folder"].strip("/")
@@ -381,8 +385,9 @@ if __name__ == "__main__":
 '''
 
 
-def idea_contract(key: str, path: str) -> str:
-    return f'''"""The contract of an idea round's idea: every field of it, as text."""
+def idea_contract(key: str, path: str, barriers: list[str] = ()) -> str:
+    return f'''"""The contract of an idea round's idea: every field of it, as text; its escapes answer the goal's
+barriers as they stood at launch, each by name."""
 import json
 import unittest
 from pathlib import Path
@@ -390,6 +395,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[{_contract_root(key)}]
 IDEA = {path!r}
 KEYS = {IDEA_KEYS!r}
+BARRIERS = {list(barriers)!r}
 
 
 class Idea(unittest.TestCase):
@@ -401,6 +407,9 @@ class Idea(unittest.TestCase):
         for k in KEYS:
             self.assertIsInstance(x.get(k), str, f"the idea needs {{k}}, as text")
             self.assertGreaterEqual(len(x[k].strip()), 20, f"say more in {{k}}")
+        said = " ".join(x["escapes"].lower().replace("-", " ").split())
+        missing = [b for b in BARRIERS if b.replace("-", " ") not in said]
+        self.assertFalse(missing, f"escapes answers every barrier by name: missing {{missing}}")
 
 
 if __name__ == "__main__":
@@ -472,7 +481,7 @@ def plan(st: S.State, parent: S.Task, spec: dict, lead: str) -> tuple[str, list[
             body = IDEA.format(**shared, key=key, line=ln["key"], field=ln["field"].strip(),
                                field_text=(ln.get("field_text") or ln["task"]).strip(), dir=d, idea=IDEA_FILE,
                                budget=budget["idea"])
-            contract = {"test_idea.py": idea_contract(key, f"{d}/{IDEA_FILE}")}
+            contract = {"test_idea.py": idea_contract(key, f"{d}/{IDEA_FILE}", spec.get("barriers") or [])}
             cbody = JUDGE.format(**shared, key=ckey, line=ln["key"], dir=cd, line_dir=d, idea=IDEA_FILE,
                                  judgement=JUDGEMENT_FILE, budget=budget["judge"])
             ccontract = {"test_judgement.py": judgement_contract(ckey, f"{cd}/{JUDGEMENT_FILE}")}

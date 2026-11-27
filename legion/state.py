@@ -436,6 +436,12 @@ def result_accept(template: str, files: list[str]) -> str:
     return " && ".join(one(f) for f in files)
 
 
+def named(text: str, names: list[str]) -> list[str]:
+    """The names a text mentions (a barrier's name, with its hyphens read as hyphens or spaces)."""
+    low = " ".join(text.lower().split())
+    return [n for n in names if n.lower() in low or n.lower().replace("-", " ") in low.replace("-", " ")]
+
+
 def valid_branch(branch) -> bool:
     return isinstance(branch, str) and branch.startswith(PATCH_PREFIXES) and ".." not in branch
 
@@ -1267,11 +1273,13 @@ class State:
         if not isinstance(escapes, str) or len(escapes) > MAX_FINDING:
             return f"escapes is text of at most {MAX_FINDING} characters"
         bars = self.barriers_for(task.id)
-        if bars and len(escapes.strip()) < MIN_ESCAPES:
+        # By name: escapes that name none of them were written without reading them (in Erdős #902 the first ideas
+        # answered the barriers of the goal's old text, not the ones the goal had).
+        if bars and (len(escapes.strip()) < MIN_ESCAPES or not named(escapes, [b["barrier"] for b in bars])):
             return (f"{task.key} has barriers, what is known not to work on it ("
                     + ", ".join(b["barrier"] for b in bars[:12]) + f"; `python -m legion barrier {task.key}`): say in "
-                    f"`escapes` ({MIN_ESCAPES} characters or more) which of them your line could fall into, and why "
-                    "it doesn't")
+                    f"`escapes` ({MIN_ESCAPES} characters or more) which of them, BY NAME, your line could fall into, "
+                    "and why it doesn't")
         if not isinstance(deep, bool):
             return "deep is true or false"
         if deep and sum(1 for t in self.tasks.values() if t.parent == task.id and t.attack.get("deep")

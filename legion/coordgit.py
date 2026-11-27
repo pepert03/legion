@@ -9,6 +9,7 @@ import json
 import os
 import pickle
 import random
+import re
 import subprocess
 import tempfile
 import time
@@ -28,6 +29,29 @@ CLONE_CONFIG = ["-c", "core.autocrlf=false", "-c", "core.longpaths=true"]
 
 class GitError(RuntimeError):
     pass
+
+
+# The subject of a merge an integrator or a finalizer made: "legion: <task key> (<author>, patch <id>)".
+MERGED = re.compile(r"^legion: (\S+) \(")
+
+
+def accepted_ahead(repo, tip: str | None, prefixes: set[str]) -> set[str]:
+    """The tasks main has accepted beyond this record's tip, as the nodes of trusted agents publish it (their
+    refs/legion/peers/<key prefix>-<node>/main, descendants of the tip): what this record is missing events of.
+    Empty when none is ahead, or the tip isn't here."""
+    if not tip or not prefixes:
+        return set()
+    p = run(repo, "for-each-ref", "--contains", tip, "--format=%(refname)", "refs/legion/peers/")
+    if p.returncode:
+        return set()
+    refs = [r for r in p.stdout.decode("utf-8", "replace").split()
+            if r.endswith("/main") and r.split("/")[3][:16] in prefixes]
+    if not refs:
+        return set()
+    p = run(repo, "log", "--format=%s", f"^{tip}", *refs)
+    if p.returncode:
+        return set()
+    return {m.group(1) for line in p.stdout.decode("utf-8", "replace").splitlines() if (m := MERGED.match(line))}
 
 
 def run(repo, *args, input: bytes | None = None, env=None) -> subprocess.CompletedProcess:

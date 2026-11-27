@@ -723,6 +723,9 @@ def claim(c: Ctx, args, last: bool = True) -> int:
     join, back = False, None
     if args.task:
         t = c.task(args.task)
+        if t.key in c.ahead():
+            raise Fail(f"{t.key} is accepted in main already: your record hasn't received that event yet (it "
+                       "comes with a later sync). Take another task.", 3)
         if t.mode != "exclusive":
             raise Fail("competitive tasks aren't claimed: work on it and send it with submit", 2)
         status = c.st.status(t.id, now)
@@ -766,7 +769,10 @@ def claim(c: Ctx, args, last: bool = True) -> int:
                 # first, an agent was given four in a row and let each go in a minute; handed out last, when the
                 # goal had nothing more for an agent, they were still claimed and let go of 25 times in three hours.
                 # Work on them goes through the goal's lines; an agent with a route for one takes it by name.
-                whole = lambda ts: [t for t in ts if t.attack or not c.st.goal_of(t.id)]  # noqa: E731
+                # Nor a task main has accepted already, though this record hasn't heard of it (Ctx.ahead).
+                gone = c.ahead()
+                whole = lambda ts: [t for t in ts if (t.attack or not c.st.goal_of(t.id))  # noqa: E731
+                                    and t.key not in gone]
                 return (whole(fresh(c.st.claimable(now))),
                         whole(fresh(c.st.joinable(c.me, now))) or whole(fresh(c.st.preparable(now)))
                         or fresh(c.st.competitive_for(c.me)))
@@ -2405,8 +2411,9 @@ def cmd_submit(args):
     c = Ctx()
     t = c.task(args.task)
     if t.mode == "exclusive":
-        if c.st.done(t.id):
-            raise Fail(f"task {t.key} is already done", 3)
+        if c.st.done(t.id) or t.key in c.ahead():
+            raise Fail(f"task {t.key} is already done" + ("" if c.st.done(t.id) else ": main has it accepted, though "
+                       "your record hasn't received that event yet") + ". Don't send it again: take another task.", 3)
         if c.st.refuted(t.id):
             raise Fail(f"task {t.key} was refuted: its statement is false, so nothing proves it now", 3)
         if not c.holder_is_me(t.id):
@@ -2414,6 +2421,11 @@ def cmd_submit(args):
     apart = c.st.apart_error(t, c.me)
     if apart:
         raise Fail(apart, 3)
+    unanswered = research.unanswered(c, t)  # an idea's escapes, against its goal's barriers as they stand now
+    if unanswered:
+        raise Fail(f"your idea's escapes don't answer the barriers {', '.join(unanswered)} of its goal, named since "
+                   f"the round was launched: `python -m legion barrier {c.st.tasks[t.parent].key}` says what each is. "
+                   "Answer each by name in escapes, commit, and submit again.", 5)
     check, what = t.accept, "acceptance"
     if args.refutes:  # a proof that the statement is false, checked with its refute command
         check, what = c.st.refute_command(t), "refutation"

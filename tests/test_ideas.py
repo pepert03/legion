@@ -12,7 +12,8 @@ from legion.identity import Identity
 from test_research import CEL, goal, propose, round_of, why
 from test_state import ANA, BEA, BOSS
 
-ESC = "It builds an explicit object instead of bounding a moment, so the moment barrier doesn't apply to it."
+ESC = ("moments: it builds an explicit object instead of bounding second moments, so neither moment barrier "
+       "applies to it.")
 
 
 def finding(log, tid, line, text="Every second-moment bound loses a factor n.", who=CEL):
@@ -43,6 +44,9 @@ def test_a_goal_names_its_barriers_and_every_line_then_says_why_it_escapes_them(
     # From now on a line says which barrier it could fall into, and why it doesn't.
     propose(log, BEA, tid, "explicit", "An explicit construction", "Take the cubic residues mod p and check S4.")
     assert "escapes" in why(log) and "moments" in why(log)
+    propose(log, BEA, tid, "explicit", "An explicit construction", "Take the cubic residues mod p and check S4.",
+            escapes="It builds an explicit object, so no barrier of the kind listed applies to it at all.")
+    assert "BY NAME" in why(log)  # long enough, but answering no barrier by its name
     ok = propose(log, BEA, tid, "explicit", "An explicit construction", "Take the cubic residues mod p and check S4.",
                  escapes=ESC)
     st = log.state()
@@ -51,7 +55,7 @@ def test_a_goal_names_its_barriers_and_every_line_then_says_why_it_escapes_them(
     assert "BARRIERS" in R.map_text(st, t) and "near-disjoint pairs" in R.map_text(st, t)
     assert "--escapes" in R.propose_text(st, t, "bea", 0) and "near-disjoint" in R.propose_text(st, t, "bea", 0)
     spec = R.spec_for(st, t, [st.lines[ok["id"]]])
-    assert "WHY IT ESCAPES the goal's barriers: It builds an explicit object" in spec["lines"][0]["task"]
+    assert "WHY IT ESCAPES the goal's barriers: moments: it builds an explicit object" in spec["lines"][0]["task"]
     assert "barriers.json" in spec["synthesis"]
     assert R.map_data(st, t, 1000.0)["barriers"][0]["name"] == "moments"
     # One that turns out not to bar what it said is retired; a restatement keeps its name.
@@ -245,3 +249,72 @@ def test_the_digest_of_a_round_of_ideas_shows_each_idea_and_its_judgement():
 def test_the_exemplar_move_is_handed_out_and_says_how():
     assert "exemplar" in S.MOVES and "exemplar" in S.REFRAME and set(R.MOVE_TEXT) == set(S.MOVES)
     assert "legion sat" in R.MOVE_TEXT["exemplar"] and "computational exemplars" in R.FIELDS
+
+
+def test_an_idea_answers_each_barrier_by_name_at_launch_and_at_submit(tmp_path):
+    key = "f/r3-idea-entropy"
+    code = A.idea_contract(key, "out/idea.json", ["moments", "local-counts"])
+    cdir = tmp_path / S.contract_dir(key)
+    cdir.mkdir(parents=True)
+    (cdir / "test_idea.py").write_text(code, encoding="utf-8")
+    (tmp_path / "out").mkdir()
+    idea = {k: f"enough words about the {k} of it" for k in A.IDEA_KEYS}
+    for escapes, ok in (("It avoids moments since it counts nothing.", False),
+                        ("moments: it counts nothing. Local counts: it reads the whole tournament.", True)):
+        (tmp_path / "out" / "idea.json").write_text(json.dumps(dict(idea, escapes=escapes)), encoding="utf-8")
+        p = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(cdir), "-p", "test_*.py"],
+                           cwd=tmp_path, capture_output=True, text=True)
+        assert (p.returncode == 0) == ok, p.stderr[-600:]
+    # Barriers named after the launch: submit asks for them, live.
+    log, tid = goal()
+    for n in (1, 2):
+        round_of(log, tid, f"front-{n}", n)
+    log.add(ANA, "goal.barrier", task=tid, barrier="moments", statement="Second-moment bounds lose a factor n.")
+    st = log.state()
+    spec = R.idea_spec(st, st.tasks[tid], 1000.0)
+    assert spec["barriers"] == ["moments"]
+    _, pieces = A.plan(st, st.tasks[tid], spec, "ana")
+    assert "'moments'" in pieces[0]["contract"]["test_idea.py"]
+    for p in pieces:
+        log.add(ANA, "task.created", **p, split=True)
+    log.add(ANA, "goal.barrier", task=tid, barrier="flag-topology", statement="Flag complexes alone force nothing.")
+    st = log.state()
+    t = st.find_task(pieces[0]["key"])
+    d = tmp_path / t.zone[0]
+    d.mkdir(parents=True)
+    (d / A.IDEA_FILE).write_text(json.dumps(dict(idea, escapes="moments: it counts nothing at all here.")),
+                                 encoding="utf-8")
+    c = types.SimpleNamespace(st=st, repo=tmp_path)
+    assert R.unanswered(c, t) == ["flag-topology"]
+    (d / A.IDEA_FILE).write_text(json.dumps(dict(idea, escapes="moments: nothing counted. Flag topology: unused.")),
+                                 encoding="utf-8")
+    assert R.unanswered(c, t) == [] and R.unanswered(c, st.tasks[tid]) == []
+
+
+def test_a_record_missing_accepts_doesnt_hand_out_or_finalize_what_main_has(tmp_path, monkeypatch):
+    from legion import coordgit, integrator
+    repo = tmp_path / "r"
+    repo.mkdir()
+    g = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+    g("init", "-q")
+    g("config", "user.email", "x@y")
+    g("config", "user.name", "x")
+    g("commit", "-q", "--allow-empty", "-m", "start")
+    tip = g("rev-parse", "HEAD")
+    g("commit", "-q", "--allow-empty", "-m", "work on the check")
+    g("commit", "-q", "--allow-empty", "-m", "legion: f/r1-a-check (bea, patch 1234abcd)")
+    g("update-ref", "refs/legion/peers/aaaaaaaaaaaaaaaa-node1/main", "HEAD")
+    g("checkout", "-q", "-b", "fork", tip)
+    g("commit", "-q", "--allow-empty", "-m", "legion: f/r1-b (eve, patch 99999999)")
+    g("update-ref", "refs/legion/peers/bbbbbbbbbbbbbbbb-node2/main", "HEAD")
+    # Only trusted nodes' mains count, and only those ahead of this record's tip.
+    assert coordgit.accepted_ahead(repo, tip, {"aaaaaaaaaaaaaaaa"}) == {"f/r1-a-check"}
+    assert coordgit.accepted_ahead(repo, tip, {"cccccccccccccccc"}) == set()
+    assert coordgit.accepted_ahead(repo, g("rev-parse", "refs/legion/peers/aaaaaaaaaaaaaaaa-node1/main"),
+                                   {"aaaaaaaaaaaaaaaa"}) == set()
+    assert coordgit.accepted_ahead(repo, None, {"aaaaaaaaaaaaaaaa"}) == set()
+    # A finalizer whose record is behind finalizes nothing: every verdict it made would be refused.
+    said = []
+    c = types.SimpleNamespace(st=types.SimpleNamespace(policy={"mode": "open"}, trusted=lambda a: True),
+                              me="ed25519:aa", reload=lambda: None, ahead=lambda: {"f/r1-a-check"})
+    assert integrator.finalize(c, log=said.append) == 0 and "not finalizing" in said[0]

@@ -85,6 +85,17 @@ class Ctx:
     def reload(self) -> None:
         self.st = coordgit.state(self.repo)
 
+    def ahead(self) -> set[str]:
+        """The keys of the tasks main has accepted that this record doesn't know of yet (coordgit.accepted_ahead):
+        its log has a hole. Handed out, such a task was done again: in Erdős #902 agents whose record missed a
+        verifier's accepts for hours redid checks and syntheses already in main, and finalized patches on a main
+        the others had left, every verdict refused."""
+        if getattr(self, "_ahead_of", None) is not self.st:
+            st = self.st
+            prefixes = {a.split(":")[-1][:16] for a in st.names if a in st.integrators or st.trusted(a)}
+            self._ahead, self._ahead_of = coordgit.accepted_ahead(self.repo, st.main_tip, prefixes), st
+        return self._ahead
+
     strict = False  # the integrator sets it: a pass with a failed sync is retried, not run on stale state
 
     def sync(self) -> None:

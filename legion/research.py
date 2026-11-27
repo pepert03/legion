@@ -278,7 +278,8 @@ def idea_spec(st: S.State, parent: S.Task, now: float) -> dict:
         lines.append({"key": f"idea-{key}", "kind": "idea", "field": f, "field_text": FIELDS[f],
                       "title": f"a new approach from {f}", "task": FIELDS[f], "front": "ideas"})
     return {"goal": (f"{parent.key} ({parent.title}). " + (words or parent.title)),
-            "common": bars, "synthesis": IDEAS_SYNTHESIS.format(parent=parent.key, round="{round}"), "lines": lines}
+            "common": bars, "synthesis": IDEAS_SYNTHESIS.format(parent=parent.key, round="{round}"), "lines": lines,
+            "barriers": [b["barrier"] for b in st.barriers_for(parent.id)]}
 
 
 def launch_ideas(c: Ctx, parent: S.Task, now: float) -> str:
@@ -780,6 +781,19 @@ def assess(c: Ctx, goal: S.Task, t: S.Task, d: str) -> int:
     print(f"legion: round {t.attack.get('round', '')} recorded as {'having moved' if said['progress'] else 'not moving'} "
           f"{goal.key}.", flush=True)
     return 0
+
+
+def unanswered(c: Ctx, t: S.Task) -> list[str]:
+    """The barriers of an idea piece's goal its idea.json (in this clone) doesn't answer by name: those named after
+    its round was launched, which its contract can't know. [] for any other task."""
+    goal = c.st.tasks.get(t.parent)
+    if t.attack.get("kind") != "idea" or t.attack.get("role") != "line" or goal is None or not t.zone:
+        return []
+    idea = _load(c.repo, f"{t.zone[0].rstrip('/')}/{A.IDEA_FILE}")
+    if not isinstance(idea, dict) or not isinstance(idea.get("escapes"), str):
+        return []  # its contract says what is missing
+    names = [b["barrier"] for b in c.st.barriers_for(goal.id)]
+    return [n for n in names if n not in S.named(idea["escapes"], names)]
 
 
 def take_barriers(c: Ctx, goal: S.Task, d: str) -> int:
