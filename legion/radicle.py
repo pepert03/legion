@@ -41,7 +41,11 @@ class RadError(RuntimeError):
 def _cfg(repo, key: str) -> str | None:
     p = subprocess.run(["git", "config", "--get", key], cwd=repo, capture_output=True, text=True)
     if p.returncode:
-        return None
+        try:  # lost from the config (see coordgit.kept_section), or set by LEGION_SETTINGS
+            from . import coordgit
+            return " ".join(coordgit.setting(repo or ".", key)) or None
+        except Exception:  # noqa: BLE001 - not a clone: nothing set
+            return None
     return p.stdout.strip() or None
 
 

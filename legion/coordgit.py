@@ -11,6 +11,7 @@ import pickle
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -425,6 +426,45 @@ def git_dir(repo) -> Path:
         return Path(repo) / ".git"
 
 
+SECTION_COPY = "legion-settings.json"
+
+
+def kept_section(repo, found: dict[str, list[str]]) -> dict[str, list[str]]:
+    """The clone's legion.* settings, kept in a copy beside its config: a config that has them refreshes the copy;
+    one that lost them all reads them from it. On a machine whose harness wraps git, a wrapper deleted the [legion]
+    section at every `git config`, and the clone forgot how it is carried, its project's key and its relays."""
+    p = run(repo, "config", "--local", "--get-regexp", r"^legion\.")  # the clone's own: not the user's global ones
+    mine: dict[str, list[str]] = {}
+    for line in p.stdout.decode("utf-8", "replace").splitlines() if p.returncode == 0 else []:
+        name, _, value = line.partition(" ")
+        mine.setdefault(name, []).extend(value.split())
+    try:
+        path = common_dir(repo) / SECTION_COPY
+    except GitError:
+        return found
+    if mine:
+        try:
+            if not path.is_file() or json.loads(path.read_text(encoding="utf-8")) != mine:
+                path.write_text(json.dumps(mine, sort_keys=True), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+        return found
+    try:
+        copy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return found
+    if isinstance(copy, dict) and copy:
+        if not _warned.get(str(repo)):
+            _warned[str(repo)] = True
+            print(f"legion: this clone's git config has lost its [legion] section; legion uses the copy it kept "
+                  f"({path}). Something on this machine rewrites .git/config.", file=sys.stderr)
+        return {**found, **{k: list(v) for k, v in copy.items() if isinstance(v, list)}}
+    return found
+
+
+_warned: dict[str, bool] = {}
+
+
 def setting(repo, key: str) -> list[str]:
     """The values of a git setting of this clone. All of them are asked of git in one call, and again only when
     the clone's config file changes: how a clone is carried (legion.transport) was asked a dozen times a command,
@@ -443,7 +483,16 @@ def setting(repo, key: str) -> list[str]:
                 name, _, value = item.partition("\n")
                 if name:
                     found.setdefault(name, []).extend(value.split())
+        found = kept_section(repo, found)
         kept = _settings[str(repo)] = (stamp, found)
+    said = os.environ.get("LEGION_SETTINGS")
+    if said:  # LEGION_SETTINGS="legion.transport=radicle;legion.livekey=...": over what the config says
+        over = {}
+        for item in said.split(";"):
+            name, eq, value = item.partition("=")
+            if eq and name.strip():
+                over[name.strip().lower()] = value.split()
+        kept = (kept[0], {**kept[1], **over})
     # as git lists them: the section and the variable in lower case, what's between them as written
     section, _, rest = key.partition(".")
     between, _, variable = rest.rpartition(".")
