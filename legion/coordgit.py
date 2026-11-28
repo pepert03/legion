@@ -322,7 +322,13 @@ def _extended(repo, st, pairs: list[tuple[str, dict]]):
 
 def _commit(repo, files: dict[str, str], parents: list[str], message: str, env) -> str:
     lines = "".join(f"100644 blob {sha}\t{name}\n" for name, sha in sorted(files.items()))
-    events_tree = git(repo, "mktree", input=lines.encode())
+    try:
+        events_tree = git(repo, "mktree", input=lines.encode())
+    except GitError:
+        # An event file of the log whose object this clone lost (an interrupted fetch, a disk): the tree as it
+        # was, with its hole. Refused, one lost object stopped every event coming from the relays, and every one
+        # the agent recorded (in a muse clone: "mktree: ... 00017371-6c6c694fcf19a1cf.json").
+        events_tree = git(repo, "mktree", "--missing", input=lines.encode())
     root = git(repo, "mktree", input=f"040000 tree {events_tree}\tevents\n".encode())
     args = ["commit-tree", root]
     for p in parents:
@@ -335,6 +341,7 @@ def add_events(repo, ident: Identity, events: list[dict]) -> int:
     commit. How many it didn't have."""
     old = rev(repo, REF)
     files = list_files(repo, old)
+    heal_blobs(repo, files, [ev for ev in events if E.filename(ev) in files])
     new = [ev for ev in events if E.filename(ev) not in files]
     if not new:
         return 0
@@ -353,6 +360,21 @@ def add_events(repo, ident: Identity, events: list[dict]) -> int:
     git(repo, "update-ref", REF, commit, old or ZERO)
     git(repo, "update-ref", PUB + "coord", commit)
     return len(new)
+
+
+def heal_blobs(repo, files: dict[str, str], events: list[dict]) -> int:
+    """Write again the objects of the log's events this clone lost, from copies of them (the relays bring them):
+    an event is the same bytes everywhere, so its object is too. How many it wrote."""
+    if not events:
+        return 0
+    want = {files[E.filename(ev)]: ev for ev in events}
+    p = run(repo, "cat-file", "--batch-check", input="".join(f"{sha}\n" for sha in want).encode())
+    lost = [line.split()[0] for line in p.stdout.decode("utf-8", "replace").splitlines() if line.endswith(" missing")]
+    n = 0
+    for sha in lost:
+        if git(repo, "hash-object", "-w", "--stdin", input=E.encode(want[sha])) == sha:
+            n += 1
+    return n
 
 
 def take_tree(repo, ident: Identity, commit: str, ok) -> list[dict]:

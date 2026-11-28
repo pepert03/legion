@@ -26,3 +26,23 @@ def test_settings_lost_from_the_config_come_from_the_copy_and_the_environment_ov
     g("config", "legion.livekey", "def456")
     assert coordgit.setting(tmp_path, "legion.livekey") == ["def456"]
     assert coordgit.setting(tmp_path, "legion.transport") == []
+
+
+def test_a_lost_event_object_neither_stops_the_log_nor_stays_lost_when_the_relays_bring_it(tmp_path):
+    import os
+    from legion import events as E
+    from legion.identity import Identity
+    g = lambda *a: subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True)  # noqa: E731
+    g("init", "-q")
+    ana = Identity.generate("ana")
+    first = E.create(ana, "agent.joined", 1)
+    second = E.create(ana, "agent.joined", 2)
+    assert coordgit.add_events(tmp_path, ana, [first]) == 1
+    sha = coordgit.list_files(tmp_path, coordgit.rev(tmp_path, coordgit.REF))[E.filename(first)]
+    obj = tmp_path / ".git" / "objects" / sha[:2] / sha[2:]
+    os.chmod(obj, 0o644)
+    obj.unlink()  # the clone lost it
+    assert coordgit.add_events(tmp_path, ana, [second]) == 1  # the log goes on, hole and all
+    assert coordgit.add_events(tmp_path, ana, [first, second]) == 0  # the relays bring it again: written back
+    p = subprocess.run(["git", "cat-file", "-e", sha], cwd=tmp_path)
+    assert p.returncode == 0
